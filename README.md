@@ -1,10 +1,10 @@
 # Ordo
 
 A task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
-Every task runs inside a Podman container.
+Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
-**Status:** Go development infrastructure and a help-only CLI scaffold are implemented.
-Scheduling, workers, and the web UI are still planned.
+**Status:** Go/Nix tooling and a local, CPU-only single-task runner are implemented.
+Distributed scheduling, worker agents, transfers, GPU allocation, and the web UI are still planned.
 
 ## Direction
 
@@ -60,6 +60,37 @@ Exclusive cores and GPUs do not isolate shared caches, memory bandwidth, or unre
   Workers retain execution state and results locally, then reconcile with the server before retries or downstream scheduling.
 - Support infrastructure-failure retries and user-defined task retry policies, with bounded attempts.
   A disconnect alone is not proof that a task failed.
+
+## Run a local task
+
+Load an image from your evaluation's Nix flake, then use the image reference printed by `copyToPodman`:
+
+```sh
+nix run /path/to/evaluation#image.copyToPodman
+nix run . -- run --image evaluation:BUILD_TAG \
+  --cpus 0,1 --memory-mib 512 --output ./run-001
+```
+
+Ordo resolves the local image reference to an immutable image ID and never pulls from a registry.
+The image's ENTRYPOINT/CMD runs by default; trailing `-- COMMAND ARGS...` replaces CMD while preserving ENTRYPOINT, without invoking a host shell.
+
+- Requires local Linux, rootless Podman, and cgroup v2 with delegated `cpuset` and `memory` controllers; unsupported hosts fail preflight.
+- Pins logical CPU IDs and limits memory with swap disabled.
+  This is **not yet exclusive CPU reservation** across runs or unrelated host processes.
+- The output directory must not exist.
+  `run.json` records the request, image/container identity, timestamps, exit status, and infrastructure errors; `stdout.log` and `stderr.log` are collected after exit.
+- Removes the container only after logs and final metadata have been saved.
+  On interruption or collection failure, it is retained and **may still be running**; use `container_name` from `run.json` with `podman inspect`, `podman logs`, or `podman stop`.
+- Only logs and metadata are exported; container filesystem changes are discarded on cleanup.
+  Networking, file mounts/artifact export, GPUs, retries, and automatic reconnection are not included in this slice.
+
+Task exit codes are propagated; CLI/infrastructure errors return 2 and interruption returns 130.
+For an opt-in live test, use a preloaded nix2container image whose default command exits successfully:
+
+```sh
+ORDO_TEST_IMAGE=evaluation:BUILD_TAG ORDO_TEST_CPUS=0 \
+  go test -v ./internal/task -run TestPodmanIntegration
+```
 
 ## Development
 
