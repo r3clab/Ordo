@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,6 +68,11 @@ func run(ctx context.Context, req Request, podman command) error {
 	if err := os.Mkdir(outputDir, 0o700); err != nil {
 		return fmt.Errorf("create output directory (must not exist): %w", err)
 	}
+	lock, err := lockRun(outputDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
 	r := record{
 		Request:       req,
 		ContainerName: "ordo-" + strings.ToLower(rand.Text()),
@@ -78,16 +82,23 @@ func run(ctx context.Context, req Request, podman command) error {
 	if err := saveRecord(&r); err != nil {
 		return err
 	}
-	if err := execute(ctx, &r, podman); err != nil {
-		r.State = "error"
-		if errors.Is(err, context.Canceled) {
-			r.State = "interrupted"
+	return outcome(&r, execute(ctx, &r, podman))
+}
+
+func outcome(r *record, err error) error {
+	if err != nil {
+		// Finished is the durable results marker, even if subsequent cleanup fails.
+		if r.State != "finished" {
+			r.State = "error"
+			if errors.Is(err, context.Canceled) {
+				r.State = "interrupted"
+			}
 		}
 		r.Error = err.Error()
-		return fmt.Errorf("run %s (container %s): %w", outputDir, r.ContainerName, errors.Join(err, saveRecord(&r)))
+		return fmt.Errorf("run %s (container %s): %w", r.Request.OutputDir, r.ContainerName, errors.Join(err, saveRecord(r)))
 	}
 	if *r.ExitCode != 0 {
-		return &ExitError{Code: *r.ExitCode, OutputDir: outputDir}
+		return &ExitError{Code: *r.ExitCode, OutputDir: r.Request.OutputDir}
 	}
 	return nil
 }
@@ -139,7 +150,7 @@ func execute(ctx context.Context, r *record, podman command) error {
 		return errors.New("expected exactly one local image")
 	}
 	imageID := strings.TrimPrefix(images[0].ID, "sha256:")
-	if decoded, err := hex.DecodeString(imageID); err != nil || len(decoded) != 32 {
+	if !validID(imageID) {
 		return errors.New("image inspection did not return a SHA-256 image ID")
 	}
 	r.ImageID = "sha256:" + imageID
@@ -151,6 +162,7 @@ func execute(ctx context.Context, r *record, podman command) error {
 	// shortcut: CPU IDs are pinned, not reserved; add reservations with worker scheduling.
 	args := []string{
 		"run", "--detach", "--pull=never", "--name", r.ContainerName,
+		"--label", runLabel + "=" + r.ContainerName,
 		"--cpuset-cpus", r.Request.CPUs, "--memory", memory, "--memory-swap", memory,
 		"--network=none", "--image-volume=ignore", "--log-driver=k8s-file",
 		"--", r.ImageID,
@@ -160,35 +172,31 @@ func execute(ctx context.Context, r *record, podman command) error {
 	if err != nil {
 		return err
 	}
-	r.ContainerID = strings.TrimSpace(string(containerID))
+	id := strings.TrimSpace(string(containerID))
+	if !validID(id) {
+		return errors.New("container creation did not return a valid ID; retain the run directory for recovery")
+	}
+	r.ContainerID = id
 	r.State = "running"
 	if err := saveRecord(r); err != nil {
 		return err
 	}
 
-	if _, err := podman.output(ctx, "wait", "--", r.ContainerName); err != nil {
+	return complete(ctx, r, podman)
+}
+
+func complete(ctx context.Context, r *record, podman command) error {
+	if _, err := podman.output(ctx, "wait", "--", r.ContainerID); err != nil {
 		return err
 	}
-	inspection, err := podman.output(ctx, "container", "inspect", "--format=json", "--", r.ContainerName)
+	container, err := podman.inspectOwned(ctx, r, r.ContainerID)
 	if err != nil {
 		return err
 	}
-	var containers []struct {
-		State struct {
-			Status     string
-			ExitCode   *int
-			OOMKilled  bool
-			StartedAt  time.Time
-			FinishedAt time.Time
-		}
-	}
-	if err := json.Unmarshal(inspection, &containers); err != nil {
-		return fmt.Errorf("decode container inspection: %w", err)
-	}
-	if len(containers) != 1 || containers[0].State.Status != "exited" {
+	if container.State.Status != "exited" {
 		return errors.New("container has not exited; retaining it for inspection")
 	}
-	state := containers[0].State
+	state := container.State
 	if state.ExitCode == nil || *state.ExitCode < 0 || *state.ExitCode > 255 {
 		return errors.New("container inspection did not return a valid exit code")
 	}
@@ -200,39 +208,52 @@ func execute(ctx context.Context, r *record, podman command) error {
 		return err
 	}
 	r.State = "finished"
+	r.Error = ""
 	if err := saveRecord(r); err != nil {
 		return err
 	}
+	return cleanup(ctx, r, podman)
+}
 
+func cleanup(ctx context.Context, r *record, podman command) error {
 	// Keep the container unless its logs and final metadata have reached disk.
-	if _, err := podman.output(ctx, "rm", "--", r.ContainerName); err != nil {
+	if _, err := podman.output(ctx, "rm", "--", r.ContainerID); err != nil {
 		return err
 	}
 	r.ContainerRemoved = true
+	r.Error = ""
 	return saveRecord(r)
 }
 
-func checkHost(data []byte) error {
-	var info struct {
-		Host struct {
-			OS                string
-			ServiceIsRemote   bool
-			CgroupVersion     string
-			CgroupControllers []string
-			Security          struct{ Rootless bool }
-		}
-	}
+type podmanHost struct {
+	OS                string
+	ServiceIsRemote   bool
+	CgroupVersion     string
+	CgroupControllers []string
+	Security          struct{ Rootless bool }
+}
+
+func readLocalHost(data []byte) (podmanHost, error) {
+	var info struct{ Host podmanHost }
 	if err := json.Unmarshal(data, &info); err != nil {
-		return fmt.Errorf("decode Podman info: %w", err)
+		return podmanHost{}, fmt.Errorf("decode Podman info: %w", err)
 	}
 	if info.Host.OS != "linux" || info.Host.ServiceIsRemote || !info.Host.Security.Rootless {
-		return errors.New("execution requires local, rootless Podman on Linux")
+		return podmanHost{}, errors.New("execution requires local, rootless Podman on Linux")
 	}
-	if info.Host.CgroupVersion != "v2" {
+	return info.Host, nil
+}
+
+func checkHost(data []byte) error {
+	host, err := readLocalHost(data)
+	if err != nil {
+		return err
+	}
+	if host.CgroupVersion != "v2" {
 		return errors.New("execution requires cgroup v2 for rootless resource limits")
 	}
 	for _, controller := range []string{"cpuset", "memory"} {
-		if !slices.Contains(info.Host.CgroupControllers, controller) {
+		if !slices.Contains(host.CgroupControllers, controller) {
 			return fmt.Errorf("missing delegated %s cgroup controller; configure delegation for the worker's user session", controller)
 		}
 	}
@@ -261,16 +282,34 @@ func (podman command) output(ctx context.Context, args ...string) ([]byte, error
 }
 
 func collectLogs(ctx context.Context, r *record, podman command) error {
-	stdout, err := os.OpenFile(filepath.Join(r.Request.OutputDir, "stdout.log"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	dir := r.Request.OutputDir
+	for _, name := range []string{"stdout.log", "stderr.log"} {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing to replace non-regular %s", name)
+		}
+	}
+	stdout, err := os.CreateTemp(dir, ".stdout-*")
 	if err != nil {
 		return err
 	}
-	stderr, err := os.OpenFile(filepath.Join(r.Request.OutputDir, "stderr.log"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	defer func() { _ = os.Remove(stdout.Name()) }()
+	stderr, err := os.CreateTemp(dir, ".stderr-*")
 	if err != nil {
 		return errors.Join(err, stdout.Close())
 	}
-	err = podman(ctx, stdout, stderr, "logs", "--", r.ContainerName)
-	return errors.Join(err, stdout.Sync(), stderr.Sync(), stdout.Close(), stderr.Close())
+	defer func() { _ = os.Remove(stderr.Name()) }()
+	err = podman(ctx, stdout, stderr, "logs", "--", r.ContainerID)
+	if err := errors.Join(err, stdout.Sync(), stderr.Sync(), stdout.Close(), stderr.Close()); err != nil {
+		return err
+	}
+	if err := os.Rename(stdout.Name(), filepath.Join(dir, "stdout.log")); err != nil {
+		return err
+	}
+	return os.Rename(stderr.Name(), filepath.Join(dir, "stderr.log"))
 }
 
 func saveRecord(r *record) error {

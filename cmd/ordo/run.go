@@ -18,7 +18,8 @@ DIR must not exist. Results are saved as run.json, stdout.log, and stderr.log.
 Trailing arguments use Podman's ENTRYPOINT/CMD semantics; omit them to use image defaults.
 No registry pulls, networking, GPU allocation, or file artifact export.
 On interruption or collection failure the container is retained, possibly running.
-Use container_name in run.json with podman inspect, logs, or stop to manage it.`
+Use ordo recover --output DIR to collect a retained task, or container_name in run.json
+with podman inspect, logs, or stop to manage it manually.`
 
 func runTask(ctx context.Context, args []string, output io.Writer) error {
 	var req task.Request

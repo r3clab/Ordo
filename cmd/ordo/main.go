@@ -37,12 +37,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	if err == nil && flags.NArg() != 0 {
-		if flags.Arg(0) == "run" {
+		switch flags.Arg(0) {
+		case "run":
 			return runTask(ctx, flags.Args()[1:], output)
+		case "recover":
+			return recoverTask(ctx, flags.Args()[1:], output)
 		}
 		return fmt.Errorf("unknown command %q", flags.Arg(0))
 	}
 
-	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run    Run one local task in rootless Podman (run --help for options)\n\nDistributed scheduling is not implemented yet.")
+	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run      Run one local task in rootless Podman (run --help for options)\n  recover  Recover a retained local task (recover --help for options)\n\nDistributed scheduling is not implemented yet.")
 	return err
 }

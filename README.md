@@ -3,7 +3,7 @@
 A task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
-**Status:** Go/Nix tooling and a local, CPU-only single-task runner are implemented.
+**Status:** Go/Nix tooling, a local CPU-only single-task runner, and explicit recovery of retained runs are implemented.
 Distributed scheduling, worker agents, transfers, GPU allocation, and the web UI are still planned.
 
 ## Direction
@@ -80,7 +80,7 @@ The image's ENTRYPOINT/CMD runs by default; trailing `-- COMMAND ARGS...` replac
 - The output directory must not exist.
   `run.json` records the request, image/container identity, timestamps, exit status, and infrastructure errors; `stdout.log` and `stderr.log` are collected after exit.
 - Removes the container only after logs and final metadata have been saved.
-  On interruption or collection failure, it is retained and **may still be running**; use `container_name` from `run.json` with `podman inspect`, `podman logs`, or `podman stop`.
+  On interruption or collection failure, it is retained and **may still be running**; use `ordo recover --output DIR` to collect it, or `container_name` from `run.json` with `podman inspect`, `podman logs`, or `podman stop` for manual management.
 - Only logs and metadata are exported; container filesystem changes are discarded on cleanup.
   Networking, file mounts/artifact export, GPUs, retries, and automatic reconnection are not included in this slice.
 
@@ -91,6 +91,33 @@ For an opt-in live test, use a preloaded nix2container image whose default comma
 ORDO_TEST_IMAGE=evaluation:BUILD_TAG ORDO_TEST_CPUS=0 \
   go test -v ./internal/task -run TestPodmanIntegration
 ```
+
+## Recover a retained local task
+
+On the same host, as the same user and using the same local Podman storage:
+
+```sh
+nix run . -- recover --output ./run-001
+```
+
+Recovery never creates, starts, restarts, or retries a task.
+It verifies the saved container and image identity, waits if the container is still running, and uses the same collection and cleanup path as `run`.
+If launch was interrupted before the container ID was saved, an Ordo container label proves ownership; older unlabeled containers without a saved ID require manual inspection.
+
+- Logs are retrieved into temporary files and synced before publication; each destination is replaced atomically.
+  Retrieval failures leave previous logs untouched.
+  The container is retained until both logs and final result metadata are saved.
+- A durable `finished` record marks saved results independently of cleanup errors.
+  Recovery can retry cleanup or reconcile removal that succeeded before its metadata update.
+- Repeating recovery after successful cleanup returns the saved task exit code without contacting Podman.
+- Missing containers without committed results, inconsistent metadata, and unsupported container states cause errors, not automatic reruns.
+  Finished records must still have their saved log files.
+- An advisory lock serializes Ordo processes using the same local run directory; it is released when the process exits, including crashes.
+  Do not delete `.lock` or modify the directory while Ordo is using it.
+  Stop the original CLI before recovering a run from an older Ordo version that did not acquire this lock.
+
+Recovery does not require resource controllers to remain delegated because it makes no new allocation.
+It is explicit, local reconciliation—not an SSH worker, automatic reconnect, or retry policy.
 
 ## Development
 

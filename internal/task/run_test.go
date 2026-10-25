@@ -28,6 +28,8 @@ type fakePodman struct {
 	image      string
 	inspection string
 	onCall     func([]string)
+	name       string
+	missing    bool
 }
 
 func (p *fakePodman) command(_ context.Context, stdout, stderr io.Writer, args ...string) error {
@@ -54,11 +56,18 @@ func (p *fakePodman) command(_ context.Context, stdout, stderr io.Writer, args .
 			text = p.image
 		}
 	case "run":
+		p.name = args[slices.Index(args, "--name")+1]
 		text = strings.Repeat("b", 64)
 	case "wait":
 		text = fmt.Sprint(p.exitCode)
 	case "container":
-		text = fmt.Sprintf(`[{"State":{"Status":"exited","ExitCode":%d,"StartedAt":"2026-01-01T00:00:00Z","FinishedAt":"2026-01-01T00:00:01Z"}}]`, p.exitCode)
+		if args[1] == "exists" {
+			if p.missing {
+				return commandExit(1)
+			}
+			return nil
+		}
+		text = p.containerJSON("exited")
 		if p.inspection != "" {
 			text = p.inspection
 		}
@@ -72,6 +81,16 @@ func (p *fakePodman) command(_ context.Context, stdout, stderr io.Writer, args .
 	}
 	_, err := io.WriteString(stdout, text)
 	return err
+}
+
+type commandExit int
+
+func (e commandExit) Error() string { return fmt.Sprintf("command exited with status %d", e) }
+func (e commandExit) ExitCode() int { return int(e) }
+
+func (p *fakePodman) containerJSON(status string) string {
+	return fmt.Sprintf(`[{"Id":%q,"Name":%q,"Image":%q,"Config":{"Labels":{%q:%q}},"State":{"Status":%q,"ExitCode":%d,"StartedAt":"2026-01-01T00:00:00Z","FinishedAt":"2026-01-01T00:00:01Z"}}]`,
+		strings.Repeat("b", 64), p.name, testImageID, runLabel, p.name, status, p.exitCode)
 }
 
 func (p *fakePodman) called(name string) bool {
@@ -111,6 +130,7 @@ func TestRunCollectsBeforeRemovingContainer(t *testing.T) {
 					}
 					expected := []string{
 						"run", "--detach", "--pull=never", "--name", r.ContainerName,
+						"--label", "io.r3clab.ordo.run=" + r.ContainerName,
 						"--cpuset-cpus", req.CPUs, "--memory", "134217728", "--memory-swap", "134217728",
 						"--network=none", "--image-volume=ignore", "--log-driver=k8s-file",
 						"--", "sha256:" + testImageID,
@@ -167,7 +187,11 @@ func TestRunRetainsContainerOnInfrastructureFailure(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 			r := readRecord(t, req.OutputDir)
-			if r.State != "error" || r.Error == "" || r.ContainerRemoved {
+			wantState := "error"
+			if stage == "rm" {
+				wantState = "finished"
+			}
+			if r.State != wantState || r.Error == "" || r.ContainerRemoved {
 				t.Fatalf("invalid failure record: %+v", r)
 			}
 			if stage != "rm" && p.called("rm") {
@@ -310,11 +334,23 @@ func TestMalformedPodmanResponses(t *testing.T) {
 			t.Fatalf("invalid image inspection accepted: %s", image)
 		}
 	}
-	for _, inspection := range []string{"[]", "not JSON", `[{"State":{"Status":"running"}}]`, `[{"State":{"Status":"exited"}}]`, `[{"State":{"Status":"exited","ExitCode":-1}}]`, `[{"State":{"Status":"exited","ExitCode":256}}]`} {
+	for _, mutate := range []func(string) string{
+		func(string) string { return "[]" },
+		func(string) string { return "not JSON" },
+		func(s string) string { return strings.Replace(s, `"exited"`, `"running"`, 1) },
+		func(s string) string { return strings.Replace(s, `"ExitCode":0,`, "", 1) },
+		func(s string) string { return strings.Replace(s, `"ExitCode":0`, `"ExitCode":-1`, 1) },
+		func(s string) string { return strings.Replace(s, `"ExitCode":0`, `"ExitCode":256`, 1) },
+	} {
 		req := request(t)
-		p := fakePodman{inspection: inspection}
+		p := fakePodman{}
+		p.onCall = func(args []string) {
+			if args[0] == "container" {
+				p.inspection = mutate(p.containerJSON("exited"))
+			}
+		}
 		if err := run(context.Background(), req, p.command); err == nil || p.called("rm") {
-			t.Fatalf("invalid container inspection accepted: %s", inspection)
+			t.Fatalf("invalid container inspection accepted: %s", p.inspection)
 		}
 	}
 }
@@ -325,20 +361,38 @@ func TestPodmanIntegration(t *testing.T) {
 	if image == "" || cpus == "" {
 		t.Skip("set ORDO_TEST_IMAGE and ORDO_TEST_CPUS to run a local nix2container image")
 	}
-	dir, err := os.MkdirTemp("", "ordo-integration-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := Request{Image: image, CPUs: cpus, MemoryMiB: 128, OutputDir: filepath.Join(dir, "run")}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := Run(ctx, req); err != nil {
-		t.Fatalf("%v; retained results at %s (container may still be running)", err, req.OutputDir)
-	}
-	if r := readRecord(t, req.OutputDir); !r.ContainerRemoved || r.ExitCode == nil || *r.ExitCode != 0 {
-		t.Fatalf("unexpected result at %s: %+v", req.OutputDir, r)
-	}
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatal(err)
+	for _, mode := range []string{"run", "recover"} {
+		t.Run(mode, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "ordo-integration-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := Request{Image: image, CPUs: cpus, MemoryMiB: 128, OutputDir: filepath.Join(dir, "run")}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if mode == "recover" {
+				interrupted := func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+					if args[0] == "wait" {
+						return context.Canceled
+					}
+					return execPodman(ctx, stdout, stderr, args...)
+				}
+				if err := run(ctx, req, interrupted); !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected interruption, got %v; retained results at %s", err, req.OutputDir)
+				}
+				err = Recover(ctx, req.OutputDir)
+			} else {
+				err = Run(ctx, req)
+			}
+			if err != nil {
+				t.Fatalf("%v; retained results at %s (container may still be running)", err, req.OutputDir)
+			}
+			if r := readRecord(t, req.OutputDir); !r.ContainerRemoved || r.ExitCode == nil || *r.ExitCode != 0 {
+				t.Fatalf("unexpected result at %s: %+v", req.OutputDir, r)
+			}
+			if err := os.RemoveAll(dir); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
