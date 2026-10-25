@@ -3,11 +3,12 @@
 Approved: embedded SQLite, JSON workflows, rootless Podman tasks built with nix2container.
 Keep the existing local CLI and run records compatible.
 Implement real paths, not placeholder endpoints.
+Keep each acceptance item in its own buildable commit where possible; mark it complete only after its checks pass.
 
 ## Acceptance gates
 
 - [x] Live local execution and interrupted-run recovery on vegeta and goku (M1).
-- [ ] Persistent agents behind private SSH-forwarded Unix sockets; durable, idempotent attempt submission.
+- [x] Persistent agents behind private SSH-forwarded Unix sockets; durable, idempotent attempt submission (M2).
 - [x] Exclusive physical-core allocations and aggregate memory accounting, restored before new work after restart (M2).
 - [ ] Exclusive GPU allocations and recovery.
 - [ ] Immutable image transfer, content-addressed input caching, read-only inputs, and output collection.

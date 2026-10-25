@@ -3,9 +3,9 @@
 A task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
-**Status:** Local CPU-only execution/recovery and the worker agent core are implemented.
+**Status:** Local CPU-only execution/recovery and persistent SSH worker agents are implemented.
 Agents provide durable, idempotent attempts, exclusive physical cores, and aggregate memory accounting.
-SSH bootstrap/control, the server scheduler, transfers, workflows, GPU allocation, and web UI are still planned.
+The server scheduler, transfers, workflows, GPU allocation, and web UI are still planned.
 
 ## Direction
 
@@ -120,22 +120,58 @@ If launch was interrupted before the container ID was saved, an Ordo container l
 Recovery does not require resource controllers to remain delegated because it makes no new allocation.
 It is explicit, local reconciliation—not an SSH worker, automatic reconnect, or retry policy.
 
-## Worker agent core
+## Managed workers
 
-`ordo agent --state DIR --cpus CPU_IDS --memory-mib MIB` serves a private mode-0600 Unix socket at `DIR/agent.sock` on Linux.
-The allowed CPU pool must contain every online SMT sibling of each selected physical core.
-Requests count physical cores; memory is an aggregate admission budget with per-container limits and no swap.
-Images must already be loaded, and requests use immutable SHA-256 image IDs.
+Workers require Linux, rootless Podman with delegated cgroup v2 controls, OpenSSH, a user systemd manager, and existing user lingering.
+`worker start` uploads a checksum-verified, content-addressed static Linux executable and starts a transient user service; it does not enable a permanent service or change host configuration.
+Use a worker-local filesystem for state, not a shared network filesystem.
 
-- SQLite commits attempts and reservations before launch; restart restores ownership before admission.
-- Repeating an attempt ID with the same specification is idempotent; changing its specification conflicts.
-- Unknown outcomes remain blocked with resources held, never silently retried.
-- One agent may run per host/user. `/run/user/UID/ordo-worker.lock` binds unfinished work to the original state directory, including while the agent is stopped. Never delete the lock to bypass reconciliation.
-- Podman calls launched from a systemd service use separate transient runtime scopes, so container monitors and FUSE mounts survive agent service cleanup.
-- Inspectable results and logs remain in `DIR/runs/ATTEMPT`; stopping the agent does not cancel task containers.
-- Standalone runs and unrelated host processes are outside the agent's exclusivity guarantee.
+```sh
+# Replace the host, remote path, and logical CPU pool for your worker's topology.
+ordo worker start --host WORKER --state /home/worker/.local/state/ordo \
+  --cpus 0,1,64,65 --memory-mib 512 --binary ./ordo-linux-amd64
 
-SSH deployment and a client for this private agent API are the next acceptance item.
+# The immutable image must already be loaded on that worker; transfer is not implemented yet.
+ordo worker submit --host WORKER --state /home/worker/.local/state/ordo \
+  --cpus 0,1,64,65 --memory-mib 512 \
+  --id evaluation-001 --image sha256:IMAGE_ID --cores 1 --task-memory-mib 256
+
+ordo worker get --host WORKER --state /home/worker/.local/state/ordo \
+  --cpus 0,1,64,65 --memory-mib 512 --id evaluation-001
+```
+
+- The CPU pool must contain every online SMT sibling of each selected physical core.
+  Requests count **physical cores**, not logical CPUs.
+- Agent-managed attempts cannot overlap physical cores; their memory limits must fit the configured aggregate budget.
+  Standalone runs and unrelated host processes are outside this guarantee.
+- An attempt ID identifies one immutable specification.
+  Repeating the same submission returns that attempt; changing its specification is rejected.
+- SQLite commits the attempt and its reservation before launch.
+  Restart restores reservations before admission.
+  Unknown outcomes remain blocked with resources held, never silently retried.
+- The agent owns a private mode-0600 Unix socket, reached through a separately owned SSH tunnel.
+  Closing the client/tunnel does not cancel work.
+- Podman operations launched from a systemd service use independent transient runtime scopes.
+  Container monitors and FUSE mounts survive agent service cleanup; the service retains `KillMode=control-group`.
+- Only one agent may run per host/user.
+  `/run/user/UID/ordo-worker.lock` also binds unfinished attempts to their original state directory across agent stops.
+  Never delete this lock or the state directory to bypass reconciliation.
+  A clean stop with no unfinished attempts clears the binding, but retains the lock inode.
+- Reconnect reuses the service and state.
+  A different executable requires explicitly stopping the old service before bootstrap; stopped agents leave tasks alive.
+  Transient services need bootstrap after a host reboot.
+- Worker commands return JSON.
+  `worker get` reports status rather than propagating the task exit code.
+  Logs and inspectable `runs/ATTEMPT/run.json` remain on the worker until transfer/output collection is implemented.
+
+The Nix package builds with `CGO_ENABLED=0`.
+For a macOS controller or different worker architecture, supply a cross-compiled Linux artifact:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ordo-linux-amd64 ./cmd/ordo
+```
+
+The opt-in [worker smoke test](tests/README.md) checks real crash/stop/reconnect behavior without enabling services permanently.
 
 ## Development
 
