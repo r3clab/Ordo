@@ -6,9 +6,10 @@ Implement real paths, not placeholder endpoints.
 
 ## Acceptance gates
 
-- [ ] Live local execution and interrupted-run recovery on vegeta and goku.
+- [x] Live local execution and interrupted-run recovery on vegeta and goku (M1).
 - [ ] Persistent agents behind private SSH-forwarded Unix sockets; durable, idempotent attempt submission.
-- [ ] Exclusive physical-core/GPU allocations and aggregate memory accounting, restored before new work after restart.
+- [x] Exclusive physical-core allocations and aggregate memory accounting, restored before new work after restart (M2).
+- [ ] Exclusive GPU allocations and recovery.
 - [ ] Immutable image transfer, content-addressed input caching, read-only inputs, and output collection.
 - [ ] Durable server queue and reconciliation after server/tunnel failure; no retries merely because a worker disconnects.
 - [ ] JSON workflow validation, dependency readiness, parameter expansion, bounded infrastructure/task retries, timeout, cancellation.
@@ -30,6 +31,8 @@ Vegeta currently reports no registered NVIDIA CDI devices; investigate a private
 - SQLite is embedded; no database service.
   Local run.json remains an inspectable result record.
 - Agent control uses mode-0600 Unix sockets under private directories, forwarded through SSH.
+- One agent per host/user; unfinished attempts bind that host to their existing state directory.
+- Agent services retain whole-service cleanup; independent transient runtime scopes keep Podman monitors and FUSE helpers alive across agent restarts.
 - Worker state/reservations are authoritative for local execution; server state retains every attempt.
 - Images are preloaded from nix2container on the server, resolved to immutable IDs, and copied to workers; no registry fallback.
 - Inputs are immutable snapshots; outputs and retries have separate attempt directories.

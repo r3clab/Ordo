@@ -39,6 +39,6 @@ func runTask(ctx context.Context, args []string, output io.Writer) error {
 	if err := task.Run(ctx, req); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(output, "Results saved to %s\n", req.OutputDir)
+	_, err := fmt.Fprintf(output, "Results saved to %s (unmanaged CPU pinning; no exclusive reservation)\n", req.OutputDir)
 	return err
 }

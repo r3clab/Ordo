@@ -19,11 +19,12 @@ import (
 )
 
 type Request struct {
-	Image     string   `json:"image"`
-	CPUs      string   `json:"cpus"`
-	MemoryMiB int64    `json:"memory_mib"`
-	Args      []string `json:"args,omitempty"`
-	OutputDir string   `json:"output_dir"`
+	Image         string   `json:"image"`
+	CPUs          string   `json:"cpus"`
+	MemoryMiB     int64    `json:"memory_mib"`
+	Args          []string `json:"args,omitempty"`
+	OutputDir     string   `json:"output_dir"`
+	ReservationID string   `json:"reservation_id,omitempty"`
 }
 
 type ExitError struct {
@@ -48,6 +49,7 @@ type record struct {
 	OOMKilled        bool      `json:"oom_killed"`
 	ContainerRemoved bool      `json:"container_removed"`
 	Error            string    `json:"error,omitempty"`
+	AllocationMode   string    `json:"allocation_mode,omitempty"`
 }
 
 type command func(context.Context, io.Writer, io.Writer, ...string) error
@@ -74,10 +76,14 @@ func run(ctx context.Context, req Request, podman command) error {
 	}
 	defer func() { _ = lock.Close() }()
 	r := record{
-		Request:       req,
-		ContainerName: "ordo-" + strings.ToLower(rand.Text()),
-		State:         "preparing",
-		CreatedAt:     time.Now().UTC(),
+		Request:        req,
+		ContainerName:  "ordo-" + strings.ToLower(rand.Text()),
+		State:          "preparing",
+		CreatedAt:      time.Now().UTC(),
+		AllocationMode: "unmanaged",
+	}
+	if req.ReservationID != "" {
+		r.AllocationMode = "agent"
 	}
 	if err := saveRecord(&r); err != nil {
 		return err
@@ -159,7 +165,7 @@ func execute(ctx context.Context, r *record, podman command) error {
 	}
 
 	memory := strconv.FormatInt(r.Request.MemoryMiB*1024*1024, 10)
-	// shortcut: CPU IDs are pinned, not reserved; add reservations with worker scheduling.
+	// Reservations belong to the agent; this layer enforces the selected CPU and memory limits.
 	args := []string{
 		"run", "--detach", "--pull=never", "--name", r.ContainerName,
 		"--label", runLabel + "=" + r.ContainerName,
@@ -262,6 +268,24 @@ func checkHost(data []byte) error {
 
 func execPodman(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
 	cmd := exec.CommandContext(ctx, "podman", append([]string{"--remote=false"}, args...)...)
+	if os.Getenv("INVOCATION_ID") != "" {
+		// FUSE mounts and other runtime helpers must outlive the agent's service cgroup.
+		flags := []string{"--user", "--scope", "--quiet", "--collect", "--property=Delegate=yes", "--unit=ordo-runtime-" + strings.ToLower(rand.Text())}
+		help, err := exec.CommandContext(ctx, "systemd-run", "--help").Output()
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("probe runtime scope support: %w", err)
+		}
+		// Old systemd scopes never expand argv; newer versions provide an explicit opt-out.
+		if bytes.Contains(help, []byte("--expand-environment=")) {
+			flags = append(flags, "--expand-environment=no")
+		}
+		cmd = exec.CommandContext(ctx, "systemd-run", append(append(flags, "--"), cmd.Args...)...)
+	}
+	// Do not propagate agent ownership; systemd-run supplies its new scope's identity.
+	cmd.Env = slices.DeleteFunc(os.Environ(), func(value string) bool { return strings.HasPrefix(value, "INVOCATION_ID=") })
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {

@@ -3,8 +3,9 @@
 A task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
-**Status:** Go/Nix tooling, a local CPU-only single-task runner, and explicit recovery of retained runs are implemented.
-Distributed scheduling, worker agents, transfers, GPU allocation, and the web UI are still planned.
+**Status:** Local CPU-only execution/recovery and the worker agent core are implemented.
+Agents provide durable, idempotent attempts, exclusive physical cores, and aggregate memory accounting.
+SSH bootstrap/control, the server scheduler, transfers, workflows, GPU allocation, and web UI are still planned.
 
 ## Direction
 
@@ -76,7 +77,7 @@ The image's ENTRYPOINT/CMD runs by default; trailing `-- COMMAND ARGS...` replac
 
 - Requires local Linux, rootless Podman, and cgroup v2 with delegated `cpuset` and `memory` controllers; unsupported hosts fail preflight.
 - Pins logical CPU IDs and limits memory with swap disabled.
-  This is **not yet exclusive CPU reservation** across runs or unrelated host processes.
+  Standalone `run` is **unmanaged**: pinning does not reserve CPUs and can overlap agent-managed tasks or other processes.
 - The output directory must not exist.
   `run.json` records the request, image/container identity, timestamps, exit status, and infrastructure errors; `stdout.log` and `stderr.log` are collected after exit.
 - Removes the container only after logs and final metadata have been saved.
@@ -118,6 +119,23 @@ If launch was interrupted before the container ID was saved, an Ordo container l
 
 Recovery does not require resource controllers to remain delegated because it makes no new allocation.
 It is explicit, local reconciliation—not an SSH worker, automatic reconnect, or retry policy.
+
+## Worker agent core
+
+`ordo agent --state DIR --cpus CPU_IDS --memory-mib MIB` serves a private mode-0600 Unix socket at `DIR/agent.sock` on Linux.
+The allowed CPU pool must contain every online SMT sibling of each selected physical core.
+Requests count physical cores; memory is an aggregate admission budget with per-container limits and no swap.
+Images must already be loaded, and requests use immutable SHA-256 image IDs.
+
+- SQLite commits attempts and reservations before launch; restart restores ownership before admission.
+- Repeating an attempt ID with the same specification is idempotent; changing its specification conflicts.
+- Unknown outcomes remain blocked with resources held, never silently retried.
+- One agent may run per host/user. `/run/user/UID/ordo-worker.lock` binds unfinished work to the original state directory, including while the agent is stopped. Never delete the lock to bypass reconciliation.
+- Podman calls launched from a systemd service use separate transient runtime scopes, so container monitors and FUSE mounts survive agent service cleanup.
+- Inspectable results and logs remain in `DIR/runs/ATTEMPT`; stopping the agent does not cancel task containers.
+- Standalone runs and unrelated host processes are outside the agent's exclusivity guarantee.
+
+SSH deployment and a client for this private agent API are the next acceptance item.
 
 ## Development
 

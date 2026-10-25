@@ -10,12 +10,13 @@ pkgs.buildGoModule (finalAttrs: {
       (pkgs.lib.fileset.fileFilter (file: file.hasExt "go") ../.)
     ];
   };
-  vendorHash = null;
+  vendorHash = "sha256-sJn4yiUb227dGjpFF6dw/oXOLQ/2mdSikqymhkDchSM=";
+  env.CGO_ENABLED = "0";
   subPackages = [ "cmd/ordo" ];
 
   checkPhase = ''
     runHook preCheck
-    go test -race ./...
+    CGO_ENABLED=1 go test -race ./...
     runHook postCheck
   '';
 
