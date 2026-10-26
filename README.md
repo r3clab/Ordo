@@ -5,7 +5,8 @@ Every task runs in rootless Podman using a [nix2container](https://github.com/nl
 
 **Status:** Local CPU-only execution/recovery and persistent SSH worker agents are implemented.
 Agents provide durable, idempotent attempts, exclusive physical cores, and aggregate memory accounting.
-The server scheduler, transfers, workflows, GPU allocation, and web UI are still planned.
+Immutable image/input transfer and output collection are implemented.
+The server scheduler, workflows, GPU allocation, and web UI are still planned.
 
 ## Direction
 
@@ -131,7 +132,12 @@ Use a worker-local filesystem for state, not a shared network filesystem.
 ordo worker start --host WORKER --state /home/worker/.local/state/ordo \
   --cpus 0,1,64,65 --memory-mib 512 --binary ./ordo-linux-amd64
 
-# The immutable image must already be loaded on that worker; transfer is not implemented yet.
+# Transfer a local nix2container image; use the immutable ID returned in JSON.
+ordo worker put-image --host WORKER --state /home/worker/.local/state/ordo \
+  --cpus 0,1,64,65 --memory-mib 512 --image localhost/evaluation:BUILD_TAG
+
+# Alternatively supply --archive OCI_ARCHIVE --image sha256:IMAGE_ID.
+# Named inputs mount read-only at /inputs/NAME; write artifacts under /outputs.
 ordo worker submit --host WORKER --state /home/worker/.local/state/ordo \
   --cpus 0,1,64,65 --memory-mib 512 \
   --id evaluation-001 --image sha256:IMAGE_ID --cores 1 --task-memory-mib 256
@@ -162,7 +168,16 @@ ordo worker get --host WORKER --state /home/worker/.local/state/ordo \
   Transient services need bootstrap after a host reboot.
 - Worker commands return JSON.
   `worker get` reports status rather than propagating the task exit code.
-  Logs and inspectable `runs/ATTEMPT/run.json` remain on the worker until transfer/output collection is implemented.
+- `worker submit --input NAME=DIR` snapshots each named input and mounts it read-only at `/inputs/NAME`.
+  Identical snapshots reuse the content-addressed cache.
+  Links and special files are rejected.
+- Agent tasks write artifacts under `/outputs`.
+  These are archived and synced before container cleanup.
+  `worker fetch --id ID --output NEW_DIR` downloads verified logs, metadata, and extracted outputs.
+  Worker results remain available for repeated downloads.
+- Transfers are streamed with SHA-256 verification and atomic publication.
+  Each archive is limited to 64 GiB; output files must be readable by the worker user.
+  No automatic cache/result deletion is performed.
 
 The Nix package builds with `CGO_ENABLED=0`.
 For a macOS controller or different worker architecture, supply a cross-compiled Linux artifact:

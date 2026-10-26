@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/task"
 )
@@ -38,9 +40,10 @@ type Config struct {
 }
 
 type Spec struct {
-	Image     string    `json:"image"`
-	Args      []string  `json:"args,omitempty"`
-	Resources Resources `json:"resources"`
+	Image     string            `json:"image"`
+	Args      []string          `json:"args,omitempty"`
+	Resources Resources         `json:"resources"`
+	Inputs    map[string]string `json:"inputs,omitempty"`
 }
 
 type Attempt struct {
@@ -230,6 +233,15 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 		return Attempt{}, fmt.Errorf("%w: valid attempt ID, immutable sha256 image ID, positive cores/memory are required", ErrInvalidRequest)
 	}
 	spec.Args = slices.Clone(spec.Args)
+	spec.Inputs = maps.Clone(spec.Inputs)
+	for name, digest := range spec.Inputs {
+		if !identifier.MatchString(name) || !content.Valid(digest) {
+			return Attempt{}, fmt.Errorf("%w: invalid input name/digest", ErrInvalidRequest)
+		}
+		if info, err := os.Stat(filepath.Join(a.cfg.StateDir, "trees", digest)); err != nil || !info.IsDir() {
+			return Attempt{}, fmt.Errorf("%w: input %s is not cached", ErrInvalidRequest, name)
+		}
+	}
 	if old, ok := a.attempts[id]; ok {
 		left, _ := json.Marshal(old.Spec)
 		right, _ := json.Marshal(spec)
@@ -301,12 +313,16 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 	defer func() { a.mu.Lock(); delete(a.busy, run.ID); a.mu.Unlock() }()
 	dir := a.runDir(run.ID)
 	reservation := a.info.ID + "/" + run.ID
+	mounts := map[string]string{}
+	for name, digest := range run.Spec.Inputs {
+		mounts[name] = filepath.Join(a.cfg.StateDir, "trees", digest)
+	}
 	matches := func(r task.Record) bool {
-		return r.Request.ReservationID == reservation && r.Request.Image == run.Spec.Image && r.Request.CPUs == CPUString(run.Allocation.CPUs) && r.Request.MemoryMiB == run.Allocation.MemoryMiB && slices.Equal(r.Request.Args, run.Spec.Args)
+		return r.Request.ReservationID == reservation && r.Request.Image == run.Spec.Image && r.Request.CPUs == CPUString(run.Allocation.CPUs) && r.Request.MemoryMiB == run.Allocation.MemoryMiB && slices.Equal(r.Request.Args, run.Spec.Args) && maps.Equal(r.Request.Inputs, mounts)
 	}
 	var err error
 	if fresh {
-		err = task.Run(a.ctx, task.Request{Image: run.Spec.Image, CPUs: CPUString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: reservation})
+		err = task.Run(a.ctx, task.Request{Image: run.Spec.Image, CPUs: CPUString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: reservation, Inputs: mounts, ExportOutputs: true})
 	} else {
 		var r task.Record
 		r, err = task.ReadResult(dir)

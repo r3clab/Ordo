@@ -11,7 +11,7 @@ Keep each acceptance item in its own buildable commit where possible; mark it co
 - [x] Persistent agents behind private SSH-forwarded Unix sockets; durable, idempotent attempt submission (M2).
 - [x] Exclusive physical-core allocations and aggregate memory accounting, restored before new work after restart (M2).
 - [ ] Exclusive GPU allocations and recovery.
-- [ ] Immutable image transfer, content-addressed input caching, read-only inputs, and output collection.
+- [x] Immutable image transfer, content-addressed input caching, read-only inputs, and output collection (M3).
 - [ ] Durable server queue and reconciliation after server/tunnel failure; no retries merely because a worker disconnects.
 - [ ] JSON workflow validation, dependency readiness, parameter expansion, bounded infrastructure/task retries, timeout, cancellation.
 - [ ] User-selected hardware matching; rootless GPU isolation validated or rejected, never silently weakened.

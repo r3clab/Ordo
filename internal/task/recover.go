@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/r3clab/Ordo/internal/content"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +138,15 @@ func loadRecord(dir string) (*record, error) {
 }
 
 func savedResults(r *record) error {
+	if r.Request.ExportOutputs {
+		hash, err := content.Hash(filepath.Join(r.Request.OutputDir, "outputs.tar"))
+		if err != nil {
+			return err
+		}
+		if !content.Valid(r.OutputsSHA256) || hash != r.OutputsSHA256 {
+			return errors.New("saved output archive checksum mismatch")
+		}
+	}
 	if r.ExitCode == nil {
 		return errors.New("finished run has no saved exit code")
 	}

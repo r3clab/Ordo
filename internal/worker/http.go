@@ -13,6 +13,7 @@ import (
 
 func (a *Agent) handler() http.Handler {
 	mux := http.NewServeMux()
+	a.contentRoutes(mux)
 	mux.HandleFunc("GET /v1/info", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		info := a.info

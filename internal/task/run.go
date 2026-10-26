@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -16,15 +17,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/r3clab/Ordo/internal/content"
 )
 
 type Request struct {
-	Image         string   `json:"image"`
-	CPUs          string   `json:"cpus"`
-	MemoryMiB     int64    `json:"memory_mib"`
-	Args          []string `json:"args,omitempty"`
-	OutputDir     string   `json:"output_dir"`
-	ReservationID string   `json:"reservation_id,omitempty"`
+	Image         string            `json:"image"`
+	CPUs          string            `json:"cpus"`
+	MemoryMiB     int64             `json:"memory_mib"`
+	Args          []string          `json:"args,omitempty"`
+	OutputDir     string            `json:"output_dir"`
+	ReservationID string            `json:"reservation_id,omitempty"`
+	Inputs        map[string]string `json:"inputs,omitempty"`
+	ExportOutputs bool              `json:"export_outputs,omitempty"`
 }
 
 type ExitError struct {
@@ -50,6 +55,7 @@ type record struct {
 	ContainerRemoved bool      `json:"container_removed"`
 	Error            string    `json:"error,omitempty"`
 	AllocationMode   string    `json:"allocation_mode,omitempty"`
+	OutputsSHA256    string    `json:"outputs_sha256,omitempty"`
 }
 
 type command func(context.Context, io.Writer, io.Writer, ...string) error
@@ -110,6 +116,18 @@ func outcome(r *record, err error) error {
 }
 
 func (r Request) validate() error {
+	for name, dir := range r.Inputs {
+		if name == "" || strings.ContainsAny(name, "/\\:\x00\n") || name == "." || name == ".." || !filepath.IsAbs(dir) || strings.ContainsAny(dir, ":\x00\n") {
+			return errors.New("invalid input mount")
+		}
+		info, err := os.Stat(dir)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return errors.New("input mount must be a directory")
+		}
+	}
 	if strings.TrimSpace(r.Image) == "" {
 		return errors.New("--image is required (load a nix2container image into Podman first)")
 	}
@@ -171,8 +189,21 @@ func execute(ctx context.Context, r *record, podman command) error {
 		"--label", runLabel + "=" + r.ContainerName,
 		"--cpuset-cpus", r.Request.CPUs, "--memory", memory, "--memory-swap", memory,
 		"--network=none", "--image-volume=ignore", "--log-driver=k8s-file",
-		"--", r.ImageID,
 	}
+	for _, name := range slices.Sorted(maps.Keys(r.Request.Inputs)) {
+		args = append(args, "--volume", r.Request.Inputs[name]+":/inputs/"+name+":ro")
+	}
+	if r.Request.ExportOutputs {
+		outputs := filepath.Join(r.Request.OutputDir, "outputs")
+		if err := os.Mkdir(outputs, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(outputs, 0o777); err != nil {
+			return err
+		}
+		args = append(args, "--volume", outputs+":/outputs:rw")
+	}
+	args = append(args, "--", r.ImageID)
 	args = append(args, r.Request.Args...)
 	containerID, err := podman.output(ctx, args...)
 	if err != nil {
@@ -212,6 +243,13 @@ func complete(ctx context.Context, r *record, podman command) error {
 	r.OOMKilled = state.OOMKilled
 	if err := collectLogs(ctx, r, podman); err != nil {
 		return err
+	}
+	if r.Request.ExportOutputs {
+		hash, err := content.Archive(filepath.Join(r.Request.OutputDir, "outputs"), filepath.Join(r.Request.OutputDir, "outputs.tar"))
+		if err != nil {
+			return fmt.Errorf("collect outputs: %w", err)
+		}
+		r.OutputsSHA256 = hash
 	}
 	r.State = "finished"
 	r.Error = ""
