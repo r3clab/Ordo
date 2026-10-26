@@ -14,7 +14,7 @@ type cancellation struct {
 func (a *Agent) Cancel(id string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !identifier.MatchString(id) {
+	if !ValidName(id) {
 		return ErrInvalidRequest
 	}
 	if a.info.Error != "" {
@@ -30,8 +30,7 @@ func (a *Agent) Cancel(id string) error {
 		}
 		return a.save(run)
 	}
-	if err := a.store.Put("cancel", id, cancellation{ID: id, Reason: "cancel"}); err != nil {
-		a.info.Error = err.Error()
+	if err := a.put("cancel", id, cancellation{ID: id, Reason: "cancel"}); err != nil {
 		return err
 	}
 	a.cancelled[id] = true

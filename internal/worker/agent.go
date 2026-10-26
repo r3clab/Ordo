@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,9 +28,14 @@ var ErrInvalidRequest = errors.New("invalid request")
 var ErrConflict = errors.New("conflicting request")
 var ErrUnavailable = errors.New("worker requires restart after a state write failure")
 var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
-var imageIdentity = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
-const ProtocolVersion = 1
+const protocolVersion = 1
+
+const MaxTimeoutSeconds = 365 * 24 * 60 * 60
+
+func ValidName(name string) bool { return identifier.MatchString(name) }
+
+func ReservationID(agentID, attemptID string) string { return agentID + "/" + attemptID }
 
 type Config struct {
 	StateDir  string   `json:"state_dir"`
@@ -160,10 +164,8 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 		return nil, errors.New("state belongs to a different machine; refusing to adopt its reservations")
 	}
 	child, cancel := context.WithCancel(ctx)
-	a := &Agent{cfg: cfg, info: Info{Protocol: ProtocolVersion, ID: ident.ID, Hardware: h}, store: store, attempts: map[string]Attempt{}, busy: map[string]bool{}, ctx: child, cancel: cancel}
+	a := &Agent{cfg: cfg, info: Info{Protocol: protocolVersion, ID: ident.ID, Hardware: h}, store: store, attempts: map[string]Attempt{}, busy: map[string]bool{}, stopping: map[string]bool{}, cancelled: map[string]bool{}, ctx: child, cancel: cancel}
 	fail := func(err error) (*Agent, error) { _ = a.Close(); return nil, err }
-	a.stopping = map[string]bool{}
-	a.cancelled = map[string]bool{}
 	tombstones, err := store.List("cancel")
 	if err != nil {
 		return fail(err)
@@ -173,7 +175,7 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 		if err := json.Unmarshal(data, &c); err != nil {
 			return fail(err)
 		}
-		if !identifier.MatchString(c.ID) {
+		if !ValidName(c.ID) {
 			return fail(errors.New("invalid cancellation record"))
 		}
 		a.cancelled[c.ID] = true
@@ -190,7 +192,7 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 		if err := json.Unmarshal(data, &run); err != nil {
 			return fail(err)
 		}
-		if !identifier.MatchString(run.ID) {
+		if !ValidName(run.ID) {
 			return fail(errors.New("invalid saved attempt ID"))
 		}
 		switch run.State {
@@ -256,17 +258,20 @@ func (a *Agent) Close() error {
 	a.wg.Wait()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	clear := a.info.Error == ""
-	for _, run := range a.attempts {
-		if !run.Terminal() {
-			clear = false
-		}
-	}
+	clear := a.info.Error == "" && len(a.held()) == 0
 	err := a.store.Close()
 	return errors.Join(err, releaseHost(a.owner, clear && err == nil))
 }
 
 func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
+	// nvidia-smi pmon samples for about a second; probing under a.mu would stall the agent.
+	var busy []string
+	var busyErr error
+	if spec.Resources.GPUs > 0 {
+		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		busy, busyErr = busyGPUs(ctx, a.info.Hardware.GPUs)
+		cancel()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.ctx.Err() != nil {
@@ -275,14 +280,14 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	if a.info.Error != "" {
 		return Attempt{}, fmt.Errorf("%w: %s", ErrUnavailable, a.info.Error)
 	}
-	if !identifier.MatchString(id) || !imageIdentity.MatchString(spec.Image) || spec.Resources.Cores <= 0 || spec.Resources.MemoryMiB <= 0 {
+	if !ValidName(id) || !task.ValidImageID(spec.Image) || spec.Resources.Cores <= 0 || spec.Resources.MemoryMiB <= 0 {
 		return Attempt{}, fmt.Errorf("%w: valid attempt ID, immutable sha256 image ID, positive cores/memory are required", ErrInvalidRequest)
 	}
 	if spec.Resources.GPUs < 0 {
 		return Attempt{}, fmt.Errorf("%w: GPU count cannot be negative", ErrInvalidRequest)
 	}
-	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > 31536000 {
-		return Attempt{}, fmt.Errorf("%w: timeout must be 0..31536000 seconds", ErrInvalidRequest)
+	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > MaxTimeoutSeconds {
+		return Attempt{}, fmt.Errorf("%w: timeout must be 0..%d seconds", ErrInvalidRequest, MaxTimeoutSeconds)
 	}
 	if a.cancelled[id] {
 		return Attempt{}, fmt.Errorf("%w: attempt was cancelled before submission", ErrConflict)
@@ -297,7 +302,7 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	spec.Args = slices.Clone(spec.Args)
 	spec.Inputs = maps.Clone(spec.Inputs)
 	for name, digest := range spec.Inputs {
-		if !identifier.MatchString(name) || !content.Valid(digest) {
+		if !ValidName(name) || !content.Valid(digest) {
 			return Attempt{}, fmt.Errorf("%w: invalid input name/digest", ErrInvalidRequest)
 		}
 		if info, err := os.Stat(filepath.Join(a.cfg.StateDir, "trees", digest)); err != nil || !info.IsDir() {
@@ -317,21 +322,13 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Attempt{}, err
 	}
-	var held []Allocation
-	for _, old := range a.attempts {
-		if !old.Terminal() {
-			held = append(held, old.Allocation)
-		}
-	}
+	held := a.held()
 	if spec.Resources.GPUs > len(a.info.Hardware.GPUs) {
 		return Attempt{}, ErrCapacity
 	}
 	if spec.Resources.GPUs > 0 {
-		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
-		busy, err := busyGPUs(ctx, a.info.Hardware.GPUs)
-		cancel()
-		if err != nil {
-			return Attempt{}, err
+		if busyErr != nil {
+			return Attempt{}, busyErr
 		}
 		held = append(held, Allocation{GPUs: busy})
 	}
@@ -351,6 +348,24 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	return run, nil
 }
 
+func (a *Agent) held() []Allocation {
+	var held []Allocation
+	for _, run := range a.attempts {
+		if !run.Terminal() {
+			held = append(held, run.Allocation)
+		}
+	}
+	return held
+}
+
+func (a *Agent) put(kind, id string, value any) error {
+	if err := a.store.Put(kind, id, value); err != nil {
+		a.info.Error = err.Error()
+		return err
+	}
+	return nil
+}
+
 func (a *Agent) save(run Attempt) error {
 	if old, ok := a.attempts[run.ID]; ok && old.StopRequested != "" {
 		run.StopRequested = old.StopRequested
@@ -359,8 +374,7 @@ func (a *Agent) save(run Attempt) error {
 		run.State = "cancelled"
 	}
 	run.UpdatedAt = time.Now().UTC()
-	if err := a.store.Put("attempt", run.ID, run); err != nil {
-		a.info.Error = err.Error()
+	if err := a.put("attempt", run.ID, run); err != nil {
 		return err
 	}
 	a.attempts[run.ID] = run
@@ -396,17 +410,18 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 	defer a.wg.Done()
 	defer func() { a.mu.Lock(); delete(a.busy, run.ID); a.mu.Unlock() }()
 	dir := a.runDir(run.ID)
-	reservation := a.info.ID + "/" + run.ID
 	mounts := map[string]string{}
 	for name, digest := range run.Spec.Inputs {
 		mounts[name] = filepath.Join(a.cfg.StateDir, "trees", digest)
 	}
+	req := task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: ReservationID(a.info.ID, run.ID), Inputs: mounts, ExportOutputs: true, GPUs: run.Allocation.GPUs, CDISpecDir: filepath.Join(a.cfg.StateDir, "cdi")}
 	matches := func(r task.Record) bool {
-		return r.Request.ReservationID == reservation && r.Request.Image == run.Spec.Image && r.Request.CPUs == CPUString(run.Allocation.CPUs) && r.Request.MemoryMiB == run.Allocation.MemoryMiB && slices.Equal(r.Request.Args, run.Spec.Args) && maps.Equal(r.Request.Inputs, mounts) && slices.Equal(r.Request.GPUs, run.Allocation.GPUs)
+		got := r.Request
+		return got.ReservationID == req.ReservationID && got.Image == req.Image && got.CPUs == req.CPUs && got.MemoryMiB == req.MemoryMiB && slices.Equal(got.Args, req.Args) && maps.Equal(got.Inputs, req.Inputs) && slices.Equal(got.GPUs, req.GPUs)
 	}
 	var err error
 	if fresh {
-		err = task.Run(a.ctx, task.Request{Image: run.Spec.Image, CPUs: CPUString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: reservation, Inputs: mounts, ExportOutputs: true, GPUs: run.Allocation.GPUs, CDISpecDir: filepath.Join(a.cfg.StateDir, "cdi")})
+		err = task.Run(a.ctx, req)
 	} else {
 		var r task.Record
 		r, err = task.ReadResult(dir)
@@ -454,29 +469,11 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 }
 
 func (a *Agent) Serve() error {
-	socket := filepath.Join(a.cfg.StateDir, "agent.sock")
-	if info, err := os.Lstat(socket); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return errors.New("agent socket path is not a socket")
-		}
-		if conn, err := net.DialTimeout("unix", socket, time.Second); err == nil {
-			_ = conn.Close()
-			return errors.New("agent socket is already live")
-		}
-		if err := os.Remove(socket); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	listener, err := net.Listen("unix", socket)
+	listener, err := ListenUnix(Socket(a.cfg.StateDir))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = listener.Close() }()
-	if err := os.Chmod(socket, 0o600); err != nil {
-		return err
-	}
 	server := &http.Server{Handler: a.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()

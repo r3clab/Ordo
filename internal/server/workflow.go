@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/worker"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -48,20 +48,20 @@ type Step struct {
 }
 
 func expand(w Workflow) ([]Step, error) {
-	if !namePattern.MatchString(w.ID) || len(w.ID) > 24 || len(w.Tasks) == 0 || len(w.Tasks) > 1000 {
+	if !worker.ValidName(w.ID) || len(w.ID) > 24 || len(w.Tasks) == 0 || len(w.Tasks) > 1000 {
 		return nil, errors.New("workflow needs an ID (1..24 characters) and 1..1000 tasks")
 	}
 	groups := map[string][]string{}
 	ids := map[string]bool{}
 	var expanded []Step
 	for _, step := range w.Tasks {
-		if !namePattern.MatchString(step.ID) || len(step.ID) > 32 || groups[step.ID] != nil {
+		if !worker.ValidName(step.ID) || len(step.ID) > 32 || groups[step.ID] != nil {
 			return nil, errors.New("task IDs must be unique and 1..32 characters")
 		}
 		combos := []map[string]string{{}}
 		for _, key := range slices.Sorted(maps.Keys(step.Matrix)) {
 			values := step.Matrix[key]
-			if !namePattern.MatchString(key) || len(values) == 0 || len(values) > 1000 || len(combos) > 1000/len(values) {
+			if !worker.ValidName(key) || len(values) == 0 || len(values) > 1000 || len(combos) > 1000/len(values) {
 				return nil, errors.New("invalid or oversized parameter matrix")
 			}
 			var next []map[string]string
@@ -136,7 +136,7 @@ func expand(w Workflow) ([]Step, error) {
 			deps = append(deps, targets...)
 		}
 		for name, from := range step.From {
-			if !namePattern.MatchString(name) {
+			if !worker.ValidName(name) {
 				return nil, errors.New("invalid dependency input name")
 			}
 			if _, ok := step.Inputs[name]; ok {
@@ -202,8 +202,9 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		return nil, err
 	}
 	jobs := make([]Job, 0, len(steps))
+	st := newStaging()
 	for _, step := range steps {
-		j, err := s.prepare(ctx, step.Request)
+		j, err := s.prepare(ctx, step.Request, st)
 		if err != nil {
 			return nil, err
 		}
@@ -225,7 +226,6 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 			existing++
 		}
 	}
-	values := map[string]any{}
 	for i, j := range jobs {
 		if old, ok := s.jobs[j.ID]; ok {
 			if old.Workflow != w.ID || old.Key != j.Key {
@@ -235,7 +235,6 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		} else if existing > 0 {
 			return nil, errors.New("workflow ID has a different task set")
 		}
-		values[j.ID] = j
 	}
 	if existing > 0 {
 		if existing != len(jobs) {
@@ -243,12 +242,8 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		}
 		return jobs, nil
 	}
-	if err := s.store.PutMany("job", values); err != nil {
-		s.fault = err
+	if err := s.commitLocked(jobs...); err != nil {
 		return nil, err
-	}
-	for _, j := range jobs {
-		s.jobs[j.ID] = j
 	}
 	return jobs, nil
 }
@@ -276,31 +271,37 @@ func (s *Server) dependencies(j *Job) (bool, error) {
 			return false, nil
 		}
 	}
-	if len(j.Attempts) == 0 {
-		j.Spec.Inputs = maps.Clone(j.Spec.Inputs)
-		if j.Spec.Inputs == nil {
-			j.Spec.Inputs = map[string]string{}
-		}
-		for name, id := range j.From {
-			dep := deps[id]
-			at := dep.Attempts[len(dep.Attempts)-1]
-			if at.Remote == nil || at.Remote.Result == nil {
-				return false, errors.New("dependency has no output identity")
-			}
-			hash := at.Remote.Result.OutputsSHA256
-			f, err := os.Open(filepath.Join(at.ResultDir, "outputs.tar"))
-			if err != nil {
-				return false, err
-			}
-			_, err = content.Put(filepath.Join(s.Root, "blobs"), f, hash)
-			err = errors.Join(err, f.Close())
-			if err != nil {
-				return false, err
-			}
-			j.Spec.Inputs[name] = hash
-		}
-	}
 	return true, nil
+}
+
+// importOutputs runs only once a worker fits, so a queued job never re-copies outputs per tick.
+func (s *Server) importOutputs(j *Job) error {
+	if len(j.Attempts) > 0 {
+		return nil
+	}
+	s.mu.Lock()
+	deps := map[string]Job{}
+	for _, id := range j.From {
+		deps[id] = s.jobs[id]
+	}
+	s.mu.Unlock()
+	j.Spec.Inputs = maps.Clone(j.Spec.Inputs)
+	if j.Spec.Inputs == nil {
+		j.Spec.Inputs = map[string]string{}
+	}
+	for name, id := range j.From {
+		dep := deps[id]
+		at := dep.Attempts[len(dep.Attempts)-1]
+		if at.Remote == nil || at.Remote.Result == nil {
+			return errors.New("dependency has no output identity")
+		}
+		hash := at.Remote.Result.OutputsSHA256
+		if _, err := content.PutFile(filepath.Join(s.Root, "blobs"), filepath.Join(at.ResultDir, "outputs.tar"), hash); err != nil {
+			return err
+		}
+		j.Spec.Inputs[name] = hash
+	}
+	return nil
 }
 func (s *Server) Cancel(id string, workflow bool) error {
 	s.mu.Lock()
@@ -308,8 +309,7 @@ func (s *Server) Cancel(id string, workflow bool) error {
 	if s.fault != nil {
 		return s.fault
 	}
-	values := map[string]any{}
-	changed := map[string]Job{}
+	var changed []Job
 	for key, j := range s.jobs {
 		if (!workflow && key != id) || (workflow && j.Workflow != id) {
 			continue
@@ -321,20 +321,12 @@ func (s *Server) Cancel(id string, workflow bool) error {
 		if j.State == "queued" && !s.busy[key] {
 			j.State = "cancelled"
 		}
-		changed[key] = j
-		values[key] = j
+		changed = append(changed, j)
 	}
 	if len(changed) == 0 {
 		return nil
 	}
-	if err := s.store.PutMany("job", values); err != nil {
-		s.fault = err
-		return err
-	}
-	for key, j := range changed {
-		s.jobs[key] = j
-	}
-	return nil
+	return s.commitLocked(changed...)
 }
 func (s *Server) finish(j Job, class string) error {
 	at := &j.Attempts[len(j.Attempts)-1]

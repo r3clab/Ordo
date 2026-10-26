@@ -1,8 +1,8 @@
 package task
 
 import (
+	"cmp"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,10 +56,7 @@ func reconcile(ctx context.Context, r *record, podman command) error {
 	if _, err := readLocalHost(info); err != nil {
 		return err
 	}
-	selector := r.ContainerID
-	if selector == "" {
-		selector = r.ContainerName
-	}
+	selector := cmp.Or(r.ContainerID, r.ContainerName)
 	exists, err := podman.containerExists(ctx, selector)
 	if err != nil {
 		return err
@@ -114,10 +111,10 @@ func loadRecord(dir string) (*record, error) {
 	if err := r.Request.validate(); err != nil {
 		return nil, fmt.Errorf("invalid saved request: %w", err)
 	}
-	if !strings.HasPrefix(r.ContainerName, "ordo-") || !validID(strings.TrimPrefix(r.ImageID, "sha256:")) {
+	if !strings.HasPrefix(r.ContainerName, "ordo-") || !ValidImageID(r.ImageID) {
 		return nil, errors.New("run has no valid container name and resolved image identity; no task can be recovered")
 	}
-	if r.ContainerID != "" && !validID(r.ContainerID) {
+	if r.ContainerID != "" && !content.Valid(r.ContainerID) {
 		return nil, errors.New("invalid saved container ID")
 	}
 	switch r.State {
@@ -173,14 +170,6 @@ func lockRun(dir string) (*os.File, error) {
 	return file, nil
 }
 
-func validID(id string) bool {
-	if len(id) != 64 {
-		return false
-	}
-	_, err := hex.DecodeString(id)
-	return err == nil
-}
-
 type containerInspection struct {
 	ID     string
 	Name   string
@@ -208,7 +197,7 @@ func (podman command) inspectOwned(ctx context.Context, r *record, selector stri
 		return containerInspection{}, errors.New("expected exactly one container")
 	}
 	c := containers[0]
-	if !validID(c.ID) || c.Name != r.ContainerName || strings.TrimPrefix(c.Image, "sha256:") != strings.TrimPrefix(r.ImageID, "sha256:") {
+	if !content.Valid(c.ID) || c.Name != r.ContainerName || strings.TrimPrefix(c.Image, "sha256:") != strings.TrimPrefix(r.ImageID, "sha256:") {
 		return containerInspection{}, errors.New("container identity does not match the run record")
 	}
 	if r.ContainerID != "" {

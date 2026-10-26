@@ -18,13 +18,13 @@ func TestRemoteValidationAndShellQuoting(t *testing.T) {
 			t.Fatalf("accepted %+v", bad)
 		}
 	}
-	if Quote("a'b $x") != "'a'\\''b $x'" {
+	if shellQuote("a'b $x") != "'a'\\''b $x'" {
 		t.Fatal("unsafe quoting")
 	}
-	if Unit(good.StateDir) != "ordo-agent-ea98d0ead75e656b" || Unit(good.StateDir) == Unit("/tmp/other") {
+	if unitName(good.StateDir) != "ordo-agent-ea98d0ead75e656b" || unitName(good.StateDir) == unitName("/tmp/other") {
 		t.Fatal("unstable unit identity")
 	}
-	if _, err := SSH(context.Background(), "--bad", "", nil); err == nil {
+	if _, err := runSSH(context.Background(), "--bad", "", nil); err == nil {
 		t.Fatal("allowed SSH option injection")
 	}
 	if _, _, err := artifact(filepath.Join(t.TempDir(), "missing")); err == nil {

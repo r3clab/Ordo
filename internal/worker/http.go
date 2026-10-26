@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -19,29 +22,19 @@ func (a *Agent) handler() http.Handler {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		respond(w, http.StatusOK, map[string]bool{"requested": true})
+		WriteJSON(w, http.StatusOK, map[string]bool{"requested": true})
 	})
 	mux.HandleFunc("GET /v1/info", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		info := a.info
-		for _, run := range a.attempts {
-			if !run.Terminal() {
-				info.Held = append(info.Held, run.Allocation)
-			}
-		}
+		info.Held = a.held()
 		a.mu.Unlock()
-		respond(w, http.StatusOK, info)
+		WriteJSON(w, http.StatusOK, info)
 	})
 	mux.HandleFunc("PUT /v1/attempts/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var spec Spec
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&spec); err != nil {
+		if err := DecodeJSON(http.MaxBytesReader(w, r.Body, 1<<20), &spec); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-			http.Error(w, "expected one JSON request", http.StatusBadRequest)
 			return
 		}
 		run, err := a.Submit(r.PathValue("id"), spec)
@@ -60,7 +53,7 @@ func (a *Agent) handler() http.Handler {
 			http.Error(w, err.Error(), status)
 			return
 		}
-		respond(w, http.StatusOK, run)
+		WriteJSON(w, http.StatusOK, run)
 	})
 	mux.HandleFunc("GET /v1/attempts/{id}", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -70,7 +63,7 @@ func (a *Agent) handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		respond(w, http.StatusOK, run)
+		WriteJSON(w, http.StatusOK, run)
 	})
 	mux.HandleFunc("GET /v1/attempts", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -79,12 +72,24 @@ func (a *Agent) handler() http.Handler {
 			runs = append(runs, run)
 		}
 		a.mu.Unlock()
-		respond(w, http.StatusOK, runs)
+		WriteJSON(w, http.StatusOK, runs)
 	})
 	return mux
 }
 
-func respond(w http.ResponseWriter, status int, value any) {
+func DecodeJSON(r io.Reader, value any) error {
+	d := json.NewDecoder(r)
+	d.DisallowUnknownFields()
+	if err := d.Decode(value); err != nil {
+		return err
+	}
+	if err := d.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return errors.New("expected exactly one JSON value")
+	}
+	return nil
+}
+
+func WriteJSON(w http.ResponseWriter, status int, value any) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -101,4 +106,43 @@ func Client(socket string) *http.Client {
 	}}}
 }
 
+func untimed(client *http.Client) *http.Client {
+	c := *client
+	c.Timeout = 0
+	return &c
+}
+
+func checkResponse(response *http.Response) error {
+	if response.StatusCode/100 == 2 {
+		return nil
+	}
+	data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+	return &HTTPError{Status: response.StatusCode, Message: strings.TrimSpace(string(data))}
+}
+
 func Socket(stateDir string) string { return filepath.Join(stateDir, "agent.sock") }
+
+func ListenUnix(socket string) (net.Listener, error) {
+	if info, err := os.Lstat(socket); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("%s is not a socket", socket)
+		}
+		if conn, err := net.DialTimeout("unix", socket, time.Second); err == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("%s is already live", socket)
+		}
+		if err := os.Remove(socket); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(socket, 0o600); err != nil {
+		return nil, errors.Join(err, listener.Close())
+	}
+	return listener, nil
+}

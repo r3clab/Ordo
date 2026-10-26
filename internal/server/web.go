@@ -122,8 +122,8 @@ func (s *Server) WebHandler(token string) http.Handler {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
-			supplied := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || len(token) != 64 || subtle.ConstantTimeCompare([]byte(supplied), []byte(token)) != 1 {
+			supplied, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if !ok || len(token) != 64 || subtle.ConstantTimeCompare([]byte(supplied), []byte(token)) != 1 {
 				w.Header().Set("WWW-Authenticate", "Bearer")
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
@@ -162,21 +162,15 @@ func (s *Server) WebHandler(token string) http.Handler {
 	})
 }
 func (s *Server) webRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Workers()) })
+	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { worker.WriteJSON(w, http.StatusOK, s.Workers()) })
 	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", func(w http.ResponseWriter, r *http.Request) {
 		stream := r.PathValue("stream")
 		if stream != "stdout" && stream != "stderr" {
 			http.Error(w, "unknown log stream", 400)
 			return
 		}
-		var job *Job
-		for _, j := range s.List() {
-			if j.ID == r.PathValue("id") {
-				job = &j
-				break
-			}
-		}
-		if job == nil {
+		job, ok := s.job(r.PathValue("id"))
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}

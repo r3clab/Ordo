@@ -14,6 +14,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const upsert = "INSERT INTO records(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body"
+
 type Store struct {
 	db   *sql.DB
 	lock *os.File
@@ -92,12 +94,12 @@ func (s *Store) Put(kind, id string, value any) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec("INSERT INTO records(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", kind, id, data)
+	_, err = s.db.Exec(upsert, kind, id, data)
 	return err
 }
 
 // PutMany publishes a whole workflow atomically, never a partially visible graph.
-func (s *Store) PutMany(kind string, values map[string]any) error {
+func PutMany[T any](s *Store, kind string, values map[string]T) error {
 	encoded := map[string][]byte{}
 	for id, value := range values {
 		data, err := json.Marshal(value)
@@ -112,7 +114,7 @@ func (s *Store) PutMany(kind string, values map[string]any) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for id, data := range encoded {
-		if _, err := tx.Exec("INSERT INTO records(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", kind, id, data); err != nil {
+		if _, err := tx.Exec(upsert, kind, id, data); err != nil {
 			return err
 		}
 	}

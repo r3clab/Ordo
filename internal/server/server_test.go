@@ -38,7 +38,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 			accepted = &worker.Attempt{ID: strings.TrimPrefix(r.URL.Path, "/v1/attempts/"), Spec: spec, State: "running"}
 			http.Error(w, "lost response after acceptance", 500)
 		case accepted != nil:
-			writeJSON(w, accepted)
+			worker.WriteJSON(w, http.StatusOK, accepted)
 		default:
 			http.NotFound(w, r)
 		}

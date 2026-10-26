@@ -55,6 +55,7 @@ func TestPodmanDoesNotInheritAgentServiceOwnership(t *testing.T) {
 				flag = "yes"
 			}
 			t.Setenv("ORDO_TEST_EXPANSION_FLAG", flag)
+			scopeProbe.done = false
 			var stdout, stderr bytes.Buffer
 			args := []string{"run", "--", "image", "$HOME ${USER} $(echo not-on-host)"}
 			if err := execPodman(context.Background(), &stdout, &stderr, args...); err != nil {

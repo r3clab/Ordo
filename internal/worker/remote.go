@@ -21,7 +21,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/r3clab/Ordo/internal/content"
 )
+
+var hostAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]*$`)
+var remoteStateDir = regexp.MustCompile(`^/[a-zA-Z0-9_./-]+$`)
 
 type Remote struct {
 	Host      string   `json:"host"`
@@ -43,10 +48,10 @@ type Tunnel struct {
 	input    *os.File
 }
 
-func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 
-func SSH(ctx context.Context, host, script string, stdin io.Reader) ([]byte, error) {
-	if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]*$`).MatchString(host) {
+func runSSH(ctx context.Context, host, script string, stdin io.Reader) ([]byte, error) {
+	if !hostAlias.MatchString(host) {
 		return nil, errors.New("invalid SSH host alias")
 	}
 	cmd := exec.CommandContext(ctx, "ssh", "-T", "-oBatchMode=yes", "-oConnectTimeout=10", host, script)
@@ -61,25 +66,25 @@ func SSH(ctx context.Context, host, script string, stdin io.Reader) ([]byte, err
 	return data, nil
 }
 
-func Unit(stateDir string) string {
+func unitName(stateDir string) string {
 	hash := sha256.Sum256([]byte(stateDir))
 	return "ordo-agent-" + hex.EncodeToString(hash[:8])
 }
 
 func (r Remote) validate() error {
-	if _, err := GPUList(strings.Join(r.GPUs, ",")); err != nil {
+	if _, err := checkGPUs(r.GPUs); err != nil {
 		return err
 	}
-	if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]*$`).MatchString(r.Host) {
+	if !hostAlias.MatchString(r.Host) {
 		return errors.New("invalid SSH host alias")
 	}
-	if !regexp.MustCompile(`^/[a-zA-Z0-9_./-]+$`).MatchString(r.StateDir) || path.Clean(r.StateDir) != r.StateDir || r.StateDir == "/" {
+	if !remoteStateDir.MatchString(r.StateDir) || path.Clean(r.StateDir) != r.StateDir || r.StateDir == "/" {
 		return errors.New("remote state must be a clean absolute path without spaces or colons")
 	}
 	if len(path.Join(r.StateDir, "agent.sock")) > 100 {
 		return errors.New("remote state path is too long for a Unix socket")
 	}
-	if _, err := CPUList(r.CPUs); err != nil {
+	if _, err := cpuList(r.CPUs); err != nil {
 		return err
 	}
 	if r.MemoryMiB <= 0 {
@@ -115,16 +120,8 @@ func artifact(file string) (string, elf.Machine, error) {
 	if f.Machine != elf.EM_X86_64 && f.Machine != elf.EM_AARCH64 {
 		return "", 0, errors.New("unsupported worker binary architecture")
 	}
-	input, err := os.Open(file)
-	if err != nil {
-		return "", 0, err
-	}
-	defer func() { _ = input.Close() }()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, input); err != nil {
-		return "", 0, err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), f.Machine, nil
+	digest, err := content.Hash(file)
+	return digest, f.Machine, err
 }
 
 // Bootstrap uploads an immutable executable and reuses, rather than replaces, a live unit.
@@ -144,7 +141,7 @@ func Bootstrap(ctx context.Context, r Remote) error {
 	if err != nil {
 		return err
 	}
-	arch, err := SSH(ctx, r.Host, "uname -m", nil)
+	arch, err := runSSH(ctx, r.Host, "uname -m", nil)
 	if err != nil {
 		return err
 	}
@@ -155,10 +152,10 @@ func Bootstrap(ctx context.Context, r Remote) error {
 	if strings.TrimSpace(string(arch)) != want {
 		return fmt.Errorf("agent binary architecture %s does not match worker %s", want, strings.TrimSpace(string(arch)))
 	}
-	root := Quote(r.StateDir)
+	root := shellQuote(r.StateDir)
 	target := path.Join(r.StateDir, "bin", digest)
-	setup := "set -eu; umask 077; mkdir -p -- " + root + "; test \"$(stat -c %a " + root + ")\" = 700; mkdir -p -- " + Quote(path.Join(r.StateDir, "bin")) + "; if test -f " + Quote(target) + "; then test \"$(sha256sum " + Quote(target) + " | cut -d ' ' -f 1)\" = " + Quote(digest) + "; printf present; else printf missing; fi"
-	present, err := SSH(ctx, r.Host, setup, nil)
+	setup := "set -eu; umask 077; mkdir -p -- " + root + "; test \"$(stat -c %a " + root + ")\" = 700; mkdir -p -- " + shellQuote(path.Join(r.StateDir, "bin")) + "; if test -f " + shellQuote(target) + "; then test \"$(sha256sum " + shellQuote(target) + " | cut -d ' ' -f 1)\" = " + shellQuote(digest) + "; printf present; else printf missing; fi"
+	present, err := runSSH(ctx, r.Host, setup, nil)
 	if err != nil {
 		return err
 	}
@@ -169,19 +166,19 @@ func Bootstrap(ctx context.Context, r Remote) error {
 		}
 		defer func() { _ = file.Close() }()
 		// A unique temporary file avoids corrupting an executable used by an existing agent.
-		upload := "set -eu; umask 077; tmp=$(mktemp " + Quote(path.Join(r.StateDir, "bin", "upload.XXXXXX")) + "); trap 'rm -f -- \"$tmp\"' EXIT; cat > \"$tmp\"; test \"$(sha256sum \"$tmp\" | cut -d ' ' -f 1)\" = " + Quote(digest) + "; chmod 500 \"$tmp\"; if test -e " + Quote(target) + "; then test \"$(sha256sum " + Quote(target) + " | cut -d ' ' -f 1)\" = " + Quote(digest) + "; else mv -- \"$tmp\" " + Quote(target) + "; fi"
-		if _, err := SSH(ctx, r.Host, upload, file); err != nil {
+		upload := "set -eu; umask 077; tmp=$(mktemp " + shellQuote(path.Join(r.StateDir, "bin", "upload.XXXXXX")) + "); trap 'rm -f -- \"$tmp\"' EXIT; cat > \"$tmp\"; test \"$(sha256sum \"$tmp\" | cut -d ' ' -f 1)\" = " + shellQuote(digest) + "; chmod 500 \"$tmp\"; if test -e " + shellQuote(target) + "; then test \"$(sha256sum " + shellQuote(target) + " | cut -d ' ' -f 1)\" = " + shellQuote(digest) + "; else mv -- \"$tmp\" " + shellQuote(target) + "; fi"
+		if _, err := runSSH(ctx, r.Host, upload, file); err != nil {
 			return err
 		}
 	} else if string(present) != "present" {
 		return errors.New("unexpected SSH bootstrap output")
 	}
-	unit := Unit(r.StateDir)
-	start := "set -eu; test \"$(loginctl show-user \"$(id -u)\" -p Linger --value)\" = yes; if ! systemctl --user is-active --quiet " + Quote(unit) + "; then systemd-run --user --collect --unit=" + Quote(unit) + " --property=Type=exec --property=Restart=on-failure --property=RestartSec=1 --property=Delegate=yes --property=TimeoutStopSec=20 --setenv=PATH=\"$PATH\" " + Quote(target) + " agent --state " + root + " --cpus " + Quote(r.CPUs) + fmt.Sprintf(" --memory-mib %d", r.MemoryMiB) + " --gpus " + Quote(strings.Join(r.GPUs, ",")) + "; fi"
-	if _, err := SSH(ctx, r.Host, start, nil); err != nil {
+	unit := unitName(r.StateDir)
+	start := "set -eu; test \"$(loginctl show-user \"$(id -u)\" -p Linger --value)\" = yes; if ! systemctl --user is-active --quiet " + shellQuote(unit) + "; then systemd-run --user --collect --unit=" + shellQuote(unit) + " --property=Type=exec --property=Restart=on-failure --property=RestartSec=1 --property=Delegate=yes --property=TimeoutStopSec=20 --setenv=PATH=\"$PATH\" " + shellQuote(target) + " agent --state " + root + " --cpus " + shellQuote(r.CPUs) + fmt.Sprintf(" --memory-mib %d", r.MemoryMiB) + " --gpus " + shellQuote(strings.Join(r.GPUs, ",")) + "; fi"
+	if _, err := runSSH(ctx, r.Host, start, nil); err != nil {
 		return err
 	}
-	actual, err := SSH(ctx, r.Host, "systemctl --user show "+Quote(unit)+" -p ExecStart --value", nil)
+	actual, err := runSSH(ctx, r.Host, "systemctl --user show "+shellQuote(unit)+" -p ExecStart --value", nil)
 	if err != nil {
 		return err
 	}
@@ -232,11 +229,11 @@ func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
 		err := Call(requestCtx, t.Client, http.MethodGet, "/v1/info", nil, &t.Info)
 		end()
 		if err == nil {
-			if t.Info.Protocol != ProtocolVersion || t.Info.ID == "" {
+			if t.Info.Protocol != protocolVersion || t.Info.ID == "" {
 				_ = t.Close()
 				return nil, errors.New("incompatible agent protocol or identity")
 			}
-			requestedGPUs, _ := GPUList(strings.Join(r.GPUs, ","))
+			requestedGPUs, _ := checkGPUs(r.GPUs)
 			var actualGPUs []string
 			for _, gpu := range t.Info.Hardware.GPUs {
 				actualGPUs = append(actualGPUs, gpu.UUID)
@@ -246,13 +243,10 @@ func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
 				_ = t.Close()
 				return nil, errors.New("live agent GPU pool differs from configuration")
 			}
-			configured, _ := CPUList(r.CPUs)
-			var actual []int
-			for _, core := range t.Info.Hardware.Cores {
-				actual = append(actual, core...)
-			}
-			parsed, _ := CPUList(CPUString(actual))
-			if CPUString(configured) != CPUString(parsed) || t.Info.Hardware.MemoryMiB != r.MemoryMiB {
+			configured, _ := cpuList(r.CPUs)
+			actual := slices.Concat(t.Info.Hardware.Cores...)
+			slices.Sort(actual)
+			if !slices.Equal(configured, actual) || t.Info.Hardware.MemoryMiB != r.MemoryMiB {
 				_ = t.Close()
 				return nil, errors.New("live agent pool differs from configuration; do not change active reservations implicitly")
 			}
@@ -316,9 +310,8 @@ func Call(ctx context.Context, client *http.Client, method, endpoint string, inp
 		return err
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode/100 != 2 {
-		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return &HTTPError{Status: response.StatusCode, Message: strings.TrimSpace(string(data))}
+	if err := checkResponse(response); err != nil {
+		return err
 	}
 	if output == nil {
 		_, err = io.Copy(io.Discard, response.Body)

@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -34,7 +33,7 @@ type Allocation struct {
 	GPUs      []string `json:"gpus,omitempty"`
 }
 
-func CPUList(text string) ([]int, error) {
+func cpuList(text string) ([]int, error) {
 	set := map[int]bool{}
 	for _, part := range strings.Split(text, ",") {
 		a, b, span := strings.Cut(part, "-")
@@ -64,7 +63,7 @@ func CPUList(text string) ([]int, error) {
 	return result, nil
 }
 
-func CPUString(cpus []int) string {
+func cpuString(cpus []int) string {
 	parts := make([]string, len(cpus))
 	for i, cpu := range cpus {
 		parts[i] = strconv.Itoa(cpu)
@@ -76,7 +75,7 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 	if runtime.GOOS != "linux" {
 		return Hardware{}, errors.New("worker execution requires Linux")
 	}
-	pool, err := CPUList(cpus)
+	pool, err := cpuList(cpus)
 	if err != nil {
 		return Hardware{}, err
 	}
@@ -84,7 +83,7 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 	if err != nil {
 		return Hardware{}, err
 	}
-	online, err := CPUList(strings.TrimSpace(string(onlineData)))
+	online, err := cpuList(strings.TrimSpace(string(onlineData)))
 	if err != nil {
 		return Hardware{}, err
 	}
@@ -113,13 +112,13 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 		if err != nil {
 			return h, err
 		}
-		siblings, err := CPUList(strings.TrimSpace(string(data)))
+		siblings, err := cpuList(strings.TrimSpace(string(data)))
 		if err != nil {
 			return h, err
 		}
 		for _, n := range siblings {
 			if !slices.Contains(pool, n) || !slices.Contains(online, n) {
-				return h, fmt.Errorf("CPU %d requires all online SMT siblings %s in the pool", cpu, CPUString(siblings))
+				return h, fmt.Errorf("CPU %d requires all online SMT siblings %s in the pool", cpu, cpuString(siblings))
 			}
 			seen[n] = true
 		}
@@ -141,10 +140,9 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 		return h, err
 	}
 	var totalKiB int64
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	for scanner.Scan() {
-		if strings.HasPrefix(scanner.Text(), "MemTotal:") {
-			if _, err := fmt.Sscanf(scanner.Text(), "MemTotal: %d kB", &totalKiB); err != nil {
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			if _, err := fmt.Sscanf(line, "MemTotal: %d kB", &totalKiB); err != nil {
 				return h, err
 			}
 			break
@@ -154,11 +152,6 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 		return h, errors.New("worker memory budget exceeds host memory or is not positive")
 	}
 	return h, nil
-}
-
-func Fits(h Hardware, req Resources, held []Allocation) bool {
-	_, err := allocate(h, req, held)
-	return err == nil
 }
 
 func allocate(h Hardware, req Resources, held []Allocation) (Allocation, error) {

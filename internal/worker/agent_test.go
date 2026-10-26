@@ -136,11 +136,11 @@ func TestWorkerHTTPValidation(t *testing.T) {
 
 func TestCPUSetAndMemoryAccounting(t *testing.T) {
 	for _, s := range []string{"", "0,0", "2-1", "-1", "1,", "0-65536"} {
-		if _, err := CPUList(s); err == nil {
+		if _, err := cpuList(s); err == nil {
 			t.Fatalf("accepted %q", s)
 		}
 	}
-	got, err := CPUList("62-63,126-127")
+	got, err := cpuList("62-63,126-127")
 	if err != nil || !slices.Equal(got, []int{62, 63, 126, 127}) {
 		t.Fatalf("%v %v", got, err)
 	}

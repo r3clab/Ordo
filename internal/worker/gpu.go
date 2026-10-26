@@ -1,12 +1,14 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,8 +32,10 @@ func GPUList(text string) ([]string, error) {
 	if text == "" {
 		return nil, nil
 	}
-	ids := strings.Split(text, ",")
-	slices.Sort(ids)
+	return checkGPUs(strings.Split(text, ","))
+}
+func checkGPUs(ids []string) ([]string, error) {
+	ids = slices.Sorted(slices.Values(ids))
 	for i, id := range ids {
 		if !gpuUUID.MatchString(id) || (i > 0 && ids[i-1] == id) {
 			return nil, errors.New("GPU pool must contain unique full NVIDIA GPU UUIDs")
@@ -43,14 +47,14 @@ func discoverGPUs(ctx context.Context, ids []string, root string) ([]GPU, error)
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	if _, err := GPUList(strings.Join(ids, ",")); err != nil {
+	if _, err := checkGPUs(ids); err != nil {
 		return nil, err
 	}
 	data, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,memory.total,driver_version,mig.mode.current", "--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil, fmt.Errorf("GPU discovery: %w", err)
 	}
-	rows, err := csv.NewReader(strings.NewReader(string(data))).ReadAll()
+	rows, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
 	if err != nil {
 		return nil, err
 	}
@@ -112,24 +116,11 @@ func discoverGPUs(ctx context.Context, ids []string, root string) ([]GPU, error)
 		}
 		seen[device.Name] = true
 	}
-	f, err := os.CreateTemp(dir, ".spec-")
+	err = content.WriteAtomic(filepath.Join(dir, "nvidia.json"), func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
-	if _, err := f.Write(data); err != nil {
-		return nil, err
-	}
-	if err := f.Sync(); err != nil {
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(f.Name(), filepath.Join(dir, "nvidia.json")); err != nil {
-		return nil, err
-	}
-	if err := content.SyncDir(dir); err != nil {
 		return nil, err
 	}
 	return gpus, nil

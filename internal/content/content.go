@@ -64,6 +64,41 @@ func Put(dir string, r io.Reader, want string) (string, error) {
 	}
 	return id, SyncDir(dir)
 }
+func PutFile(dir, file, want string) (string, error) {
+	if Valid(want) {
+		if info, err := os.Lstat(filepath.Join(dir, want)); err == nil && info.Mode().IsRegular() {
+			return want, nil
+		}
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	id, err := Put(dir, f, want)
+	return id, errors.Join(err, f.Close())
+}
+
+func WriteAtomic(path string, write func(io.Writer) error) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
+	if err := write(f); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	return SyncDir(dir)
+}
 func Hash(file string) (string, error) {
 	f, err := os.Open(file)
 	if err != nil {
@@ -79,14 +114,19 @@ func Hash(file string) (string, error) {
 
 // Archive publishes only a complete, synced tar. Only directories and regular files are supported.
 func Archive(dir, dest string) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(dest), ".archive-")
+	hash := sha256.New()
+	err := WriteAtomic(dest, func(f io.Writer) error {
+		tw := tar.NewWriter(io.MultiWriter(f, hash))
+		return errors.Join(writeTree(tw, dir), tw.Close())
+	})
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
-	hash := sha256.New()
-	tw := tar.NewWriter(io.MultiWriter(f, hash))
-	err = filepath.WalkDir(dir, func(file string, entry fs.DirEntry, walkErr error) error {
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func writeTree(tw *tar.Writer, dir string) error {
+	return filepath.WalkDir(dir, func(file string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -134,19 +174,6 @@ func Archive(dir, dest string) (string, error) {
 		_, copyErr := io.Copy(tw, in)
 		return errors.Join(copyErr, in.Close())
 	})
-	if err = errors.Join(err, tw.Close()); err != nil {
-		return "", err
-	}
-	if err := f.Sync(); err != nil {
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(f.Name(), dest); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), SyncDir(filepath.Dir(dest))
 }
 
 func Extract(archive, dest string) error {

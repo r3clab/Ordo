@@ -10,19 +10,14 @@ import (
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/task"
 	"github.com/r3clab/Ordo/internal/worker"
-	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 )
-
-var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
 type Request struct {
 	ID             string            `json:"id,omitempty"`
@@ -107,7 +102,7 @@ func Open(root string, workers []worker.Remote) (*Server, error) {
 			_ = db.Close()
 			return nil, err
 		}
-		if !namePattern.MatchString(j.ID) {
+		if !worker.ValidName(j.ID) {
 			_ = db.Close()
 			return nil, errors.New("invalid saved job ID")
 		}
@@ -119,7 +114,15 @@ func Open(root string, workers []worker.Remote) (*Server, error) {
 	}
 	return s, nil
 }
-func (s *Server) Close() error { return s.store.Close() }
+func (s *Server) Close() error  { return s.store.Close() }
+func Socket(root string) string { return filepath.Join(root, "server.sock") }
+func (s *Server) job(id string) (Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	j.Attempts = slices.Clone(j.Attempts)
+	return j, ok
+}
 func (s *Server) List() []Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -134,24 +137,47 @@ func (s *Server) List() []Job {
 func (s *Server) save(j Job) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.fault != nil {
-		return s.fault
-	}
 	if old, ok := s.jobs[j.ID]; ok && old.CancelRequested {
 		j.CancelRequested = true
 		if j.Terminal() {
 			j.State = "cancelled"
 		}
 	}
-	if err := s.store.Put("job", j.ID, j); err != nil {
+	return s.commitLocked(j)
+}
+
+// commitLocked latches s.fault on a failed write so no later mutation diverges from the store.
+func (s *Server) commitLocked(jobs ...Job) error {
+	if s.fault != nil {
+		return s.fault
+	}
+	values := make(map[string]Job, len(jobs))
+	for _, j := range jobs {
+		values[j.ID] = j
+	}
+	if err := state.PutMany(s.store, "job", values); err != nil {
 		s.fault = err
 		return err
 	}
-	j.Attempts = slices.Clone(j.Attempts)
-	s.jobs[j.ID] = j
+	for _, j := range jobs {
+		j.Attempts = slices.Clone(j.Attempts)
+		s.jobs[j.ID] = j
+	}
 	return nil
 }
-func (s *Server) prepare(ctx context.Context, r Request) (Job, error) {
+
+type stagedImage struct{ id, blob string }
+
+type staging struct {
+	images map[[2]string]stagedImage
+	inputs map[string]string
+}
+
+func newStaging() *staging {
+	return &staging{images: map[[2]string]stagedImage{}, inputs: map[string]string{}}
+}
+
+func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, error) {
 	if r.Match != nil {
 		if err := r.Match.Validate(r.Resources); err != nil {
 			return Job{}, err
@@ -160,13 +186,13 @@ func (s *Server) prepare(ctx context.Context, r Request) (Job, error) {
 	if err := r.Retry.validate(); err != nil {
 		return Job{}, err
 	}
-	if r.TimeoutSeconds < 0 || r.TimeoutSeconds > 31536000 {
-		return Job{}, errors.New("timeout must be 0..31536000 seconds")
+	if r.TimeoutSeconds < 0 || r.TimeoutSeconds > worker.MaxTimeoutSeconds {
+		return Job{}, fmt.Errorf("timeout must be 0..%d seconds", worker.MaxTimeoutSeconds)
 	}
 	if r.ID == "" {
 		r.ID = strings.ToLower(rand.Text())
 	}
-	if !namePattern.MatchString(r.ID) || r.Resources.Cores <= 0 || r.Resources.MemoryMiB <= 0 || r.Resources.GPUs < 0 {
+	if !worker.ValidName(r.ID) || r.Resources.Cores <= 0 || r.Resources.MemoryMiB <= 0 || r.Resources.GPUs < 0 {
 		return Job{}, errors.New("valid ID and positive cores/memory required")
 	}
 	tmp, err := os.MkdirTemp(s.Root, ".prepare-")
@@ -174,56 +200,54 @@ func (s *Server) prepare(ctx context.Context, r Request) (Job, error) {
 		return Job{}, err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	image := r.Image
-	archive := r.Archive
-	if archive == "" {
-		archive = filepath.Join(tmp, "image.tar")
-		image, err = task.ExportImage(ctx, image, archive)
+	blobs := filepath.Join(s.Root, "blobs")
+	key := [2]string{r.Image, r.Archive}
+	image, ok := st.images[key]
+	if !ok {
+		image.id = r.Image
+		archive := r.Archive
+		if archive == "" {
+			archive = filepath.Join(tmp, "image.tar")
+			image.id, err = task.ExportImage(ctx, image.id, archive)
+			if err != nil {
+				return Job{}, err
+			}
+		} else if !task.ValidImageID(image.id) {
+			return Job{}, errors.New("an OCI archive requires its immutable sha256 image ID")
+		}
+		image.blob, err = content.PutFile(blobs, archive, "")
 		if err != nil {
 			return Job{}, err
 		}
-	} else if !strings.HasPrefix(image, "sha256:") || !content.Valid(strings.TrimPrefix(image, "sha256:")) {
-		return Job{}, errors.New("an OCI archive requires its immutable sha256 image ID")
+		st.images[key] = image
 	}
-	file, err := os.Open(archive)
-	if err != nil {
-		return Job{}, err
-	}
-	blob, err := content.Put(filepath.Join(s.Root, "blobs"), file, "")
-	err = errors.Join(err, file.Close())
-	if err != nil {
-		return Job{}, err
-	}
-	spec := worker.Spec{Image: image, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}
+	spec := worker.Spec{Image: image.id, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}
 	for name, source := range r.Inputs {
-		if !namePattern.MatchString(name) {
+		if !worker.ValidName(name) {
 			return Job{}, errors.New("invalid input name")
 		}
-		file := filepath.Join(tmp, "input.tar")
-		hash, err := content.Archive(source, file)
-		if err != nil {
-			return Job{}, err
-		}
-		f, err := os.Open(file)
-		if err != nil {
-			return Job{}, err
-		}
-		_, err = content.Put(filepath.Join(s.Root, "blobs"), f, hash)
-		err = errors.Join(err, f.Close())
-		if err != nil {
-			return Job{}, err
+		hash, ok := st.inputs[source]
+		if !ok {
+			file := filepath.Join(tmp, "input.tar")
+			hash, err = content.Archive(source, file)
+			if err != nil {
+				return Job{}, err
+			}
+			if _, err := content.PutFile(blobs, file, hash); err != nil {
+				return Job{}, err
+			}
+			st.inputs[source] = hash
 		}
 		spec.Inputs[name] = hash
 	}
-	j := Job{ID: r.ID, Spec: spec, Archive: blob, State: "queued", CreatedAt: time.Now().UTC(), Retry: r.Retry}
-	j.Key = jobKey(j)
-	return j, nil
+	return Job{ID: r.ID, Spec: spec, Archive: image.blob, State: "queued", CreatedAt: time.Now().UTC(), Retry: r.Retry}, nil
 }
 func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
-	j, err := s.prepare(ctx, r)
+	j, err := s.prepare(ctx, r, newStaging())
 	if err != nil {
 		return Job{}, err
 	}
+	j.Key = jobKey(j)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fault != nil {
@@ -239,11 +263,9 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 		}
 		return old, nil
 	}
-	if err := s.store.Put("job", j.ID, j); err != nil {
-		s.fault = err
+	if err := s.commitLocked(j); err != nil {
 		return Job{}, err
 	}
-	s.jobs[j.ID] = j
 	return j, nil
 }
 
@@ -258,29 +280,11 @@ func (s *Server) Run(ctx context.Context, address string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Web UI: http://%s (token file: %s)\n", web.Addr().String(), filepath.Join(s.Root, "token"))
-	socket := filepath.Join(s.Root, "server.sock")
-	if info, err := os.Lstat(socket); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return errors.New("server socket path is not a socket")
-		}
-		if c, err := net.DialTimeout("unix", socket, time.Second); err == nil {
-			_ = c.Close()
-			return errors.New("server socket already live")
-		}
-		if err := os.Remove(socket); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	listener, err := net.Listen("unix", socket)
+	listener, err := worker.ListenUnix(Socket(s.Root))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = listener.Close() }()
-	if err := os.Chmod(socket, 0o600); err != nil {
-		return err
-	}
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -334,29 +338,7 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 		err := worker.Call(ctx, tunnel.Client, http.MethodGet, "/v1/info", nil, &info)
 		if err == nil {
 			s.workerStatus(remote.Host, &info, nil)
-			for _, j := range s.List() {
-				if j.Terminal() {
-					continue
-				}
-				s.mu.Lock()
-				j = s.jobs[j.ID]
-				j.Attempts = slices.Clone(j.Attempts)
-				available := !s.busy[j.ID] && s.fault == nil && !j.Terminal()
-				if available {
-					s.busy[j.ID] = true
-				}
-				s.mu.Unlock()
-				if !available {
-					continue
-				}
-				err = s.reconcile(ctx, j, remote.Host, info, tunnel.Client)
-				s.mu.Lock()
-				delete(s.busy, j.ID)
-				s.mu.Unlock()
-				if err != nil {
-					break
-				}
-			}
+			err = s.reconcileAll(ctx, remote.Host, info, tunnel.Client)
 		}
 		if err != nil {
 			s.workerStatus(remote.Host, nil, err)
@@ -369,6 +351,32 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 		case <-time.After(time.Second):
 		}
 	}
+}
+func (s *Server) reconcileAll(ctx context.Context, host string, info worker.Info, client *http.Client) error {
+	for _, j := range s.List() {
+		if j.Terminal() {
+			continue
+		}
+		s.mu.Lock()
+		j = s.jobs[j.ID]
+		j.Attempts = slices.Clone(j.Attempts)
+		available := !s.busy[j.ID] && s.fault == nil && !j.Terminal()
+		if available {
+			s.busy[j.ID] = true
+		}
+		s.mu.Unlock()
+		if !available {
+			continue
+		}
+		err := s.reconcile(ctx, j, host, info, client)
+		s.mu.Lock()
+		delete(s.busy, j.ID)
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.Info, client *http.Client) error {
 	if j.State == "queued" {
@@ -383,7 +391,10 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 		if info.Error != "" || !worker.FitsSpec(info.Hardware, j.Spec, info.Held) {
 			return nil
 		}
-		if err := worker.EnsureImage(ctx, client, filepath.Join(s.Root, "blobs", j.Archive), j.Spec.Image); err != nil {
+		if err := s.importOutputs(&j); err != nil {
+			return err
+		}
+		if err := worker.EnsureImage(ctx, client, filepath.Join(s.Root, "blobs", j.Archive), j.Archive, j.Spec.Image); err != nil {
 			return err
 		}
 		for _, hash := range j.Spec.Inputs {
@@ -431,6 +442,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 	if err != nil {
 		return err
 	}
+	unchanged := at.Seen && at.Remote != nil && at.Remote.State == run.State && at.Remote.UpdatedAt.Equal(run.UpdatedAt) && j.Error == run.Error
 	at.Seen = true
 	at.Remote = &run
 	j.Error = run.Error
@@ -440,10 +452,14 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 				return err
 			}
 		}
-		j.State = "running"
+		state := "running"
 		if run.State == "blocked" {
-			j.State = "blocked"
+			state = "blocked"
 		}
+		if unchanged && j.State == state {
+			return nil
+		}
+		j.State = state
 		return s.save(j)
 	}
 	if run.State != "finished" && (run.Result == nil || run.Result.State != "finished") {
@@ -474,7 +490,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 	if err != nil {
 		return err
 	}
-	if result.Request.ReservationID != info.ID+"/"+at.ID || result.ContainerID != run.Result.ContainerID || result.ImageID != j.Spec.Image || result.ExitCode == nil || *result.ExitCode != *run.Result.ExitCode {
+	if result.Request.ReservationID != worker.ReservationID(info.ID, at.ID) || result.ContainerID != run.Result.ContainerID || result.ImageID != j.Spec.Image || result.ExitCode == nil || *result.ExitCode != *run.Result.ExitCode {
 		return errors.New("downloaded result does not match the dispatched attempt")
 	}
 	at.ResultDir = dest
@@ -490,23 +506,20 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.webRoutes(mux)
-	mux.HandleFunc("POST /v1/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
-		if err := s.Cancel(r.PathValue("id"), false); err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+	cancel := func(workflow bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if err := s.Cancel(r.PathValue("id"), workflow); err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			worker.WriteJSON(w, http.StatusOK, map[string]bool{"requested": true})
 		}
-		writeJSON(w, map[string]bool{"requested": true})
-	})
-	mux.HandleFunc("POST /v1/workflows/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
-		if err := s.Cancel(r.PathValue("id"), true); err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		writeJSON(w, map[string]bool{"requested": true})
-	})
+	}
+	mux.HandleFunc("POST /v1/jobs/{id}/cancel", cancel(false))
+	mux.HandleFunc("POST /v1/workflows/{id}/cancel", cancel(true))
 	mux.HandleFunc("POST /v1/workflows", func(w http.ResponseWriter, r *http.Request) {
 		var flow Workflow
-		if err := decodeRequest(w, r, 8<<20, &flow); err != nil {
+		if err := worker.DecodeJSON(http.MaxBytesReader(w, r.Body, 8<<20), &flow); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -515,21 +528,20 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, jobs)
+		worker.WriteJSON(w, http.StatusOK, jobs)
 	})
-	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.List()) })
+	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) { worker.WriteJSON(w, http.StatusOK, s.List()) })
 	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		for _, j := range s.List() {
-			if j.ID == r.PathValue("id") {
-				writeJSON(w, j)
-				return
-			}
+		j, ok := s.job(r.PathValue("id"))
+		if !ok {
+			http.NotFound(w, r)
+			return
 		}
-		http.NotFound(w, r)
+		worker.WriteJSON(w, http.StatusOK, j)
 	})
 	mux.HandleFunc("POST /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
 		var req Request
-		if err := decodeRequest(w, r, 1<<20, &req); err != nil {
+		if err := worker.DecodeJSON(http.MaxBytesReader(w, r.Body, 1<<20), &req); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -538,23 +550,7 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, j)
+		worker.WriteJSON(w, http.StatusOK, j)
 	})
 	return mux
-}
-func decodeRequest(w http.ResponseWriter, r *http.Request, limit int64, value any) error {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
-	d.DisallowUnknownFields()
-	if err := d.Decode(value); err != nil {
-		return err
-	}
-	if err := d.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return errors.New("expected exactly one JSON value")
-	}
-	return nil
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
 }

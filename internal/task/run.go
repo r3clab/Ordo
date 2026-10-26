@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
@@ -176,22 +177,11 @@ func execute(ctx context.Context, r *record, podman command) error {
 		return err
 	}
 
-	image, err := podman.output(ctx, "image", "inspect", "--format=json", "--", r.Request.Image)
+	imageID, err := podman.imageID(ctx, r.Request.Image)
 	if err != nil {
 		return fmt.Errorf("inspect local image; load it with nix2container's copyToPodman first: %w", err)
 	}
-	var images []struct{ ID string }
-	if err := json.Unmarshal(image, &images); err != nil {
-		return fmt.Errorf("decode image inspection: %w", err)
-	}
-	if len(images) != 1 {
-		return errors.New("expected exactly one local image")
-	}
-	imageID := strings.TrimPrefix(images[0].ID, "sha256:")
-	if !validID(imageID) {
-		return errors.New("image inspection did not return a SHA-256 image ID")
-	}
-	r.ImageID = "sha256:" + imageID
+	r.ImageID = imageID
 	if err := saveRecord(r); err != nil {
 		return err
 	}
@@ -231,7 +221,7 @@ func execute(ctx context.Context, r *record, podman command) error {
 		return err
 	}
 	id := strings.TrimSpace(string(containerID))
-	if !validID(id) {
+	if !content.Valid(id) {
 		return errors.New("container creation did not return a valid ID; retain the run directory for recovery")
 	}
 	r.ContainerID = id
@@ -330,15 +320,14 @@ func execPodman(ctx context.Context, stdout, stderr io.Writer, args ...string) e
 	if os.Getenv("INVOCATION_ID") != "" {
 		// FUSE mounts and other runtime helpers must outlive the agent's service cgroup.
 		flags := []string{"--user", "--scope", "--quiet", "--collect", "--property=Delegate=yes", "--unit=ordo-runtime-" + strings.ToLower(rand.Text())}
-		help, err := exec.CommandContext(ctx, "systemd-run", "--help").Output()
+		optOut, err := scopeExpansionOptOut(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return fmt.Errorf("probe runtime scope support: %w", err)
 		}
-		// Old systemd scopes never expand argv; newer versions provide an explicit opt-out.
-		if bytes.Contains(help, []byte("--expand-environment=")) {
+		if optOut {
 			flags = append(flags, "--expand-environment=no")
 		}
 		cmd = exec.CommandContext(ctx, "systemd-run", append(append(flags, "--"), cmd.Args...)...)
@@ -354,6 +343,26 @@ func execPodman(ctx context.Context, stdout, stderr io.Writer, args ...string) e
 		return err
 	}
 	return nil
+}
+
+var scopeProbe struct {
+	sync.Mutex
+	done, optOut bool
+}
+
+func scopeExpansionOptOut(ctx context.Context) (bool, error) {
+	scopeProbe.Lock()
+	defer scopeProbe.Unlock()
+	if !scopeProbe.done {
+		help, err := exec.CommandContext(ctx, "systemd-run", "--help").Output()
+		if err != nil {
+			return false, err
+		}
+		// Old systemd scopes never expand argv; newer versions provide an explicit opt-out.
+		scopeProbe.optOut = bytes.Contains(help, []byte("--expand-environment="))
+		scopeProbe.done = true
+	}
+	return scopeProbe.optOut, nil
 }
 
 func (podman command) output(ctx context.Context, args ...string) ([]byte, error) {
@@ -396,23 +405,9 @@ func collectLogs(ctx context.Context, r *record, podman command) error {
 }
 
 func saveRecord(r *record) error {
-	file, err := os.CreateTemp(r.Request.OutputDir, ".run-*.json")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(file.Name()) }()
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	err = encoder.Encode(r)
-	if err := errors.Join(err, file.Sync(), file.Close()); err != nil {
-		return err
-	}
-	if err := os.Rename(file.Name(), filepath.Join(r.Request.OutputDir, "run.json")); err != nil {
-		return err
-	}
-	dir, err := os.Open(r.Request.OutputDir)
-	if err != nil {
-		return err
-	}
-	return errors.Join(dir.Sync(), dir.Close())
+	return content.WriteAtomic(filepath.Join(r.Request.OutputDir, "run.json"), func(w io.Writer) error {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(r)
+	})
 }

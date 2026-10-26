@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,19 +11,15 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
-func decodeJSON(data []byte, value any) error {
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.DisallowUnknownFields()
-	if err := d.Decode(value); err != nil {
+func decodeFile(file string, value any) error {
+	f, err := os.Open(file)
+	if err != nil {
 		return err
 	}
-	if err := d.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return errors.New("expected exactly one JSON value")
-	}
-	return nil
+	defer func() { _ = f.Close() }()
+	return worker.DecodeJSON(f, value)
 }
 
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
@@ -37,19 +32,14 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err := f.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, err = fmt.Fprintln(out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331]")
-			return err
 		}
 		return err
 	}
 	if root == "" || config == "" || f.NArg() != 0 {
 		return errors.New("--state and --workers are required")
 	}
-	data, err := os.ReadFile(config)
-	if err != nil {
-		return err
-	}
 	var workers []worker.Remote
-	if err := decodeJSON(data, &workers); err != nil {
+	if err := decodeFile(config, &workers); err != nil {
 		return err
 	}
 	s, err := server.Open(root, workers)
@@ -77,18 +67,14 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	if root == "" || f.NArg() != 0 {
 		return errors.New("--state is required")
 	}
-	client := worker.Client(filepath.Join(root, "server.sock"))
+	client := worker.Client(server.Socket(root))
 	client.Timeout = 0
 	defer client.CloseIdleConnections()
 	var result any
 	switch operation {
 	case "workflow":
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return err
-		}
 		var flow server.Workflow
-		if err := decodeJSON(data, &flow); err != nil {
+		if err := decodeFile(file, &flow); err != nil {
 			return err
 		}
 		if id != "" {
@@ -106,12 +92,8 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 	case "submit":
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return err
-		}
 		var req server.Request
-		if err := decodeJSON(data, &req); err != nil {
+		if err := decodeFile(file, &req); err != nil {
 			return err
 		}
 		if id != "" {

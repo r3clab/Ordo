@@ -35,7 +35,7 @@ func TestReconcileCompletedExecutionWithoutPodman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := task.Record{Request: task.Request{Image: run.Spec.Image, CPUs: CPUString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, OutputDir: a.runDir(run.ID), ReservationID: a.info.ID + "/" + run.ID}, ContainerName: "ordo-completed", ContainerID: strings.Repeat("b", 64), ImageID: run.Spec.Image, State: "finished", ContainerRemoved: true, ExitCode: new(7)}
+	r := task.Record{Request: task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, OutputDir: a.runDir(run.ID), ReservationID: a.info.ID + "/" + run.ID}, ContainerName: "ordo-completed", ContainerID: strings.Repeat("b", 64), ImageID: run.Spec.Image, State: "finished", ContainerRemoved: true, ExitCode: new(7)}
 	savedRun(t, a, run, r)
 	a.wg.Add(1)
 	a.execute(run, false)

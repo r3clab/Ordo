@@ -32,7 +32,7 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		respond(w, 200, map[string]string{"sha256": hash})
+		WriteJSON(w, 200, map[string]string{"sha256": hash})
 	})
 	mux.HandleFunc("POST /v1/inputs/{hash}", func(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
@@ -42,18 +42,23 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			return
 		}
 		file := filepath.Join(blobs, hash)
-		actual, err := content.Hash(file)
-		if err == nil && actual != hash {
-			err = errors.New("cached blob checksum mismatch")
+		tree := filepath.Join(a.cfg.StateDir, "trees", hash)
+		var err error
+		if _, statErr := os.Lstat(tree); statErr != nil {
+			var actual string
+			actual, err = content.Hash(file)
+			if err == nil && actual != hash {
+				err = errors.New("cached blob checksum mismatch")
+			}
 		}
 		if err == nil {
-			err = content.Extract(file, filepath.Join(a.cfg.StateDir, "trees", hash))
+			err = content.Extract(file, tree)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		respond(w, 200, map[string]string{"sha256": hash})
+		WriteJSON(w, 200, map[string]string{"sha256": hash})
 	})
 	mux.HandleFunc("POST /v1/images", func(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
@@ -61,19 +66,19 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			Image   string `json:"image"`
 			Archive string `json:"archive"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || !imageIdentity.MatchString(req.Image) || !content.Valid(req.Archive) {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || !task.ValidImageID(req.Image) || !content.Valid(req.Archive) {
 			http.Error(w, "invalid image/archive identity", 400)
 			return
 		}
 		if id, err := task.ImageID(r.Context(), req.Image); err == nil && id == req.Image {
-			respond(w, 200, req)
+			WriteJSON(w, 200, req)
 			return
 		}
 		if err := task.LoadImage(r.Context(), filepath.Join(blobs, req.Archive), req.Image); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		respond(w, 200, req)
+		WriteJSON(w, 200, req)
 	})
 	mux.HandleFunc("GET /v1/results/{id}", func(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
@@ -117,8 +122,8 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 	})
 }
 
-// Upload streams a verified content blob; an existing immutable blob avoids retransmission.
-func Upload(ctx context.Context, client *http.Client, file, digest string) error {
+// uploadBlob streams a verified content blob; an existing immutable blob avoids retransmission.
+func uploadBlob(ctx context.Context, client *http.Client, file, digest string) error {
 	if !content.Valid(digest) {
 		return errors.New("invalid blob digest")
 	}
@@ -147,57 +152,44 @@ func Upload(ctx context.Context, client *http.Client, file, digest string) error
 	if err != nil {
 		return err
 	}
-	streaming := *client
-	streaming.Timeout = 0
-	resp, err = streaming.Do(req)
+	resp, err = untimed(client).Do(req)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode/100 != 2 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("upload HTTP %d: %s", resp.StatusCode, data)
+	if err := checkResponse(resp); err != nil {
+		return err
 	}
 	_, err = io.Copy(io.Discard, resp.Body)
 	return err
 }
-func EnsureImage(ctx context.Context, client *http.Client, file, image string) error {
-	hash, err := content.Hash(file)
-	if err != nil {
+func EnsureImage(ctx context.Context, client *http.Client, file, digest, image string) error {
+	if err := uploadBlob(ctx, client, file, digest); err != nil {
 		return err
 	}
-	if err := Upload(ctx, client, file, hash); err != nil {
-		return err
-	}
-	streaming := *client
-	streaming.Timeout = 0
-	return Call(ctx, &streaming, http.MethodPost, "/v1/images", map[string]string{"image": image, "archive": hash}, nil)
+	return Call(ctx, untimed(client), http.MethodPost, "/v1/images", map[string]string{"image": image, "archive": digest}, nil)
 }
 func EnsureInput(ctx context.Context, client *http.Client, file, hash string) error {
-	if err := Upload(ctx, client, file, hash); err != nil {
+	if err := uploadBlob(ctx, client, file, hash); err != nil {
 		return err
 	}
-	streaming := *client
-	streaming.Timeout = 0
-	return Call(ctx, &streaming, http.MethodPost, "/v1/inputs/"+hash, nil, nil)
+	return Call(ctx, untimed(client), http.MethodPost, "/v1/inputs/"+hash, nil, nil)
 }
 func FetchResult(ctx context.Context, client *http.Client, id, dest string) error {
-	if !identifier.MatchString(id) {
+	if !ValidName(id) {
 		return errors.New("invalid attempt ID")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://ordo/v1/results/"+id, nil)
 	if err != nil {
 		return err
 	}
-	streaming := *client
-	streaming.Timeout = 0
-	resp, err := streaming.Do(req)
+	resp, err := untimed(client).Do(req)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("result HTTP %d", resp.StatusCode)
+	if err := checkResponse(resp); err != nil {
+		return err
 	}
 	hash := resp.Header.Get("X-Ordo-SHA256")
 	if !content.Valid(hash) {

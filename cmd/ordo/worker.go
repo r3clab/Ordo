@@ -72,10 +72,15 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		return errors.New("unexpected positional arguments")
 	}
 	switch operation {
-	case "start", "info", "submit", "get", "put-image", "fetch", "cancel":
+	case "start", "info", "put-image", "fetch":
+	case "submit", "get", "cancel":
+		if id == "" {
+			return errors.New("--id is required")
+		}
 	default:
 		return fmt.Errorf("unknown worker command %q", operation)
 	}
+	attempt := "/v1/attempts/" + url.PathEscape(id)
 	if operation == "start" {
 		if err := worker.Bootstrap(ctx, remote); err != nil {
 			return err
@@ -103,7 +108,11 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 				return err
 			}
 		}
-		if err := worker.EnsureImage(ctx, tunnel.Client, archive, spec.Image); err != nil {
+		digest, err := content.Hash(archive)
+		if err != nil {
+			return err
+		}
+		if err := worker.EnsureImage(ctx, tunnel.Client, archive, digest, spec.Image); err != nil {
 			return err
 		}
 		result = map[string]string{"image": spec.Image}
@@ -137,30 +146,21 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 			spec.Inputs[name] = hash
 		}
 		spec.Args = flags.Args()
-		var attempt worker.Attempt
-		if id == "" {
-			return errors.New("--id is required")
-		}
-		if err := worker.Call(ctx, tunnel.Client, http.MethodPut, "/v1/attempts/"+url.PathEscape(id), spec, &attempt); err != nil {
+		var run worker.Attempt
+		if err := worker.Call(ctx, tunnel.Client, http.MethodPut, attempt, spec, &run); err != nil {
 			return err
 		}
-		result = attempt
+		result = run
 	case "cancel":
-		if id == "" {
-			return errors.New("--id is required")
-		}
-		if err := worker.Call(ctx, tunnel.Client, http.MethodPost, "/v1/attempts/"+url.PathEscape(id)+"/cancel", nil, &result); err != nil {
+		if err := worker.Call(ctx, tunnel.Client, http.MethodPost, attempt+"/cancel", nil, &result); err != nil {
 			return err
 		}
 	case "get":
-		if id == "" {
-			return errors.New("--id is required")
-		}
-		var attempt worker.Attempt
-		if err := worker.Call(ctx, tunnel.Client, http.MethodGet, "/v1/attempts/"+url.PathEscape(id), nil, &attempt); err != nil {
+		var run worker.Attempt
+		if err := worker.Call(ctx, tunnel.Client, http.MethodGet, attempt, nil, &run); err != nil {
 			return err
 		}
-		result = attempt
+		result = run
 	}
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")

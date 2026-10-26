@@ -40,5 +40,9 @@ func matchedHardware(h Hardware, m *Match) (Hardware, bool) {
 }
 func FitsSpec(h Hardware, spec Spec, held []Allocation) bool {
 	filtered, ok := matchedHardware(h, spec.Match)
-	return ok && Fits(filtered, spec.Resources, held)
+	if !ok {
+		return false
+	}
+	_, err := allocate(filtered, spec.Resources, held)
+	return err == nil
 }

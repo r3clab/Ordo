@@ -1,6 +1,7 @@
 package task
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,11 +41,7 @@ func Stop(ctx context.Context, dir string) error {
 	case "removed", "exited":
 		return nil
 	case "running", "paused", "created", "configured", "stopping":
-		selector := r.ContainerID
-		if selector == "" {
-			selector = r.ContainerName
-		}
-		c, err := command(execPodman).inspectOwned(ctx, &r, selector)
+		c, err := command(execPodman).inspectOwned(ctx, &r, cmp.Or(r.ContainerID, r.ContainerName))
 		if err != nil {
 			return err
 		}
@@ -72,10 +69,7 @@ func Status(ctx context.Context, dir string) (Record, string, error) {
 	if r.ContainerRemoved {
 		return r, "removed", nil
 	}
-	selector := r.ContainerID
-	if selector == "" {
-		selector = r.ContainerName
-	}
+	selector := cmp.Or(r.ContainerID, r.ContainerName)
 	p := command(execPodman)
 	exists, err := p.containerExists(ctx, selector)
 	if err != nil {
