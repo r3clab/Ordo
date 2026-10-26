@@ -80,7 +80,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 		}
 	})
 	info := worker.Info{ID: "agent", Hardware: worker.Hardware{Cores: [][]int{{0, 64}}, MemoryMiB: 128}}
-	if err := s.reconcile(ctx, j, "worker", info, client); err != nil {
+	if err := s.reconcile(ctx, j, "worker", &info, client); err != nil {
 		t.Fatal(err)
 	}
 	if submitted.Secrets["TOKEN"] != "hunter2" || !slices.Equal(submitted.Spec.Services, []string{"model"}) || submitted.Spec.Network != task.Egress {
@@ -110,7 +110,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	if !j.StopRequested {
 		t.Fatal("a stale copy dropped the stop")
 	}
-	if err := s.reconcile(ctx, j, "worker", info, client); err != nil {
+	if err := s.reconcile(ctx, j, "worker", &info, client); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(stops, []string{"stop:budget spent"}) {
@@ -145,12 +145,12 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	if j, err = s.Submit(ctx, Local, oob); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.reconcile(ctx, j, "worker", info, client); err != nil {
+	if err := s.reconcile(ctx, j, "worker", &info, client); err != nil {
 		t.Fatal(err)
 	}
 	accepted.State, accepted.StopRequested, accepted.StopReason = "infrastructure_failed", "stop", "operator"
 	j, _ = s.job("oob")
-	if err := s.reconcile(ctx, j, "worker", info, client); err != nil {
+	if err := s.reconcile(ctx, j, "worker", &info, client); err != nil {
 		t.Fatal(err)
 	}
 	if j, _ = s.job("oob"); j.State != "failed" || !j.StopRequested || j.StopReason != "operator" {

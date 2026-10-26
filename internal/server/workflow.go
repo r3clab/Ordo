@@ -88,9 +88,7 @@ func expand(w Workflow) ([]Step, error) {
 			task := step
 			task.Parameters = params
 			task.Args = slices.Clone(step.Args)
-			task.Inputs = maps.Clone(step.Inputs)
 			task.From = maps.Clone(step.From)
-			task.Depends = slices.Clone(step.Depends)
 			if len(step.Matrix) > 0 {
 				task.ID = fmt.Sprintf("%s-%d", step.ID, i)
 			}
@@ -319,7 +317,7 @@ func (s *Server) importOutputs(j *Job) error {
 			return errors.New("dependency has no output identity")
 		}
 		hash := at.Remote.Result.OutputsSHA256
-		if _, err := content.PutFile(filepath.Join(s.Root, "blobs"), filepath.Join(at.ResultDir, "outputs.tar"), hash); err != nil {
+		if _, err := content.PutFile(s.images.Blobs, filepath.Join(at.ResultDir, "outputs.tar"), hash); err != nil {
 			return err
 		}
 		j.Spec.Inputs[name] = hash

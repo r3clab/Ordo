@@ -78,16 +78,14 @@ func (s *Server) Token() (string, error) {
 	var secret [32]byte
 	_, _ = rand.Read(secret[:])
 	token := hex.EncodeToString(secret[:])
-	f, err := os.OpenFile(file, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	err = content.WriteAtomic(file, func(w io.Writer) error {
+		_, err := io.WriteString(w, token+"\n")
+		return err
+	})
 	if err != nil {
 		return "", err
 	}
-	_, err = f.WriteString(token + "\n")
-	err = errors.Join(err, f.Sync(), f.Close())
-	if err != nil {
-		return "", err
-	}
-	return token, content.SyncDir(s.Root)
+	return token, nil
 }
 func listenWeb(address string) (net.Listener, error) {
 	host, _, err := net.SplitHostPort(address)

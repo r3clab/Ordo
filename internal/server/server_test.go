@@ -56,7 +56,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := worker.Info{ID: "agent", Hardware: worker.Hardware{Cores: [][]int{{0, 64}}, MemoryMiB: 128}}
-	if err := s.reconcile(context.Background(), j, "worker", info, client); err == nil {
+	if err := s.reconcile(context.Background(), j, "worker", &info, client); err == nil {
 		t.Fatal("expected response failure")
 	}
 	if err := s.Close(); err != nil {
@@ -71,7 +71,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 	if len(j.Attempts) != 1 || j.State != "dispatching" {
 		t.Fatal("dispatch not durable")
 	}
-	if err := s.reconcile(context.Background(), j, "worker", info, client); err != nil {
+	if err := s.reconcile(context.Background(), j, "worker", &info, client); err != nil {
 		t.Fatal(err)
 	}
 	j = s.List()[0]
@@ -79,7 +79,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 		t.Fatal("duplicated execution")
 	}
 	info.ID = "replacement"
-	if err := s.reconcile(context.Background(), j, "worker", info, client); err != nil {
+	if err := s.reconcile(context.Background(), j, "worker", &info, client); err != nil {
 		t.Fatal(err)
 	}
 	if s.List()[0].State != "blocked" || puts != 1 {
