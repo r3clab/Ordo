@@ -13,7 +13,12 @@ let
   };
   treefmt = inputs.treefmt-nix.lib.evalModule pkgs {
     projectRootFile = "flake.nix";
-    settings.global.excludes = [ "vendor/**" ];
+    settings.global.excludes = [
+      "vendor/**"
+      "internal/server/web/**"
+      "ui/node_modules/**"
+      "ui/package-lock.json"
+    ];
 
     programs.nixfmt.enable = true;
     programs.nixfmt.package = pkgs.nixfmt-rs;

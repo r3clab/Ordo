@@ -24,24 +24,38 @@ try {
   await wait('document.title === "Ordo" && !!document.getElementById("token")');
   assert.equal((await fetch(`${url}/v1/jobs`)).status, 401);
   const token = (await readFile(`${root}/token`, "utf8")).trim();
-  await evaluate(`document.getElementById("token").value=${JSON.stringify(token)};document.getElementById("login").requestSubmit()`);
-  await wait('document.getElementById("status").textContent.startsWith("Connected.")');
-  assert(await evaluate('document.getElementById("token").value === "" && localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ""'));
+  const input = (selector, value) => `(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event("input",{bubbles:true}))})()`;
+  const click = (selector, text) => `[...document.querySelectorAll(${JSON.stringify(selector)})].find(e=>e.textContent.trim()===${JSON.stringify(text)}).click()`;
+  const row = (id) => `document.querySelector('tr[data-job-id=${JSON.stringify(id)}]')`;
+  const state = (id, value) => `${row(id)}?.querySelector("[data-state]").dataset.state===${JSON.stringify(value)}`;
+  await evaluate(input("#token", token));
+  await evaluate('document.getElementById("login").requestSubmit()');
+  await wait('!!document.querySelector("nav[aria-label=Views]")');
+  assert(await evaluate('localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ""'));
   const workflow = { id: "browser", image: process.env.ORDO_TEST_IMAGE, archive: process.env.ORDO_TEST_ARCHIVE, tasks: [
     { id: "log", resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf '<script>globalThis.injection=true</script>\\n'"] },
     { id: "stop", resources: { cores: 1, memory_mib: 128 }, timeout_seconds: 60, args: ["-c", "sleep 45"] },
   ] };
-  await evaluate(`document.getElementById("kind").value="workflows";document.getElementById("spec").value=${JSON.stringify(JSON.stringify(workflow))};document.getElementById("submit").requestSubmit()`);
-  await wait('document.getElementById("status").textContent === "Submission accepted."');
-  await wait('[...document.querySelectorAll("#jobs tr")].some(row=>row.cells[0].textContent.startsWith("browser--stop /") && row.cells[1].textContent==="running")');
-  await evaluate('[...[...document.querySelectorAll("#jobs tr")].find(row=>row.cells[0].textContent.startsWith("browser--stop /")).querySelectorAll("button")].find(button=>button.textContent==="Cancel job").click()');
-  await wait('[...document.querySelectorAll("#jobs tr")].some(row=>row.cells[0].textContent.startsWith("browser--stop /") && row.cells[1].textContent==="cancelled")');
-  await wait('[...document.querySelectorAll("#jobs tr")].some(row=>row.cells[0].textContent.startsWith("browser--log /") && row.cells[1].textContent==="succeeded")');
-  await evaluate('[...[...document.querySelectorAll("#jobs tr")].find(row=>row.cells[0].textContent.startsWith("browser--log /")).querySelectorAll("button")].find(button=>button.textContent==="1: stdout").click()');
-  await wait('document.getElementById("detail").textContent.includes("<script>")');
-  assert(await evaluate('globalThis.injection === undefined && document.querySelector("#detail script") === null'));
+  await evaluate(click("header button", "Submit"));
+  await wait('document.querySelector("dialog").open');
+  await evaluate(click("[role=radio]", "Workflow"));
+  await evaluate(input("#spec", JSON.stringify(workflow)));
+  await evaluate('document.getElementById("submit").requestSubmit()');
+  await wait('document.body.textContent.includes("Workflow submitted with 2 tasks.")');
+  await evaluate('document.querySelector(\'a[href="#/jobs"]\').click()');
+  await wait(state("browser--stop", "running"));
+  await evaluate(`${row("browser--stop")}.click()`);
+  await evaluate(click("aside button", "Cancel job"));
+  await evaluate(click("aside button", "Yes, cancel"));
+  await wait(state("browser--stop", "cancelled"));
+  await evaluate(`document.querySelector('[aria-label="Close details"]').click()`);
+  await wait(state("browser--log", "succeeded"));
+  await evaluate(`${row("browser--log")}.click()`);
+  await wait('document.querySelector("aside [data-log]")?.textContent.includes("<script>")');
+  assert(await evaluate('globalThis.injection === undefined && document.querySelector("aside script") === null'));
   const screenshot = await call("Page.captureScreenshot"); await writeFile(`${evidence}/web.png`, Buffer.from(screenshot.data, "base64"));
-  await evaluate('document.getElementById("disconnect").click()');
-  assert(await evaluate('document.getElementById("jobs").children.length === 0 && token === ""'));
+  await evaluate(`document.querySelector('[aria-label="Disconnect"]').click()`);
+  await wait('!!document.getElementById("token")');
+  assert(await evaluate('document.getElementById("token").value === "" && document.querySelector("tr[data-job-id]") === null && localStorage.length === 0 && sessionStorage.length === 0'));
   console.log("PASS: real browser authentication, workflow submission, status, running cancellation, safe logs, disconnect");
 } finally { socket?.close(); browser.kill("SIGTERM"); await new Promise((resolve) => { if (browser.exitCode !== null) resolve(); else browser.once("exit", resolve); }); await log.close(); }

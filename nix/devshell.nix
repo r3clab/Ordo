@@ -16,6 +16,7 @@ perSystem.devshell.mkShell {
     pkgs.go
     pkgs.gopls
     pkgs.golangci-lint
+    pkgs.nodejs
     perSystem.self.formatter
   ];
 

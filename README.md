@@ -230,6 +230,21 @@ Logs are available after result collection, with the last 1 MiB of each stream s
 Untrusted task output is rendered as text, not HTML.
 Auto-refresh can be paused.
 
+### Developing the UI
+
+The UI source is a Svelte 5, Vite, and Tailwind CSS app in `ui/`.
+Its build output in `internal/server/web/` is generated, embedded into the binary, and committed so `go build` and `nix build` need no Node.js step.
+Commit `ui/` changes together with a fresh build:
+
+```sh
+cd ui
+npm ci
+npm run check   # type-check
+npm run build   # regenerate internal/server/web/
+```
+
+`npm run dev` serves the UI with hot reload and proxies `/v1` to a server listening on `127.0.0.1:7331`.
+
 ## GPU workers
 
 Configure a worker's optional `gpus` array with full NVIDIA GPU UUIDs, or pass `--gpus UUID,UUID` to `worker start` and subsequent worker commands.
