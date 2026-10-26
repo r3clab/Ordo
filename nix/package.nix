@@ -11,7 +11,7 @@ pkgs.buildGoModule (finalAttrs: {
       (pkgs.lib.fileset.fileFilter (file: file.hasExt "go") ../.)
     ];
   };
-  vendorHash = "sha256-sJn4yiUb227dGjpFF6dw/oXOLQ/2mdSikqymhkDchSM=";
+  vendorHash = "sha256-FudAMvDz6JlHVthB5Z5ubfpUM084iTsaIK8LiVeu1V8=";
   env.CGO_ENABLED = "0";
   subPackages = [ "cmd/ordo" ];
 

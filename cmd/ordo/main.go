@@ -57,6 +57,8 @@ func dispatch(ctx context.Context, args []string, output io.Writer) error {
 			return submitCommand(ctx, flags.Args()[1:], output)
 		case "fetch":
 			return fetchCommand(ctx, flags.Args()[1:], output)
+		case "schema":
+			return schemaCommand(ctx, flags.Args()[1:], output)
 		case "queue":
 			return queueCommand(ctx, flags.Args()[1:], output)
 		case "worker":
@@ -65,7 +67,7 @@ func dispatch(ctx context.Context, args []string, output io.Writer) error {
 		return fmt.Errorf("unknown command %q", flags.Arg(0))
 	}
 
-	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run      Run one local task in rootless Podman (run --help for options)\n  recover  Recover a retained local task (recover --help for options)\n  agent    Serve a persistent worker (agent --help for options)\n  worker   Bootstrap or contact a worker through SSH (worker --help for options)\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests from stdin (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Submit workflows, inspect, stop or cancel queued jobs")
+	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run      Run one local task in rootless Podman (run --help for options)\n  recover  Recover a retained local task (recover --help for options)\n  agent    Serve a persistent worker (agent --help for options)\n  worker   Bootstrap or contact a worker through SSH (worker --help for options)\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests from stdin (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Submit workflows, inspect, stop or cancel queued jobs\n  schema   Print the JSON Schema for job requests and workflows")
 	return err
 }
 

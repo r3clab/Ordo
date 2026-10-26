@@ -2,7 +2,10 @@ module github.com/r3clab/Ordo
 
 go 1.26.0
 
-require modernc.org/sqlite v1.61.0
+require (
+	github.com/google/jsonschema-go v0.4.3
+	modernc.org/sqlite v1.61.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect

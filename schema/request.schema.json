@@ -1,0 +1,198 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+    },
+    "image": {
+      "description": "A local Podman reference, or {\"nix\": INSTALLABLE} for a nix2container image the server builds.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nix": {
+              "type": "string",
+              "maxLength": 4096,
+              "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
+            }
+          },
+          "required": [
+            "nix"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "archive": {
+      "type": "string"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+      }
+    },
+    "args": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "cores": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_mib": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gpus": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cores",
+        "memory_mib"
+      ],
+      "additionalProperties": false
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 32768,
+        "pattern": "^[^\\x00]*$"
+      },
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+        "not": {
+          "pattern": "^NVIDIA_"
+        }
+      }
+    },
+    "network": {
+      "type": "string",
+      "enum": [
+        "none",
+        "egress"
+      ]
+    },
+    "cap_add": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string",
+        "enum": [
+          "NET_ADMIN"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 32768,
+        "pattern": "^[^\\x00\\r\\n]*$"
+      },
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+        "not": {
+          "pattern": "^NVIDIA_"
+        }
+      }
+    },
+    "services": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+      },
+      "uniqueItems": true
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 31536000
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "infrastructure": {
+          "type": [
+            "null",
+            "integer"
+          ],
+          "minimum": 0,
+          "maximum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "match": {
+      "type": [
+        "null",
+        "object"
+      ],
+      "properties": {
+        "arch": {
+          "type": "string",
+          "enum": [
+            "amd64",
+            "arm64"
+          ]
+        },
+        "cpu_model": {
+          "type": "string"
+        },
+        "gpu_model": {
+          "type": "string"
+        },
+        "min_gpu_memory_mib": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gpu_driver": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ordo job request",
+  "description": "One job; ordo submit reads one per line and requires its id.",
+  "required": [
+    "image",
+    "resources"
+  ],
+  "additionalProperties": false
+}

@@ -16,6 +16,7 @@ let
     settings.global.excludes = [
       "vendor/**"
       "internal/server/web/**"
+      "schema/**"
       "ui/node_modules/**"
       "ui/package-lock.json"
     ];
