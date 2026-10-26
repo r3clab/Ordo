@@ -51,4 +51,24 @@ The live tests exposed two independent runtime dependencies:
 The implementation therefore uses separate transient runtime scopes, not `KillMode=process` on the agent.
 Unit tests also cover literal command arguments across old/new systemd expansion behavior, ambiguous launch failure, state-write failure, topology changes, and restart ownership.
 
-These checks do not prove host-reboot recovery, power-loss durability, GPU isolation, server reconciliation, image/input transfers, or workflow scheduling.
+The worker smoke test also covers image/input transfer, read-only input mounts, output collection, and verified result downloads.
+
+## Server, workflows, and browser
+
+With the same `ORDO_TEST_BINARY`, `ORDO_TEST_ARCHIVE`, and `ORDO_TEST_IMAGE` environment, run `bash tests/server-smoke.sh`.
+It uses both approved workers, checks server SIGKILL/restart without duplicate executions, DAG outputs, sweep expansion, bounded retries, skipped dependents, timeout, and cancellation.
+Add `ORDO_TEST_CHROMIUM=/path/to/chromium` (and Node.js 22+ on PATH) to drive the real UI: authentication, workflow submission, status, running-task cancellation, safe log rendering, and disconnect.
+Browser logs and a screenshot join the evidence directory.
+The headless browser uses a private profile and disabled sandbox only for this local test; no browser/runtime dependency is added to Ordo.
+Go tests separately cover missing/invalid bearer tokens, cross-origin requests, hostile Host headers, token permissions, and bounded log reads.
+
+## GPU and hardware matching
+
+Build the dedicated `path:./tests#gpu-image.copyTo` fixture as an OCI archive and supply its configuration digest as `ORDO_TEST_IMAGE`.
+With the same environment variables, run `bash tests/gpu-smoke.sh HOST FULL_GPU_UUID` only after checking current compute and graphics processes.
+The script captures inventories; agent admission also rejects devices with existing processes.
+It uses one GPU, one physical core, and 256 MiB for a tiny CUDA allocation/set/copy, checks exactly one visible UUID, rejects overlap and mismatched hardware, and verifies reservation recovery after agent SIGKILL.
+No sustained GPU workload or global CDI registration is used.
+
+Successful tests remove only their own remote resources; failed tests retain state for reconciliation.
+These checks do not prove host-reboot/power-loss recovery, ARM runtime behavior, multi-GPU task execution, or performance under sustained load.

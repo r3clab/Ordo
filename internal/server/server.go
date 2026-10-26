@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/task"
@@ -72,6 +73,7 @@ type Server struct {
 	jobs    map[string]Job
 	busy    map[string]bool
 	fault   error
+	nodes   map[string]WorkerStatus
 }
 
 func Open(root string, workers []worker.Remote) (*Server, error) {
@@ -93,7 +95,7 @@ func Open(root string, workers []worker.Remote) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{Root: root, store: db, workers: workers, jobs: map[string]Job{}, busy: map[string]bool{}}
+	s := &Server{Root: root, store: db, workers: workers, jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	rows, err := db.List("job")
 	if err != nil {
 		_ = db.Close()
@@ -245,7 +247,17 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 	return j, nil
 }
 
-func (s *Server) Run(ctx context.Context) error {
+func (s *Server) Run(ctx context.Context, address string) error {
+	web, err := listenWeb(address)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = web.Close() }()
+	token, err := s.Token()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Web UI: http://%s (token file: %s)\n", web.Addr().String(), filepath.Join(s.Root, "token"))
 	socket := filepath.Join(s.Root, "server.sock")
 	if info, err := os.Lstat(socket); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -276,8 +288,10 @@ func (s *Server) Run(ctx context.Context) error {
 		wg.Go(func() { s.work(child, remote) })
 	}
 	api := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	done := make(chan error, 1)
+	public := &http.Server{Handler: s.WebHandler(token), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+	done := make(chan error, 2)
 	go func() { done <- api.Serve(listener) }()
+	go func() { done <- public.Serve(web) }()
 	select {
 	case <-ctx.Done():
 	case err = <-done:
@@ -285,7 +299,9 @@ func (s *Server) Run(ctx context.Context) error {
 	cancel()
 	shutdown, end := context.WithTimeout(context.Background(), 5*time.Second)
 	defer end()
-	err = errors.Join(err, api.Shutdown(shutdown))
+	err = errors.Join(err, api.Shutdown(shutdown), public.Shutdown(shutdown))
+	_ = api.Close()
+	_ = public.Close()
 	wg.Wait()
 	return err
 }
@@ -305,6 +321,7 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 			}
 			cancel()
 			if err != nil {
+				s.workerStatus(remote.Host, nil, err)
 				select {
 				case <-ctx.Done():
 					return
@@ -316,6 +333,7 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 		var info worker.Info
 		err := worker.Call(ctx, tunnel.Client, http.MethodGet, "/v1/info", nil, &info)
 		if err == nil {
+			s.workerStatus(remote.Host, &info, nil)
 			for _, j := range s.List() {
 				if j.Terminal() {
 					continue
@@ -341,6 +359,7 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 			}
 		}
 		if err != nil {
+			s.workerStatus(remote.Host, nil, err)
 			_ = tunnel.Close()
 			tunnel = nil
 		}
@@ -470,6 +489,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.webRoutes(mux)
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.Cancel(r.PathValue("id"), false); err != nil {
 			http.Error(w, err.Error(), 500)

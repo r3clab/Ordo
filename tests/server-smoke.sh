@@ -31,7 +31,7 @@ EOF
 trap cleanup EXIT
 for pair in "vegeta:$root_a" "goku:$root_b"; do host=${pair%%:*}; root=${pair#*:}; ssh "$host" "if ! podman image exists '$ORDO_TEST_IMAGE'; then touch '$root/image-introduced'; fi"; done
 jq -n --arg a "$root_a" --arg b "$root_b" --arg binary "$ORDO_TEST_BINARY" '[{host:"vegeta",state_dir:$a,cpus:"62,63,126,127",memory_mib:512,binary:$binary},{host:"goku",state_dir:$b,cpus:"62,63,126,127",memory_mib:512,binary:$binary}]' > "$work/workers.json"
-start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/workers.json" >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json" 2>/dev/null; then return; fi; sleep 0.2; done; return 1; }
+start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/workers.json" --listen 127.0.0.1:0 >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json" 2>/dev/null; then return; fi; sleep 0.2; done; return 1; }
 start
 for id in first second; do
  jq -n --arg id "$id" --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:$id,image:$image,archive:$archive,resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
@@ -90,5 +90,9 @@ jq -e 'map(select(.workflow=="dag")) | map({key:.id,value:.}) | from_entries |
  .["dag--cancel"].state=="cancelled"' "$work/workflow-final.json" >/dev/null
 result=$(jq -r '.[] | select(.id=="dag--consume") | .attempts[-1].result_dir' "$work/workflow-final.json")
 test "$(<"$result/outputs/value")" = source
+if [[ -n ${ORDO_TEST_CHROMIUM:-} ]]; then
+ url=$(awk '/Web UI:/{url=$3}END{print url}' "$work/server.log")
+ node tests/web-smoke.mjs "$url" "$work/server" "$work"
+fi
 passed=true
 printf 'PASS: queue recovery, DAG outputs, parameter sweep, bounded retry, timeout, cancellation\n'

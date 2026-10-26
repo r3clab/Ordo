@@ -15,7 +15,7 @@ Keep each acceptance item in its own buildable commit where possible; mark it co
 - [x] Durable server queue and reconciliation after server/tunnel failure; no retries merely because a worker disconnects (M4).
 - [x] JSON workflow validation, dependency readiness, parameter expansion, bounded infrastructure/task retries, timeout, cancellation (M5).
 - [x] User-selected hardware matching; rootless GPU isolation validated on vegeta and goku, never silently weakened (M6b).
-- [ ] Minimal authenticated web UI for submission, status, logs, and cancellation.
+- [x] Minimal authenticated web UI for submission, status, logs, and cancellation (M7).
 - [ ] Formatting, lint, race tests, Nix package checks, and multi-host smoke tests.
 
 ## Test boundary
@@ -25,7 +25,7 @@ At most two physical cores and 512 MiB task memory per host; brief single-GPU te
 No stress tests, sudo, permanent service enablement, host configuration changes, or cleanup of unrelated resources.
 Use private Ordo test directories and uniquely named containers/services.
 Workers report rootless Podman 5.6.2, cgroup v2 with cpuset/memory, and user lingering.
-Vegeta currently reports no registered NVIDIA CDI devices; investigate a private per-process CDI specification rather than modifying system configuration.
+GPU checks use private per-agent CDI specifications, without modifying global device registration.
 
 ## Implementation defaults
 

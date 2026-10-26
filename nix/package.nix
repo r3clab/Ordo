@@ -6,6 +6,7 @@ pkgs.buildGoModule (finalAttrs: {
     root = ../.;
     fileset = pkgs.lib.fileset.unions [
       ../go.mod
+      ../internal/server/web
       (pkgs.lib.fileset.maybeMissing ../go.sum)
       (pkgs.lib.fileset.fileFilter (file: file.hasExt "go") ../.)
     ];

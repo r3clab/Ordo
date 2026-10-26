@@ -30,12 +30,13 @@ func decodeJSON(data []byte, value any) error {
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := flag.NewFlagSet("server", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
-	var root, config string
+	var root, config, address string
+	f.StringVar(&address, "listen", "127.0.0.1:7331", "loopback web UI address")
 	f.StringVar(&root, "state", "", "private server state directory")
 	f.StringVar(&config, "workers", "", "JSON array of worker connection configurations")
 	if err := f.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, err = fmt.Fprintln(out, "Usage: ordo server --state DIR --workers workers.json")
+			_, err = fmt.Fprintln(out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331]")
 			return err
 		}
 		return err
@@ -55,7 +56,7 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	err = s.Run(ctx)
+	err = s.Run(ctx, address)
 	return errors.Join(err, s.Close())
 }
 func queueCommand(ctx context.Context, args []string, out io.Writer) error {

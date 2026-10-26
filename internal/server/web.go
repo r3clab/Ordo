@@ -1,0 +1,219 @@
+package server
+
+import (
+	"crypto/rand"
+	"crypto/subtle"
+	"embed"
+	"encoding/hex"
+	"errors"
+	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/worker"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+//go:embed web/*
+var webFiles embed.FS
+
+type WorkerStatus struct {
+	Host      string       `json:"host"`
+	Connected bool         `json:"connected"`
+	LastSeen  time.Time    `json:"last_seen"`
+	Error     string       `json:"error,omitempty"`
+	Info      *worker.Info `json:"info,omitempty"`
+}
+
+func (s *Server) workerStatus(host string, info *worker.Info, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status := s.nodes[host]
+	status.Host = host
+	status.Connected = err == nil
+	if err != nil {
+		status.Error = err.Error()
+	} else {
+		status.Error = ""
+		status.LastSeen = time.Now().UTC()
+		status.Info = info
+	}
+	s.nodes[host] = status
+}
+func (s *Server) Workers() []WorkerStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]WorkerStatus, 0, len(s.workers))
+	for _, cfg := range s.workers {
+		status := s.nodes[cfg.Host]
+		status.Host = cfg.Host
+		result = append(result, status)
+	}
+	return result
+}
+func (s *Server) Token() (string, error) {
+	file := filepath.Join(s.Root, "token")
+	info, err := os.Lstat(file)
+	if err == nil {
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			return "", errors.New("token must be a private regular mode-0600 file")
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		token := strings.TrimSpace(string(data))
+		if !content.Valid(token) {
+			return "", errors.New("invalid saved token")
+		}
+		return token, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	var secret [32]byte
+	_, _ = rand.Read(secret[:])
+	token := hex.EncodeToString(secret[:])
+	f, err := os.OpenFile(file, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	_, err = f.WriteString(token + "\n")
+	err = errors.Join(err, f.Sync(), f.Close())
+	if err != nil {
+		return "", err
+	}
+	return token, content.SyncDir(s.Root)
+}
+func listenWeb(address string) (net.Listener, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return nil, errors.New("web listen address must be a literal loopback IP")
+	}
+	return net.Listen("tcp", address)
+}
+func (s *Server) WebHandler(token string) http.Handler {
+	api := s.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			http.Error(w, "invalid host", 400)
+			return
+		}
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			http.Error(w, "loopback host required", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
+			http.Error(w, "cross-origin request denied", http.StatusForbidden)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			supplied := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || len(token) != 64 || subtle.ConstantTimeCompare([]byte(supplied), []byte(token)) != 1 {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			api.ServeHTTP(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		file, kind := "", ""
+		switch r.URL.Path {
+		case "/":
+			file = "index.html"
+			kind = "text/html; charset=utf-8"
+		case "/app.js":
+			file = "app.js"
+			kind = "text/javascript; charset=utf-8"
+		case "/style.css":
+			file = "style.css"
+			kind = "text/css; charset=utf-8"
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		data, err := webFiles.ReadFile("web/" + file)
+		if err != nil {
+			http.Error(w, "asset unavailable", 500)
+			return
+		}
+		w.Header().Set("Content-Type", kind)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(data)
+		}
+	})
+}
+func (s *Server) webRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Workers()) })
+	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", func(w http.ResponseWriter, r *http.Request) {
+		stream := r.PathValue("stream")
+		if stream != "stdout" && stream != "stderr" {
+			http.Error(w, "unknown log stream", 400)
+			return
+		}
+		var job *Job
+		for _, j := range s.List() {
+			if j.ID == r.PathValue("id") {
+				job = &j
+				break
+			}
+		}
+		if job == nil {
+			http.NotFound(w, r)
+			return
+		}
+		index := len(job.Attempts) - 1
+		if query := r.URL.Query().Get("attempt"); query != "" {
+			var err error
+			index, err = strconv.Atoi(query)
+			if err != nil {
+				http.Error(w, "invalid attempt", 400)
+				return
+			}
+		}
+		if index < 0 || index >= len(job.Attempts) || job.Attempts[index].ResultDir == "" {
+			http.Error(w, "logs are available after collection", http.StatusConflict)
+			return
+		}
+		file := filepath.Join(job.Attempts[index].ResultDir, stream+".log")
+		info, err := os.Lstat(file)
+		if err != nil || !info.Mode().IsRegular() {
+			http.Error(w, "log is unavailable", 500)
+			return
+		}
+		f, err := os.Open(file)
+		if err != nil {
+			http.Error(w, "log is unavailable", 500)
+			return
+		}
+		defer func() { _ = f.Close() }()
+		const limit int64 = 1 << 20
+		if info.Size() > limit {
+			if _, err := f.Seek(-limit, io.SeekEnd); err != nil {
+				http.Error(w, "log seek failed", 500)
+				return
+			}
+			w.Header().Set("X-Ordo-Truncated", "true")
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.Copy(w, io.LimitReader(f, limit))
+	})
+}

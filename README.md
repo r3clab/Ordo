@@ -10,7 +10,7 @@ The durable server queue reconnects and reconciles original attempts after contr
 JSON DAGs, parameter sweeps, bounded retries, timeouts, and cancellation are implemented.
 Exclusive NVIDIA GPU allocation and restart recovery are implemented.
 Hardware-matching policy is enforced by both scheduler and agent.
-The web UI is still planned.
+A loopback-only authenticated web UI supports submission, status, collected logs, and cancellation.
 
 ## Direction
 
@@ -212,6 +212,23 @@ The control socket is private.
 Server shutdown/disconnection never cancels attempts; dispatch IDs are committed before submission, and worker identity must match before reconciliation.
 A worker losing an acknowledged attempt or changing identity blocks that job rather than rerunning it.
 Results must be downloaded and validated before the server marks success.
+
+## Web UI
+
+The server also listens on `http://127.0.0.1:7331`; override the port with `--listen 127.0.0.1:PORT`.
+Only literal loopback bind addresses are accepted.
+Read `SERVER_DIR/token` (mode 0600) and paste its bearer token into the page.
+The token is stable across restarts, never placed in a URL/cookie/browser storage, and cleared on disconnect or page reload.
+
+For a remote server, use SSH forwarding, for example `ssh -L 7331:127.0.0.1:7331 SERVER`, then open the local URL.
+Do not expose the listener with a public proxy; public deployment/TLS/multi-user authorization are deliberately unsupported.
+Authenticated API requests additionally enforce loopback Host headers and same-origin browser requests.
+
+The page accepts job or workflow JSON, shows worker connectivity/hardware/reservations and attempt histories, and cancels jobs or whole workflows.
+Image/input paths in submitted JSON refer to the **server's filesystem**.
+Logs are available after result collection, with the last 1 MiB of each stream shown; full logs remain in each attempt's result directory.
+Untrusted task output is rendered as text, not HTML.
+Auto-refresh can be paused.
 
 ## GPU workers
 
