@@ -101,7 +101,7 @@ func listenWeb(address string) (net.Listener, error) {
 	return net.Listen("tcp", address)
 }
 func (s *Server) WebHandler(token string) http.Handler {
-	api := s.Handler()
+	api := s.handler(Web)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -183,11 +183,12 @@ func (s *Server) webRoutes(mux *http.ServeMux) {
 				return
 			}
 		}
-		if index < 0 || index >= len(job.Attempts) || job.Attempts[index].ResultDir == "" {
+		dir, err := job.resultDir(index)
+		if err != nil {
 			http.Error(w, "logs are available after collection", http.StatusConflict)
 			return
 		}
-		file := filepath.Join(job.Attempts[index].ResultDir, stream+".log")
+		file := filepath.Join(dir, stream+".log")
 		info, err := os.Lstat(file)
 		if err != nil || !info.Mode().IsRegular() {
 			http.Error(w, "log is unavailable", 500)

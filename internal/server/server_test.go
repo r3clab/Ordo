@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"github.com/r3clab/Ordo/internal/worker"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,12 +11,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/worker"
 )
 
 func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "server")
 	workers := []worker.Remote{{Host: "worker"}}
-	s, err := Open(root, workers, nil)
+	s, err := Open(root, workers, nil, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +62,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s, err = Open(root, workers, nil)
+	s, err = Open(root, workers, nil, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}

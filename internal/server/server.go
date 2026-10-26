@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/task"
 	"github.com/r3clab/Ordo/internal/worker"
@@ -24,7 +25,7 @@ import (
 
 type Request struct {
 	ID        string            `json:"id,omitempty"`
-	Image     string            `json:"image"`
+	Image     image.Source      `json:"image"`
 	Archive   string            `json:"archive,omitempty"`
 	Inputs    map[string]string `json:"inputs,omitempty"`
 	Args      []string          `json:"args,omitempty"`
@@ -62,6 +63,7 @@ type Job struct {
 	CancelRequested bool              `json:"cancel_requested,omitempty"`
 	StopRequested   bool              `json:"stop_requested,omitempty"`
 	StopReason      string            `json:"stop_reason,omitempty"`
+	ImageOrigin     *image.Origin     `json:"image_origin,omitempty"`
 }
 
 func (j Job) Terminal() bool {
@@ -78,9 +80,20 @@ type Server struct {
 	busy     map[string]bool
 	fault    error
 	nodes    map[string]WorkerStatus
+	images   *image.Resolver
 }
 
-func Open(root string, workers []worker.Remote, services map[string]string) (*Server, error) {
+// Caller is who submits: only local socket callers may make the server run nix builds.
+type Caller int
+
+const (
+	Web Caller = iota
+	Local
+)
+
+var ErrNixUntrusted = errors.New("nix images require the local API socket")
+
+func Open(root string, workers []worker.Remote, services map[string]string, tools image.Tools) (*Server, error) {
 	if len(workers) == 0 || len(workers) > 10 {
 		return nil, errors.New("configure 1-10 workers")
 	}
@@ -148,10 +161,26 @@ func Open(root string, workers []worker.Remote, services map[string]string) (*Se
 			}
 		}
 	}
+	s.images = image.NewResolver(filepath.Join(root, "blobs"), root, tools, imageCache{db})
 	return s, nil
 }
-func (s *Server) Close() error  { return s.store.Close() }
+func (s *Server) Close() error {
+	s.images.Close()
+	return s.store.Close()
+}
 func Socket(root string) string { return filepath.Join(root, "server.sock") }
+
+type imageCache struct{ store *state.Store }
+
+func (c imageCache) Load(output string) (image.Entry, bool, error) {
+	var e image.Entry
+	err := c.store.Get("image", output, &e)
+	if errors.Is(err, sql.ErrNoRows) {
+		return e, false, nil
+	}
+	return e, err == nil, err
+}
+func (c imageCache) Save(output string, e image.Entry) error { return c.store.Put("image", output, e) }
 func (s *Server) job(id string) (Job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,102 +264,144 @@ func (s *Server) commitLocked(jobs ...Job) error {
 	return nil
 }
 
-type stagedImage struct{ id, blob string }
+type imageKey struct {
+	image.Source
+	Archive string
+}
+
+type stagedImage struct {
+	image.Resolved
+	err error
+}
 
 type staging struct {
-	images map[[2]string]stagedImage
+	caller Caller
+	mu     sync.Mutex
+	images map[imageKey]stagedImage
 	inputs map[string]string
 }
 
-func newStaging() *staging {
-	return &staging{images: map[[2]string]stagedImage{}, inputs: map[string]string{}}
+func (s *Server) stage(ctx context.Context, caller Caller, requests ...Request) *staging {
+	st := &staging{caller: caller, images: map[imageKey]stagedImage{}, inputs: map[string]string{}}
+	if caller != Local {
+		return st
+	}
+	seen := map[image.Source]bool{}
+	var wg sync.WaitGroup
+	for _, r := range requests {
+		if r.Image.IsNix() && !seen[r.Image] && r.Check(s.services) == nil {
+			seen[r.Image] = true
+			wg.Go(func() { _, _ = st.image(ctx, s.images, r) })
+		}
+	}
+	wg.Wait()
+	return st
 }
 
-func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, error) {
+func (st *staging) image(ctx context.Context, images *image.Resolver, r Request) (image.Resolved, error) {
+	if r.Image.IsNix() && st.caller != Local {
+		return image.Resolved{}, ErrNixUntrusted
+	}
+	key := imageKey{r.Image, r.Archive}
+	st.mu.Lock()
+	staged, ok := st.images[key]
+	st.mu.Unlock()
+	if !ok {
+		staged.Resolved, staged.err = images.Resolve(ctx, r.Image, r.Archive)
+		st.mu.Lock()
+		st.images[key] = staged
+		st.mu.Unlock()
+	}
+	return staged.Resolved, staged.err
+}
+
+func (r Request) Check(services map[string]string) error {
+	if err := r.Image.Validate(r.Archive); err != nil {
+		return err
+	}
 	if r.Match != nil {
 		if err := r.Match.Validate(r.Resources); err != nil {
-			return Job{}, err
+			return err
 		}
 	}
 	if err := r.Retry.validate(); err != nil {
-		return Job{}, err
+		return err
 	}
 	if r.TimeoutSeconds < 0 || r.TimeoutSeconds > worker.MaxTimeoutSeconds {
-		return Job{}, fmt.Errorf("timeout must be 0..%d seconds", worker.MaxTimeoutSeconds)
+		return fmt.Errorf("timeout must be 0..%d seconds", worker.MaxTimeoutSeconds)
 	}
 	if err := r.Validate(r.Secrets); err != nil {
-		return Job{}, err
+		return err
 	}
-	services := slices.Sorted(slices.Values(r.Services))
-	for i, name := range services {
-		if _, ok := s.services[name]; !ok || (i > 0 && services[i-1] == name) {
-			return Job{}, fmt.Errorf("service %q is unknown or repeated; configure it with ordo server --service", name)
+	sorted := slices.Sorted(slices.Values(r.Services))
+	for i, name := range sorted {
+		if _, ok := services[name]; !ok || (i > 0 && sorted[i-1] == name) {
+			return fmt.Errorf("service %q is unknown or repeated; configure it with ordo server --service", name)
 		}
+	}
+	for name := range r.Inputs {
+		if !worker.ValidName(name) {
+			return errors.New("invalid input name")
+		}
+	}
+	if (r.ID != "" && !worker.ValidName(r.ID)) || r.Resources.Cores <= 0 || r.Resources.MemoryMiB <= 0 || r.Resources.GPUs < 0 {
+		return errors.New("valid ID and positive cores/memory required")
+	}
+	return nil
+}
+
+func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, error) {
+	if err := r.Check(s.services); err != nil {
+		return Job{}, err
 	}
 	if r.ID == "" {
 		r.ID = strings.ToLower(rand.Text())
 	}
-	if !worker.ValidName(r.ID) || r.Resources.Cores <= 0 || r.Resources.MemoryMiB <= 0 || r.Resources.GPUs < 0 {
-		return Job{}, errors.New("valid ID and positive cores/memory required")
-	}
-	tmp, err := os.MkdirTemp(s.Root, ".prepare-")
+	img, err := st.image(ctx, s.images, r)
 	if err != nil {
 		return Job{}, err
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	blobs := filepath.Join(s.Root, "blobs")
-	key := [2]string{r.Image, r.Archive}
-	image, ok := st.images[key]
-	if !ok {
-		image.id = r.Image
-		archive := r.Archive
-		if archive == "" {
-			archive = filepath.Join(tmp, "image.tar")
-			image.id, err = task.ExportImage(ctx, image.id, archive)
-			if err != nil {
-				return Job{}, err
-			}
-		} else if !task.ValidImageID(image.id) {
-			return Job{}, errors.New("an OCI archive requires its immutable sha256 image ID")
-		}
-		image.blob, err = content.PutFile(blobs, archive, "")
+	spec := worker.Spec{Image: img.ID, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match,
+		Sandbox: task.Sandbox{Env: maps.Clone(r.Env), Network: r.Network, CapAdd: slices.Sorted(slices.Values(r.CapAdd))}, Secrets: slices.Sorted(maps.Keys(r.Secrets)), Services: slices.Sorted(slices.Values(r.Services))}
+	if len(r.Inputs) > 0 {
+		tmp, err := os.MkdirTemp(s.Root, ".prepare-")
 		if err != nil {
 			return Job{}, err
 		}
-		st.images[key] = image
-	}
-	spec := worker.Spec{Image: image.id, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match,
-		Sandbox: task.Sandbox{Env: maps.Clone(r.Env), Network: r.Network, CapAdd: slices.Sorted(slices.Values(r.CapAdd))}, Secrets: slices.Sorted(maps.Keys(r.Secrets)), Services: services}
-	for name, source := range r.Inputs {
-		if !worker.ValidName(name) {
-			return Job{}, errors.New("invalid input name")
-		}
-		hash, ok := st.inputs[source]
-		if !ok {
-			file := filepath.Join(tmp, "input.tar")
-			hash, err = content.Archive(source, file)
-			if err != nil {
-				return Job{}, err
+		defer func() { _ = os.RemoveAll(tmp) }()
+		for name, source := range r.Inputs {
+			hash, ok := st.inputs[source]
+			if !ok {
+				file := filepath.Join(tmp, "input.tar")
+				hash, err = content.Archive(source, file)
+				if err != nil {
+					return Job{}, err
+				}
+				if _, err := content.PutFile(s.images.Blobs, file, hash); err != nil {
+					return Job{}, err
+				}
+				st.inputs[source] = hash
 			}
-			if _, err := content.PutFile(blobs, file, hash); err != nil {
-				return Job{}, err
-			}
-			st.inputs[source] = hash
+			spec.Inputs[name] = hash
 		}
-		spec.Inputs[name] = hash
 	}
-	return Job{ID: r.ID, Spec: spec, Archive: image.blob, State: "queued", CreatedAt: time.Now().UTC(), Retry: r.Retry}, nil
+	return Job{ID: r.ID, Spec: spec, Archive: img.Blob, ImageOrigin: img.Origin, State: "queued", CreatedAt: time.Now().UTC(), Retry: r.Retry}, nil
 }
-func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
-	j, err := s.prepare(ctx, r, newStaging())
+func (s *Server) Submit(ctx context.Context, caller Caller, r Request) (Job, error) {
+	j, err := s.prepare(ctx, r, s.stage(ctx, caller))
 	if err != nil {
 		return Job{}, err
 	}
+	j, _, err = s.admit(j, r.Secrets)
+	return j, err
+}
+
+func (s *Server) admit(j Job, secrets map[string]string) (Job, bool, error) {
 	j.Key = jobKey(j)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fault != nil {
-		return Job{}, s.fault
+		return Job{}, false, s.fault
 	}
 	if old, ok := s.jobs[j.ID]; ok {
 		key := old.Key
@@ -338,20 +409,20 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 			key = jobKey(old)
 		}
 		if key != j.Key {
-			return Job{}, errors.New("job ID already has a different immutable specification")
+			return Job{}, false, errors.New("job ID already has a different immutable specification")
 		}
-		return old, nil
+		return old, true, nil
 	}
 	// Secrets live apart from jobs, which the API and UI return in full.
-	if len(r.Secrets) > 0 {
-		if err := s.store.Put("secret", j.ID, r.Secrets); err != nil {
-			return Job{}, err
+	if len(secrets) > 0 {
+		if err := s.store.Put("secret", j.ID, secrets); err != nil {
+			return Job{}, false, err
 		}
 	}
 	if err := s.commitLocked(j); err != nil {
-		return Job{}, err
+		return Job{}, false, err
 	}
-	return j, nil
+	return j, false, nil
 }
 
 func (s *Server) Run(ctx context.Context, address string) error {
@@ -611,7 +682,17 @@ func stopAttempt(ctx context.Context, client *http.Client, id, kind, reason stri
 	return worker.Call(ctx, client, http.MethodPost, "/v1/attempts/"+id+"/"+kind, worker.StopRequest{Reason: reason}, nil)
 }
 
-func (s *Server) Handler() http.Handler {
+func (s *Server) Handler() http.Handler { return s.handler(Local) }
+
+func submitError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	if errors.Is(err, ErrNixUntrusted) {
+		status = http.StatusForbidden
+	}
+	http.Error(w, err.Error(), status)
+}
+
+func (s *Server) handler(caller Caller) http.Handler {
 	mux := http.NewServeMux()
 	s.webRoutes(mux)
 	cancel := func(workflow bool) http.HandlerFunc {
@@ -626,9 +707,9 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		jobs, err := s.SubmitWorkflow(r.Context(), flow)
+		jobs, err := s.SubmitWorkflow(r.Context(), caller, flow)
 		if err != nil {
-			http.Error(w, err.Error(), 400)
+			submitError(w, err)
 			return
 		}
 		worker.WriteJSON(w, http.StatusOK, jobs)
@@ -648,12 +729,16 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		j, err := s.Submit(r.Context(), req)
+		j, err := s.Submit(r.Context(), caller, req)
 		if err != nil {
-			http.Error(w, err.Error(), 400)
+			submitError(w, err)
 			return
 		}
 		worker.WriteJSON(w, http.StatusOK, j)
 	})
+	if caller == Local {
+		mux.HandleFunc("POST /v1/batches", s.serveBatch)
+		mux.HandleFunc("GET /v1/jobs/{id}/result", s.serveResult)
+	}
 	return mux
 }

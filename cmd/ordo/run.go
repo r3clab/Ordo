@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -29,10 +28,7 @@ func runTask(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&req.CPUs, "cpus", "", "CPU IDs or ranges")
 	flags.Int64Var(&req.MemoryMiB, "memory-mib", 0, "memory limit in MiB, without swap")
 	flags.StringVar(&req.OutputDir, "output", "", "new results directory")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			_, err = fmt.Fprintln(output, runUsage)
-		}
+	if err := parse(flags, args, output, runUsage); err != nil {
 		return err
 	}
 	req.Args = flags.Args()

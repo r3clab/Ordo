@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
-	"github.com/r3clab/Ordo/internal/worker"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/worker"
 )
 
 func TestWorkflowExpansionAndValidation(t *testing.T) {
@@ -37,12 +39,12 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(filepath.Join(root, "state"), []worker.Remote{{Host: "worker"}}, nil)
+	s, err := Open(filepath.Join(root, "state"), []worker.Remote{{Host: "worker"}}, nil, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	req := Request{Image: "sha256:" + strings.Repeat("a", 64), Archive: archive, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}}
+	req := Request{Image: image.Source{Ref: "sha256:" + strings.Repeat("a", 64)}, Archive: archive, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}}
 	a := Step{Request: req}
 	a.ID = "a"
 	a.Retry.Task = 1
@@ -53,14 +55,14 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	bad := flow
 	bad.Tasks = append([]Step(nil), flow.Tasks...)
 	bad.Tasks[1].Resources.Cores = 0
-	if _, err := s.SubmitWorkflow(context.Background(), bad); err == nil || len(s.List()) != 0 {
+	if _, err := s.SubmitWorkflow(context.Background(), Local, bad); err == nil || len(s.List()) != 0 {
 		t.Fatal("published partial workflow")
 	}
-	jobs, err := s.SubmitWorkflow(context.Background(), flow)
+	jobs, err := s.SubmitWorkflow(context.Background(), Local, flow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SubmitWorkflow(context.Background(), flow); err != nil {
+	if _, err := s.SubmitWorkflow(context.Background(), Local, flow); err != nil {
 		t.Fatal("idempotent workflow rejected", err)
 	}
 	j := jobs[0]

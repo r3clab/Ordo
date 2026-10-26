@@ -23,10 +23,7 @@ func recoverTask(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("recover", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&dir, "output", "", "existing results directory")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			_, err = fmt.Fprintln(output, recoverUsage)
-		}
+	if err := parse(flags, args, output, recoverUsage); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {

@@ -65,7 +65,7 @@ func TestSandboxValidation(t *testing.T) {
 		Sandbox
 		secrets Secrets
 	}
-	large := strings.Repeat("x", maxValueBytes+1)
+	large := strings.Repeat("x", MaxValueBytes+1)
 	for name, c := range map[string]sandbox{
 		"network":         {Sandbox: Sandbox{Network: "host"}},
 		"capability":      {Sandbox: Sandbox{CapAdd: []string{"SYS_ADMIN"}}},

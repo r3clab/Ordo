@@ -17,12 +17,30 @@ const Egress = "egress"
 const secretsFile = ".secrets.env"
 
 // Podman's env-file reader rejects lines over 64 KiB, and Linux rejects argv strings over 128 KiB.
-const maxValueBytes = 32 << 10
+const MaxValueBytes = 32 << 10
 
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+const (
+	EnvNamePattern     = `^[A-Za-z_][A-Za-z0-9_]*$`
+	EnvValuePattern    = `^[^\x00]*$`
+	SecretValuePattern = `^[^\x00\r\n]*$`
+)
+
+// NVIDIA's container hooks read these variables to inject devices outside the GPU allocation.
+const ReservedEnvPrefix = "NVIDIA_"
+
+var (
+	envName     = regexp.MustCompile(EnvNamePattern)
+	envValue    = regexp.MustCompile(EnvValuePattern)
+	secretValue = regexp.MustCompile(SecretValuePattern)
+)
+
+var networks = []string{"none", Egress}
 
 // Each allowed capability acts only on namespaces owned by the rootless user namespace.
 var capabilities = []string{"NET_ADMIN"}
+
+func Networks() []string     { return slices.Clone(networks) }
+func Capabilities() []string { return slices.Clone(capabilities) }
 
 type Sandbox struct {
 	Env     map[string]string `json:"env,omitempty"`
@@ -31,7 +49,7 @@ type Sandbox struct {
 }
 
 func (s Sandbox) Validate(secrets Secrets) error {
-	if s.Network != "" && s.Network != "none" && s.Network != Egress {
+	if s.Network != "" && !slices.Contains(networks, s.Network) {
 		return errors.New(`network must be "none" or "egress"`)
 	}
 	for i, capability := range s.CapAdd {
@@ -52,7 +70,7 @@ func (s Sandbox) Validate(secrets Secrets) error {
 			return err
 		}
 		// Podman's env-file format has no quoting.
-		if strings.ContainsAny(value, "\r\n") {
+		if !secretValue.MatchString(value) {
 			return fmt.Errorf("secret %s contains a line break", name)
 		}
 		if _, ok := s.Env[name]; ok {
@@ -66,12 +84,11 @@ func checkVariable(name, value string) error {
 	if !envName.MatchString(name) {
 		return fmt.Errorf("invalid environment variable name %q", name)
 	}
-	// NVIDIA's container hooks read these variables to inject devices outside the GPU allocation.
-	if strings.HasPrefix(name, "NVIDIA_") {
+	if strings.HasPrefix(name, ReservedEnvPrefix) {
 		return fmt.Errorf("environment variable %s is reserved", name)
 	}
-	if len(value) > maxValueBytes || strings.ContainsRune(value, 0) {
-		return fmt.Errorf("variable %s must be at most %d bytes without NUL", name, maxValueBytes)
+	if len(value) > MaxValueBytes || !envValue.MatchString(value) {
+		return fmt.Errorf("variable %s must be at most %d bytes without NUL", name, MaxValueBytes)
 	}
 	return nil
 }

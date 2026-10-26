@@ -1,6 +1,13 @@
 package worker
 
-import "errors"
+import (
+	"errors"
+	"slices"
+)
+
+var architectures = []string{"amd64", "arm64"}
+
+func Architectures() []string { return slices.Clone(architectures) }
 
 type Match struct {
 	Arch            string `json:"arch,omitempty"`
@@ -11,7 +18,7 @@ type Match struct {
 }
 
 func (m Match) Validate(resources Resources) error {
-	if m.Arch != "" && m.Arch != "amd64" && m.Arch != "arm64" {
+	if m.Arch != "" && !slices.Contains(architectures, m.Arch) {
 		return errors.New("match.arch must be amd64 or arm64")
 	}
 	if m.MinGPUMemoryMiB < 0 {

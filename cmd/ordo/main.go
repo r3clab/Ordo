@@ -30,6 +30,13 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
+	if err := dispatch(ctx, args, output); !errors.Is(err, flag.ErrHelp) {
+		return err
+	}
+	return nil
+}
+
+func dispatch(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("ordo", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	err := flags.Parse(args)
@@ -46,6 +53,10 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return agentCommand(ctx, flags.Args()[1:], output)
 		case "server":
 			return serverCommand(ctx, flags.Args()[1:], output)
+		case "submit":
+			return submitCommand(ctx, flags.Args()[1:], output)
+		case "fetch":
+			return fetchCommand(ctx, flags.Args()[1:], output)
 		case "queue":
 			return queueCommand(ctx, flags.Args()[1:], output)
 		case "worker":
@@ -54,6 +65,16 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return fmt.Errorf("unknown command %q", flags.Arg(0))
 	}
 
-	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run      Run one local task in rootless Podman (run --help for options)\n  recover  Recover a retained local task (recover --help for options)\n  agent    Serve a persistent worker (agent --help for options)\n  worker   Bootstrap or contact a worker through SSH (worker --help for options)\n  server   Run the durable queue and worker reconciliation\n  queue    Submit or inspect queued jobs")
+	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run      Run one local task in rootless Podman (run --help for options)\n  recover  Recover a retained local task (recover --help for options)\n  agent    Serve a persistent worker (agent --help for options)\n  worker   Bootstrap or contact a worker through SSH (worker --help for options)\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests from stdin (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Submit workflows, inspect, stop or cancel queued jobs")
+	return err
+}
+
+func parse(flags *flag.FlagSet, args []string, out io.Writer, usage string) error {
+	err := flags.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		if _, printErr := fmt.Fprintln(out, usage); printErr != nil {
+			return printErr
+		}
+	}
 	return err
 }

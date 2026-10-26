@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/task"
 	"github.com/r3clab/Ordo/internal/worker"
 )
@@ -25,26 +26,26 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	state := filepath.Join(root, "state")
 	workers := []worker.Remote{{Host: "worker", StateDir: "/home/worker/ordo"}}
 	services := map[string]string{"model": "127.0.0.1:8317"}
-	s, err := Open(state, workers, services)
+	s, err := Open(state, workers, services, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	req := Request{ID: "agent", Image: "sha256:" + strings.Repeat("a", 64), Archive: archive, Resources: worker.Resources{Cores: 1, MemoryMiB: 128},
+	req := Request{ID: "agent", Image: image.Source{Ref: "sha256:" + strings.Repeat("a", 64)}, Archive: archive, Resources: worker.Resources{Cores: 1, MemoryMiB: 128},
 		Sandbox: task.Sandbox{Env: map[string]string{"MODE": "eval"}, Network: task.Egress, CapAdd: []string{"NET_ADMIN"}},
 		Secrets: map[string]string{"TOKEN": "hunter2"}, Services: []string{"model"}, Retry: RetryPolicy{Task: 2}}
 	unknown := req
 	unknown.Services = []string{"other"}
-	if _, err := s.Submit(ctx, unknown); err == nil {
+	if _, err := s.Submit(ctx, Local, unknown); err == nil {
 		t.Fatal("accepted an unconfigured service")
 	}
-	j, err := s.Submit(ctx, req)
+	j, err := s.Submit(ctx, Local, req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resubmitted := req
 	resubmitted.Secrets = map[string]string{"TOKEN": "rotated"}
-	if _, err := s.Submit(ctx, resubmitted); err != nil {
+	if _, err := s.Submit(ctx, Local, resubmitted); err != nil {
 		t.Fatal("secret values must not change job identity:", err)
 	}
 	listed, _ := json.Marshal(s.List())
@@ -89,11 +90,11 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if other, err := Open(state, workers, nil); err == nil {
+	if other, err := Open(state, workers, nil, image.Tools{}); err == nil {
 		_ = other.Close()
 		t.Fatal("dropped a service an unfinished job uses")
 	}
-	if s, err = Open(state, workers, services); err != nil {
+	if s, err = Open(state, workers, services, image.Tools{}); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
@@ -129,7 +130,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 
 	queued := req
 	queued.ID = "queued"
-	if _, err := s.Submit(ctx, queued); err != nil {
+	if _, err := s.Submit(ctx, Local, queued); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Stop("queued", ""); err != nil {
@@ -141,7 +142,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 
 	oob := req
 	oob.ID = "oob"
-	if j, err = s.Submit(ctx, oob); err != nil {
+	if j, err = s.Submit(ctx, Local, oob); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.reconcile(ctx, j, "worker", info, client); err != nil {
@@ -158,7 +159,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 
 	live := req
 	live.ID = "live"
-	if _, err := s.Submit(ctx, live); err != nil {
+	if _, err := s.Submit(ctx, Local, live); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.store.Put("secret", "orphan", map[string]string{"TOKEN": "x"}); err != nil {
@@ -167,7 +168,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if s, err = Open(state, workers, services); err != nil {
+	if s, err = Open(state, workers, services, image.Tools{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.store.Get("secret", "orphan", &values); !errors.Is(err, sql.ErrNoRows) {

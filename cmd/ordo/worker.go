@@ -6,8 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/task"
 	"io"
 	"maps"
 	"net/http"
@@ -15,6 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+
+	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/task"
 
 	"github.com/r3clab/Ordo/internal/worker"
 )
@@ -67,10 +68,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	flags.Int64Var(&spec.TimeoutSeconds, "timeout-seconds", 0, "per-attempt wall-clock deadline; zero disables")
 	flags.IntVar(&spec.Resources.Cores, "cores", 0, "physical cores")
 	flags.Int64Var(&spec.Resources.MemoryMiB, "task-memory-mib", 0, "task memory limit")
-	if err := flags.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			_, err = fmt.Fprintln(out, usage)
-		}
+	if err := parse(flags, args[1:], out, usage); err != nil {
 		return err
 	}
 	if operation != "submit" && flags.NArg() != 0 {

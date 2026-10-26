@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/worker"
 	"maps"
@@ -22,9 +23,16 @@ type RetryPolicy struct {
 	Infrastructure *int `json:"infrastructure,omitempty"`
 }
 
+const (
+	MaxRetry         = 10
+	MaxWorkflowID    = 24
+	MaxStepID        = 32
+	MaxWorkflowTasks = 1000
+)
+
 func (r RetryPolicy) validate() error {
-	if r.Task < 0 || r.Task > 10 || (r.Infrastructure != nil && (*r.Infrastructure < 0 || *r.Infrastructure > 10)) {
-		return errors.New("retry counts must be 0..10")
+	if r.Task < 0 || r.Task > MaxRetry || (r.Infrastructure != nil && (*r.Infrastructure < 0 || *r.Infrastructure > MaxRetry)) {
+		return fmt.Errorf("retry counts must be 0..%d", MaxRetry)
 	}
 	return nil
 }
@@ -36,10 +44,10 @@ func (r RetryPolicy) infra() int {
 }
 
 type Workflow struct {
-	ID      string `json:"id"`
-	Image   string `json:"image,omitempty"`
-	Archive string `json:"archive,omitempty"`
-	Tasks   []Step `json:"tasks"`
+	ID      string       `json:"id"`
+	Image   image.Source `json:"image,omitzero"`
+	Archive string       `json:"archive,omitempty"`
+	Tasks   []Step       `json:"tasks"`
 }
 type Step struct {
 	Request
@@ -50,20 +58,20 @@ type Step struct {
 }
 
 func expand(w Workflow) ([]Step, error) {
-	if !worker.ValidName(w.ID) || len(w.ID) > 24 || len(w.Tasks) == 0 || len(w.Tasks) > 1000 {
-		return nil, errors.New("workflow needs an ID (1..24 characters) and 1..1000 tasks")
+	if !worker.ValidName(w.ID) || len(w.ID) > MaxWorkflowID || len(w.Tasks) == 0 || len(w.Tasks) > MaxWorkflowTasks {
+		return nil, fmt.Errorf("workflow needs an ID (1..%d characters) and 1..%d tasks", MaxWorkflowID, MaxWorkflowTasks)
 	}
 	groups := map[string][]string{}
 	ids := map[string]bool{}
 	var expanded []Step
 	for _, step := range w.Tasks {
-		if !worker.ValidName(step.ID) || len(step.ID) > 32 || groups[step.ID] != nil {
-			return nil, errors.New("task IDs must be unique and 1..32 characters")
+		if !worker.ValidName(step.ID) || len(step.ID) > MaxStepID || groups[step.ID] != nil {
+			return nil, fmt.Errorf("task IDs must be unique and 1..%d characters", MaxStepID)
 		}
 		combos := []map[string]string{{}}
 		for _, key := range slices.Sorted(maps.Keys(step.Matrix)) {
 			values := step.Matrix[key]
-			if !worker.ValidName(key) || len(values) == 0 || len(values) > 1000 || len(combos) > 1000/len(values) {
+			if !worker.ValidName(key) || len(values) == 0 || len(values) > MaxWorkflowTasks || len(combos) > MaxWorkflowTasks/len(values) {
 				return nil, errors.New("invalid or oversized parameter matrix")
 			}
 			var next []map[string]string
@@ -103,7 +111,7 @@ func expand(w Workflow) ([]Step, error) {
 				}
 				task.Args[i] = arg
 			}
-			if task.Image == "" {
+			if task.Image.IsZero() {
 				task.Image = w.Image
 				if task.Archive == "" {
 					task.Archive = w.Archive
@@ -113,8 +121,8 @@ func expand(w Workflow) ([]Step, error) {
 				return nil, err
 			}
 			expanded = append(expanded, task)
-			if len(expanded) > 1000 {
-				return nil, errors.New("expanded workflow exceeds 1000 tasks")
+			if len(expanded) > MaxWorkflowTasks {
+				return nil, fmt.Errorf("expanded workflow exceeds %d tasks", MaxWorkflowTasks)
 			}
 		}
 	}
@@ -198,14 +206,18 @@ func jobKey(j Job) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
-func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) {
+func (s *Server) SubmitWorkflow(ctx context.Context, caller Caller, w Workflow) ([]Job, error) {
 	steps, err := expand(w)
 	if err != nil {
 		return nil, err
 	}
 	jobs := make([]Job, 0, len(steps))
 	secrets := map[string]map[string]string{}
-	st := newStaging()
+	requests := make([]Request, len(steps))
+	for i, step := range steps {
+		requests[i] = step.Request
+	}
+	st := s.stage(ctx, caller, requests...)
 	for _, step := range steps {
 		j, err := s.prepare(ctx, step.Request, st)
 		if err != nil {

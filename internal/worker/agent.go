@@ -27,7 +27,10 @@ var ErrCapacity = errors.New("worker has insufficient unreserved resources")
 var ErrInvalidRequest = errors.New("invalid request")
 var ErrConflict = errors.New("conflicting request")
 var ErrUnavailable = errors.New("worker requires restart after a state write failure")
-var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+const NamePattern = `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
+
+var identifier = regexp.MustCompile(NamePattern)
 
 const protocolVersion = 1
 

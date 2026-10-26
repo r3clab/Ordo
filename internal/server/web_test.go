@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/r3clab/Ordo/internal/worker"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/worker"
 )
 
 func TestWebAuthenticationSubmissionCancellationAndLogs(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}}, nil)
+	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}}, nil, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +69,7 @@ func TestWebAuthenticationSubmissionCancellationAndLogs(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := json.Marshal(Request{ID: "example", Archive: archive, Image: "sha256:" + strings.Repeat("a", 64), Resources: worker.Resources{Cores: 1, MemoryMiB: 128}})
+	data, _ := json.Marshal(Request{ID: "example", Archive: archive, Image: image.Source{Ref: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}})
 	w := request("POST", "/v1/jobs", token, "", "http://127.0.0.1:7331", data)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -115,7 +117,7 @@ func TestWebListenerIsLoopbackOnly(t *testing.T) {
 	_ = l.Close()
 }
 func TestWebHTTPRoundTrip(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}}, nil)
+	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}}, nil, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -348,22 +348,32 @@ func Call(ctx context.Context, client *http.Client, method, endpoint string, inp
 		}
 		body = bytes.NewReader(data)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, "http://ordo"+endpoint, body)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
+	response, err := Send(ctx, client, method, endpoint, "application/json", body)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = response.Body.Close() }()
-	if err := checkResponse(response); err != nil {
-		return err
-	}
 	if output == nil {
 		_, err = io.Copy(io.Discard, response.Body)
 		return err
 	}
 	return json.NewDecoder(response.Body).Decode(output)
+}
+
+func Send(ctx context.Context, client *http.Client, method, endpoint, contentType string, body io.Reader) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, method, "http://ordo"+endpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", contentType)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkResponse(response); err != nil {
+		return nil, errors.Join(err, response.Body.Close())
+	}
+	return response, nil
 }

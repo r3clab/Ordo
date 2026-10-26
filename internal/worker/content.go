@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"path/filepath"
 	"time"
 )
+
+const ChecksumHeader = "X-Ordo-SHA256"
 
 func (a *Agent) contentRoutes(mux *http.ServeMux) {
 	blobs := filepath.Join(a.cfg.StateDir, "blobs")
@@ -117,7 +120,7 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		w.Header().Set("X-Ordo-SHA256", hash)
+		w.Header().Set(ChecksumHeader, hash)
 		http.ServeFile(w, r, archive)
 	})
 }
@@ -179,22 +182,33 @@ func FetchResult(ctx context.Context, client *http.Client, id, dest string) erro
 	if !ValidName(id) {
 		return errors.New("invalid attempt ID")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://ordo/v1/results/"+id, nil)
+	return Download(ctx, client, "/v1/results/"+id, dest, verifyResult)
+}
+
+func verifyResult(tree string) error {
+	record, err := task.ReadResult(tree)
 	if err != nil {
 		return err
 	}
-	resp, err := untimed(client).Do(req)
+	if !record.Request.ExportOutputs {
+		return nil
+	}
+	actual, err := content.Hash(filepath.Join(tree, "outputs.tar"))
+	if err != nil {
+		return err
+	}
+	if actual != record.OutputsSHA256 {
+		return errors.New("output archive checksum mismatch")
+	}
+	return content.Extract(filepath.Join(tree, "outputs.tar"), filepath.Join(tree, "outputs"))
+}
+
+func Download(ctx context.Context, client *http.Client, endpoint, dest string, verify func(tree string) error) error {
+	resp, err := Send(ctx, untimed(client), http.MethodGet, endpoint, "", nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if err := checkResponse(resp); err != nil {
-		return err
-	}
-	hash := resp.Header.Get("X-Ordo-SHA256")
-	if !content.Valid(hash) {
-		return errors.New("result missing checksum")
-	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
@@ -203,26 +217,21 @@ func FetchResult(ctx context.Context, client *http.Client, id, dest string) erro
 		return err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	if _, err := content.Put(tmp, resp.Body, hash); err != nil {
+	hash, err := content.Put(tmp, resp.Body, "")
+	if err != nil {
 		return err
+	}
+	if want := cmp.Or(resp.Header.Get(ChecksumHeader), resp.Trailer.Get(ChecksumHeader)); !content.Valid(want) {
+		return errors.New("result missing checksum")
+	} else if want != hash {
+		return errors.New("content checksum mismatch")
 	}
 	tree := filepath.Join(tmp, "result")
 	if err := content.Extract(filepath.Join(tmp, hash), tree); err != nil {
 		return err
 	}
-	record, err := task.ReadResult(tree)
-	if err != nil {
-		return err
-	}
-	if record.Request.ExportOutputs {
-		actual, err := content.Hash(filepath.Join(tree, "outputs.tar"))
-		if err != nil {
-			return err
-		}
-		if actual != record.OutputsSHA256 {
-			return errors.New("output archive checksum mismatch")
-		}
-		if err := content.Extract(filepath.Join(tree, "outputs.tar"), filepath.Join(tree, "outputs")); err != nil {
+	if verify != nil {
+		if err := verify(tree); err != nil {
 			return err
 		}
 	}

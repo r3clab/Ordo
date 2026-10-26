@@ -34,8 +34,8 @@ jq -n --arg a "$root_a" --arg b "$root_b" --arg binary "$ORDO_TEST_BINARY" '[{ho
 start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/workers.json" --listen 127.0.0.1:0 >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json" 2>/dev/null; then return; fi; sleep 0.2; done; return 1; }
 start
 for id in first second; do
- jq -n --arg id "$id" --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:$id,image:$image,archive:$archive,resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
- "$ORDO_TEST_BINARY" queue submit --state "$work/server" --file "$work/$id.json" > "$work/$id-submitted.json"
+ jq -nc --arg id "$id" --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:$id,image:$image,archive:$archive,resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
+ "$ORDO_TEST_BINARY" submit --state "$work/server" --file "$work/$id.json" > "$work/$id-submitted.json"
 done
 for ((i=0;i<90;i++)); do
  "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json"
