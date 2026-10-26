@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
@@ -93,7 +92,7 @@ const (
 
 var ErrNixUntrusted = errors.New("nix images require the local API socket")
 
-func Open(root string, workers []worker.Remote, services map[string]string, tools image.Tools) (*Server, error) {
+func Open(root string, workers []worker.Remote, services map[string]string, tools image.Tools) (_ *Server, err error) {
 	if len(workers) == 0 || len(workers) > 10 {
 		return nil, errors.New("configure 1-10 workers")
 	}
@@ -109,7 +108,7 @@ func Open(root string, workers []worker.Remote, services map[string]string, tool
 			}
 		}
 	}
-	root, err := filepath.Abs(root)
+	root, err = filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
@@ -117,30 +116,26 @@ func Open(root string, workers []worker.Remote, services map[string]string, tool
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err != nil {
+			_ = db.Close()
+		}
+	}()
 	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(services), jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
-	rows, err := db.List("job")
+	jobs, err := state.List[Job](db, "job")
 	if err != nil {
-		_ = db.Close()
 		return nil, err
 	}
-	for _, row := range rows {
-		var j Job
-		if err := json.Unmarshal(row, &j); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
+	for _, j := range jobs {
 		if !worker.ValidName(j.ID) {
-			_ = db.Close()
 			return nil, errors.New("invalid saved job ID")
 		}
 		if !j.Terminal() {
 			if len(j.Attempts) > 0 && !seen[j.Attempts[len(j.Attempts)-1].Worker] {
-				_ = db.Close()
 				return nil, errors.New("configuration removes a worker with unfinished attempts")
 			}
 			for _, name := range j.Spec.Services {
 				if _, ok := services[name]; !ok {
-					_ = db.Close()
 					return nil, fmt.Errorf("configuration removes service %s, which unfinished job %s uses", name, j.ID)
 				}
 			}
@@ -150,13 +145,11 @@ func Open(root string, workers []worker.Remote, services map[string]string, tool
 	// Secrets outlive their job when a crash or failed write falls between the two records.
 	secrets, err := db.IDs("secret")
 	if err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	for _, id := range secrets {
 		if j, ok := s.jobs[id]; !ok || j.Terminal() {
 			if err := db.Delete("secret", id); err != nil {
-				_ = db.Close()
 				return nil, err
 			}
 		}

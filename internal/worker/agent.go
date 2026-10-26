@@ -178,32 +178,22 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 	child, cancel := context.WithCancel(ctx)
 	a := &Agent{cfg: cfg, info: Info{Protocol: protocolVersion, ID: ident.ID, Hardware: h}, store: store, attempts: map[string]Attempt{}, busy: map[string]bool{}, stopping: map[string]bool{}, cancelled: map[string]bool{}, ctx: child, cancel: cancel}
 	fail := func(err error) (*Agent, error) { _ = a.Close(); return nil, err }
-	tombstones, err := store.List("cancel")
+	tombstones, err := state.List[cancellation](store, "cancel")
 	if err != nil {
 		return fail(err)
 	}
-	for _, data := range tombstones {
-		var c cancellation
-		if err := json.Unmarshal(data, &c); err != nil {
-			return fail(err)
-		}
+	for _, c := range tombstones {
 		if !ValidName(c.ID) {
 			return fail(errors.New("invalid cancellation record"))
 		}
 		a.cancelled[c.ID] = true
 	}
-	rows, err := store.List("attempt")
+	runs, err := state.List[Attempt](store, "attempt")
 	if err != nil {
 		return fail(err)
 	}
-	used := map[int]bool{}
-	gpuUsed := map[string]bool{}
-	var heldMemory int64
-	for _, data := range rows {
-		var run Attempt
-		if err := json.Unmarshal(data, &run); err != nil {
-			return fail(err)
-		}
+	held := &reservations{cpus: map[int]bool{}, gpus: map[string]bool{}}
+	for _, run := range runs {
 		if !ValidName(run.ID) {
 			return fail(errors.New("invalid saved attempt ID"))
 		}
@@ -213,48 +203,8 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 			return fail(fmt.Errorf("invalid saved attempt state %q", run.State))
 		}
 		if !run.Terminal() {
-			selected, ok := matchedHardware(h, run.Spec.Match)
-			if !ok {
-				return fail(errors.New("worker no longer matches a reserved attempt"))
-			}
-			if len(run.Allocation.GPUs) != run.Spec.Resources.GPUs {
-				return fail(errors.New("saved GPU reservation count mismatch"))
-			}
-			for _, id := range run.Allocation.GPUs {
-				current := slices.IndexFunc(selected.GPUs, func(g GPU) bool { return g.UUID == id })
-				previous := slices.IndexFunc(run.Hardware.GPUs, func(g GPU) bool { return g.UUID == id })
-				if current < 0 || previous < 0 || gpuUsed[id] {
-					return fail(errors.New("saved GPU reservations conflict or a device is missing"))
-				}
-				now, old := selected.GPUs[current], run.Hardware.GPUs[previous]
-				if now.Driver != old.Driver || now.Model != old.Model || now.MemoryMiB != old.MemoryMiB {
-					return fail(errors.New("reserved GPU hardware or driver changed"))
-				}
-				gpuUsed[id] = true
-			}
-			if run.Allocation.MemoryMiB <= 0 || run.Allocation.MemoryMiB > h.MemoryMiB-heldMemory {
-				return fail(errors.New("saved reservations exceed configured memory"))
-			}
-			heldMemory += run.Allocation.MemoryMiB
-			if len(run.Allocation.CPUs) == 0 {
-				return fail(errors.New("saved reservation has no CPUs"))
-			}
-			for _, cpu := range run.Allocation.CPUs {
-				if used[cpu] || !slices.ContainsFunc(h.Cores, func(core []int) bool { return slices.Contains(core, cpu) }) {
-					return fail(errors.New("saved CPU reservations conflict or fall outside the configured pool"))
-				}
-				used[cpu] = true
-			}
-			for _, core := range h.Cores {
-				count := 0
-				for _, cpu := range core {
-					if slices.Contains(run.Allocation.CPUs, cpu) {
-						count++
-					}
-				}
-				if count != 0 && count != len(core) {
-					return fail(errors.New("saved reservation no longer owns a complete physical core"))
-				}
+			if err := held.add(h, run); err != nil {
+				return fail(err)
 			}
 		}
 		a.attempts[run.ID] = run
@@ -275,6 +225,59 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 		return fail(err)
 	}
 	return a, nil
+}
+
+type reservations struct {
+	cpus      map[int]bool
+	gpus      map[string]bool
+	memoryMiB int64
+}
+
+func (held *reservations) add(h Hardware, run Attempt) error {
+	selected, ok := matchedHardware(h, run.Spec.Match)
+	if !ok {
+		return errors.New("worker no longer matches a reserved attempt")
+	}
+	if len(run.Allocation.GPUs) != run.Spec.Resources.GPUs {
+		return errors.New("saved GPU reservation count mismatch")
+	}
+	for _, id := range run.Allocation.GPUs {
+		current := slices.IndexFunc(selected.GPUs, func(g GPU) bool { return g.UUID == id })
+		previous := slices.IndexFunc(run.Hardware.GPUs, func(g GPU) bool { return g.UUID == id })
+		if current < 0 || previous < 0 || held.gpus[id] {
+			return errors.New("saved GPU reservations conflict or a device is missing")
+		}
+		now, old := selected.GPUs[current], run.Hardware.GPUs[previous]
+		if now.Driver != old.Driver || now.Model != old.Model || now.MemoryMiB != old.MemoryMiB {
+			return errors.New("reserved GPU hardware or driver changed")
+		}
+		held.gpus[id] = true
+	}
+	if run.Allocation.MemoryMiB <= 0 || run.Allocation.MemoryMiB > h.MemoryMiB-held.memoryMiB {
+		return errors.New("saved reservations exceed configured memory")
+	}
+	held.memoryMiB += run.Allocation.MemoryMiB
+	if len(run.Allocation.CPUs) == 0 {
+		return errors.New("saved reservation has no CPUs")
+	}
+	for _, cpu := range run.Allocation.CPUs {
+		if held.cpus[cpu] || !slices.ContainsFunc(h.Cores, func(core []int) bool { return slices.Contains(core, cpu) }) {
+			return errors.New("saved CPU reservations conflict or fall outside the configured pool")
+		}
+		held.cpus[cpu] = true
+	}
+	for _, core := range h.Cores {
+		count := 0
+		for _, cpu := range core {
+			if slices.Contains(run.Allocation.CPUs, cpu) {
+				count++
+			}
+		}
+		if count != 0 && count != len(core) {
+			return errors.New("saved reservation no longer owns a complete physical core")
+		}
+	}
+	return nil
 }
 
 func (a *Agent) Close() error {

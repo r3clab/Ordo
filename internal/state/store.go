@@ -39,18 +39,23 @@ func Open(dir string) (*Store, error) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return nil, errors.Join(fmt.Errorf("state directory already owned: %w", err), lock.Close())
 	}
-	path, err := filepath.Abs(filepath.Join(dir, "state.sqlite"))
+	db, err := openDB(filepath.Join(dir, "state.sqlite"))
 	if err != nil {
-		_ = lock.Close()
+		return nil, errors.Join(err, lock.Close())
+	}
+	return &Store{db: db, lock: lock}, nil
+}
+
+func openDB(file string) (_ *sql.DB, err error) {
+	path, err := filepath.Abs(file)
+	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		_ = lock.Close()
 		return nil, err
 	}
-	if err := file.Close(); err != nil {
-		_ = lock.Close()
+	if err := f.Close(); err != nil {
 		return nil, err
 	}
 	u := url.URL{Scheme: "file", Path: path}
@@ -61,18 +66,19 @@ func Open(dir string) (*Store, error) {
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
-		_ = lock.Close()
 		return nil, err
 	}
+	defer func() {
+		if err != nil {
+			_ = db.Close()
+		}
+	}()
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, lock: lock}
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		_ = s.Close()
 		return nil, err
 	}
 	if version != 0 && version != 1 {
-		_ = s.Close()
 		return nil, fmt.Errorf("unsupported state schema version %d", version)
 	}
 	_, err = db.Exec(`BEGIN IMMEDIATE;
@@ -80,10 +86,9 @@ func Open(dir string) (*Store, error) {
  PRAGMA user_version=1;
  COMMIT;`)
 	if err != nil {
-		_ = s.Close()
 		return nil, err
 	}
-	return s, nil
+	return db, nil
 }
 
 func (s *Store) Close() error { return errors.Join(s.db.Close(), s.lock.Close()) }
@@ -156,19 +161,23 @@ func (s *Store) IDs(kind string) ([]string, error) {
 	return ids, rows.Err()
 }
 
-func (s *Store) List(kind string) ([][]byte, error) {
+func List[T any](s *Store, kind string) ([]T, error) {
 	rows, err := s.db.Query("SELECT body FROM records WHERE kind=? ORDER BY id", kind)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var result [][]byte
+	var result []T
 	for rows.Next() {
-		var b []byte
-		if err := rows.Scan(&b); err != nil {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
 			return nil, err
 		}
-		result = append(result, b)
+		var value T
+		if err := json.Unmarshal(data, &value); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
 	}
 	return result, rows.Err()
 }
