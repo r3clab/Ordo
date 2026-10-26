@@ -96,6 +96,21 @@ func PutTree(dir, tree string) (string, error) {
 	return id, err
 }
 
+// Link may share file's inode with the blob, so the caller must have verified it and never modify it.
+func Link(dir, file, want string) error {
+	if Has(dir, want) {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Link(file, filepath.Join(dir, want)); err == nil {
+		return SyncDir(dir)
+	}
+	_, err := PutFile(dir, file, want)
+	return err
+}
+
 func WriteAtomic(path string, write func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".tmp-")
@@ -219,6 +234,21 @@ func Extract(archive, dest string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if err := Unpack(f, dest, nil); err != nil {
+		if info, e := os.Stat(dest); e == nil && info.IsDir() {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func Unpack(r io.Reader, dest string, check func(dir, digest string) error) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
@@ -227,17 +257,47 @@ func Extract(archive, dest string) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	f, err := os.Open(archive)
-	if err != nil {
+	hash := sha256.New()
+	r = io.TeeReader(r, hash)
+	if err := untar(r, dir); err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
-	tr := tar.NewReader(f)
+	// The tar reader stops at the end-of-archive marker; the digest also covers the padding after it.
+	if _, err := io.Copy(io.Discard, io.LimitReader(r, 1<<20)); err != nil {
+		return err
+	}
+	if check != nil {
+		if err := check(dir, hex.EncodeToString(hash.Sum(nil))); err != nil {
+			return err
+		}
+	}
+	if err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return SyncDir(file)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(dir, dest); err != nil {
+		return err
+	}
+	return SyncDir(filepath.Dir(dest))
+}
+
+func untar(r io.Reader, dir string) error {
+	tr := tar.NewReader(r)
 	var total int64
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			break
+			return nil
 		}
 		if err != nil {
 			return err
@@ -268,30 +328,8 @@ func Extract(archive, dest string) error {
 			return err
 		}
 		_, err = io.Copy(out, tr)
-		err = errors.Join(err, out.Sync(), out.Close())
-		if err != nil {
+		if err := errors.Join(err, out.Sync(), out.Close()); err != nil {
 			return err
 		}
 	}
-	if err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return SyncDir(file)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := os.Chmod(dir, 0o755); err != nil {
-		return err
-	}
-	if err := os.Rename(dir, dest); err != nil {
-		if info, e := os.Stat(dest); e == nil && info.IsDir() {
-			return nil
-		}
-		return err
-	}
-	return SyncDir(filepath.Dir(dest))
 }
