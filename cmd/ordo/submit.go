@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,8 +18,7 @@ var stdin io.Reader = os.Stdin
 const submitUsage = "Usage: ordo submit --state DIR [--file JOBS.jsonl]\n\nReads one job request per line (stdin by default) and prints one result per line.\nEach job needs an id; resubmitting an id with the same request returns the existing job."
 
 func submitCommand(ctx context.Context, args []string, out io.Writer) error {
-	f := flag.NewFlagSet("submit", flag.ContinueOnError)
-	f.SetOutput(io.Discard)
+	f := newFlags("submit")
 	var root, file string
 	f.StringVar(&root, "state", "", "server state directory")
 	f.StringVar(&file, "file", "-", "JSONL job requests, or - for stdin")

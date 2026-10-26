@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,8 +27,7 @@ type fetchResult struct {
 }
 
 func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
-	f := flag.NewFlagSet("fetch", flag.ContinueOnError)
-	f.SetOutput(io.Discard)
+	f := newFlags("fetch")
 	var root, into string
 	var ids []string
 	var wait bool

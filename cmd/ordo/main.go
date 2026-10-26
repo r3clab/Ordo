@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,39 +37,46 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	return nil
 }
 
+var commands = map[string]func(context.Context, []string, io.Writer) error{
+	"run":     runTask,
+	"recover": recoverTask,
+	"agent":   agentCommand,
+	"server":  serverCommand,
+	"submit":  submitCommand,
+	"fetch":   fetchCommand,
+	"schema":  schemaCommand,
+	"queue":   queueCommand,
+	"worker":  workerCommand,
+}
+
 func dispatch(ctx context.Context, args []string, output io.Writer) error {
-	flags := flag.NewFlagSet("ordo", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+	flags := newFlags("ordo")
 	err := flags.Parse(args)
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
 		return err
 	}
 	if err == nil && flags.NArg() != 0 {
-		switch flags.Arg(0) {
-		case "run":
-			return runTask(ctx, flags.Args()[1:], output)
-		case "recover":
-			return recoverTask(ctx, flags.Args()[1:], output)
-		case "agent":
-			return agentCommand(ctx, flags.Args()[1:], output)
-		case "server":
-			return serverCommand(ctx, flags.Args()[1:], output)
-		case "submit":
-			return submitCommand(ctx, flags.Args()[1:], output)
-		case "fetch":
-			return fetchCommand(ctx, flags.Args()[1:], output)
-		case "schema":
-			return schemaCommand(ctx, flags.Args()[1:], output)
-		case "queue":
-			return queueCommand(ctx, flags.Args()[1:], output)
-		case "worker":
-			return workerCommand(ctx, flags.Args()[1:], output)
+		command, ok := commands[flags.Arg(0)]
+		if !ok {
+			return fmt.Errorf("unknown command %q", flags.Arg(0))
 		}
-		return fmt.Errorf("unknown command %q", flags.Arg(0))
+		return command(ctx, flags.Args()[1:], output)
 	}
 
 	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run      Run one local task in rootless Podman (run --help for options)\n  recover  Recover a retained local task (recover --help for options)\n  agent    Serve a persistent worker (agent --help for options)\n  worker   Bootstrap or contact a worker through SSH (worker --help for options)\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests from stdin (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Submit workflows, inspect, stop or cancel queued jobs\n  schema   Print the JSON Schema for job requests and workflows")
 	return err
+}
+
+func newFlags(name string) *flag.FlagSet {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	return flags
+}
+
+func printJSON(out io.Writer, value any) error {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
 }
 
 func parse(flags *flag.FlagSet, args []string, out io.Writer, usage string) error {

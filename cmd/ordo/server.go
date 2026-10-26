@@ -3,9 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,8 +25,7 @@ func decodeFile(file string, value any) error {
 }
 
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
-	f := flag.NewFlagSet("server", flag.ContinueOnError)
-	f.SetOutput(io.Discard)
+	f := newFlags("server")
 	var root, config, address string
 	var tools image.Tools
 	services := map[string]string{}
@@ -77,28 +74,28 @@ func keyValue(values map[string]string, kind string) func(string) error {
 	}
 }
 
+const queueUsage = "Usage: ordo queue <workflow|list|get|cancel|cancel-workflow|stop> --state DIR [--file workflow.json | --id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents."
+
 func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] == "--help" {
-		_, err := fmt.Fprintln(out, "Usage: ordo queue <workflow|list|get|cancel|cancel-workflow|stop> --state DIR [--file workflow.json | --id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents.")
+		_, err := fmt.Fprintln(out, queueUsage)
 		return err
 	}
 	operation := args[0]
-	f := flag.NewFlagSet("queue", flag.ContinueOnError)
-	f.SetOutput(io.Discard)
+	f := newFlags("queue")
 	var root, file, id, reason string
 	f.StringVar(&root, "state", "", "server state directory")
 	f.StringVar(&file, "file", "", "JSON workflow")
 	f.StringVar(&id, "id", "", "job ID")
 	f.StringVar(&reason, "reason", "", "why a job is stopped or cancelled")
-	if err := f.Parse(args[1:]); err != nil {
+	if err := parse(f, args[1:], out, queueUsage); err != nil {
 		return err
 	}
 	if root == "" || f.NArg() != 0 {
 		return errors.New("--state is required")
 	}
-	client := serverClient(root)
-	defer client.CloseIdleConnections()
-	var result any
+	method, endpoint := http.MethodPost, "/v1/jobs/"+id+"/"+operation
+	var body any
 	switch operation {
 	case "workflow":
 		var flow server.Workflow
@@ -108,29 +105,23 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 		if id != "" {
 			flow.ID = id
 		}
-		if err := worker.Call(ctx, client, http.MethodPost, "/v1/workflows", flow, &result); err != nil {
-			return err
-		}
-	case "cancel", "cancel-workflow", "stop":
-		endpoint := "/v1/jobs/" + id + "/" + operation
-		if operation == "cancel-workflow" {
-			endpoint = "/v1/workflows/" + id + "/cancel"
-		}
-		if err := worker.Call(ctx, client, http.MethodPost, endpoint, worker.StopRequest{Reason: reason}, &result); err != nil {
-			return err
-		}
+		endpoint, body = "/v1/workflows", flow
+	case "cancel", "stop":
+		body = worker.StopRequest{Reason: reason}
+	case "cancel-workflow":
+		endpoint, body = "/v1/workflows/"+id+"/cancel", worker.StopRequest{Reason: reason}
 	case "list":
-		if err := worker.Call(ctx, client, http.MethodGet, "/v1/jobs", nil, &result); err != nil {
-			return err
-		}
+		method, endpoint = http.MethodGet, "/v1/jobs"
 	case "get":
-		if err := worker.Call(ctx, client, http.MethodGet, "/v1/jobs/"+id, nil, &result); err != nil {
-			return err
-		}
+		method, endpoint = http.MethodGet, "/v1/jobs/"+id
 	default:
 		return errors.New("unknown queue command")
 	}
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(result)
+	client := serverClient(root)
+	defer client.CloseIdleConnections()
+	var result any
+	if err := worker.Call(ctx, client, method, endpoint, body, &result); err != nil {
+		return err
+	}
+	return printJSON(out, result)
 }

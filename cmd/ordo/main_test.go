@@ -25,6 +25,16 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
+func TestSubcommandHelp(t *testing.T) {
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"queue", "list", "--help"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Usage: ordo queue") {
+		t.Errorf("output %q lacks queue usage", output.String())
+	}
+}
+
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {

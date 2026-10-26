@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -34,8 +32,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	var spec worker.Spec
 	spec.Env = map[string]string{}
 	var match worker.Match
-	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+	flags := newFlags("worker")
 	flags.StringVar(&remote.Host, "host", "", "SSH alias")
 	flags.StringVar(&remote.StateDir, "state", "", "absolute private remote state directory")
 	flags.StringVar(&remote.CPUs, "cpus", "", "logical CPU pool including complete SMT sibling sets")
@@ -166,7 +163,5 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		}
 		result = run
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(result)
+	return printJSON(out, result)
 }

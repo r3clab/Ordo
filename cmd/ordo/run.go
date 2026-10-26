@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 
@@ -22,8 +21,7 @@ with podman inspect, logs, or stop to manage it manually.`
 
 func runTask(ctx context.Context, args []string, output io.Writer) error {
 	var req task.Request
-	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+	flags := newFlags("run")
 	flags.StringVar(&req.Image, "image", "", "local image reference")
 	flags.StringVar(&req.CPUs, "cpus", "", "CPU IDs or ranges")
 	flags.Int64Var(&req.MemoryMiB, "memory-mib", 0, "memory limit in MiB, without swap")

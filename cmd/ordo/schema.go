@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -12,8 +11,7 @@ import (
 )
 
 func schemaCommand(_ context.Context, args []string, out io.Writer) error {
-	f := flag.NewFlagSet("schema", flag.ContinueOnError)
-	f.SetOutput(io.Discard)
+	f := newFlags("schema")
 	var dir string
 	f.StringVar(&dir, "out", "", "write every schema into this directory")
 	if err := parse(f, args, out, fmt.Sprintf("Usage: ordo schema [%s] | ordo schema --out DIR", strings.Join(schema.Names(), "|"))); err != nil {

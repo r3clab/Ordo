@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 
@@ -20,8 +19,7 @@ On interruption or collection failure the container is retained, possibly runnin
 
 func recoverTask(ctx context.Context, args []string, output io.Writer) error {
 	var dir string
-	flags := flag.NewFlagSet("recover", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+	flags := newFlags("recover")
 	flags.StringVar(&dir, "output", "", "existing results directory")
 	if err := parse(flags, args, output, recoverUsage); err != nil {
 		return err

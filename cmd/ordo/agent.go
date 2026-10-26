@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"io"
 
 	"github.com/r3clab/Ordo/internal/worker"
@@ -11,8 +10,7 @@ import (
 
 func agentCommand(ctx context.Context, args []string, out io.Writer) error {
 	var cfg worker.Config
-	flags := flag.NewFlagSet("agent", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+	flags := newFlags("agent")
 	flags.StringVar(&cfg.StateDir, "state", "", "private local state directory")
 	flags.StringVar(&cfg.CPUs, "cpus", "", "allowed logical CPUs, including every SMT sibling")
 	flags.Func("gpus", "allowed NVIDIA GPU UUIDs (comma-separated)", func(value string) error { ids, err := worker.GPUList(value); cfg.GPUs = ids; return err })
