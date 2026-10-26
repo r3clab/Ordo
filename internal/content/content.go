@@ -64,11 +64,16 @@ func Put(dir string, r io.Reader, want string) (string, error) {
 	}
 	return id, SyncDir(dir)
 }
+func Has(dir, id string) bool {
+	if !Valid(id) {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(dir, id))
+	return err == nil && info.Mode().IsRegular()
+}
 func PutFile(dir, file, want string) (string, error) {
-	if Valid(want) {
-		if info, err := os.Lstat(filepath.Join(dir, want)); err == nil && info.Mode().IsRegular() {
-			return want, nil
-		}
+	if Has(dir, want) {
+		return want, nil
 	}
 	f, err := os.Open(file)
 	if err != nil {
@@ -115,22 +120,33 @@ func Hash(file string) (string, error) {
 // Archive publishes only a complete, synced tar. Only directories and regular files are supported.
 func Archive(dir, dest string) (string, error) {
 	hash := sha256.New()
-	err := WriteAtomic(dest, func(f io.Writer) error {
-		tw := tar.NewWriter(io.MultiWriter(f, hash))
-		return errors.Join(writeTree(tw, dir), tw.Close())
-	})
+	err := WriteAtomic(dest, func(f io.Writer) error { return Tar(io.MultiWriter(f, hash), Part{Path: dir}) })
 	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func writeTree(tw *tar.Writer, dir string) error {
-	return filepath.WalkDir(dir, func(file string, entry fs.DirEntry, walkErr error) error {
+// Part places Path in a tar at Name; an empty Name places a directory's contents at the root.
+type Part struct{ Path, Name string }
+
+func Tar(w io.Writer, parts ...Part) error {
+	tw := tar.NewWriter(w)
+	seen := map[string]bool{}
+	for _, part := range parts {
+		if err := writeTree(tw, part, seen); err != nil {
+			return err
+		}
+	}
+	return tw.Close()
+}
+
+func writeTree(tw *tar.Writer, part Part, seen map[string]bool) error {
+	return filepath.WalkDir(part.Path, func(file string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if file == dir {
+		if file == part.Path && part.Name == "" {
 			if !entry.IsDir() {
 				return errors.New("snapshot source must be a directory")
 			}
@@ -143,11 +159,16 @@ func writeTree(tw *tar.Writer, dir string) error {
 		if !info.IsDir() && !info.Mode().IsRegular() {
 			return fmt.Errorf("unsupported snapshot entry: %s", file)
 		}
-		name, err := filepath.Rel(dir, file)
+		rel, err := filepath.Rel(part.Path, file)
 		if err != nil {
 			return err
 		}
-		header := &tar.Header{Name: filepath.ToSlash(name), Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg, Size: info.Size()}
+		name := path.Join(part.Name, filepath.ToSlash(rel))
+		if seen[name] {
+			return fmt.Errorf("duplicate snapshot entry: %s", name)
+		}
+		seen[name] = true
+		header := &tar.Header{Name: name, Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg, Size: info.Size()}
 		if info.IsDir() {
 			header.Typeflag = tar.TypeDir
 			header.Size = 0

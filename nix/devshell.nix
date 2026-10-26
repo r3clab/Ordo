@@ -16,6 +16,7 @@ perSystem.devshell.mkShell {
     pkgs.go
     pkgs.gopls
     pkgs.golangci-lint
+    perSystem.nix2container.skopeo-nix2container
     pkgs.nodejs
     perSystem.self.formatter
   ];
