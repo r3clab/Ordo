@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 func decodeFile(file string, value any) error {
@@ -26,12 +27,14 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := flag.NewFlagSet("server", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	var root, config, address string
+	services := map[string]string{}
 	f.StringVar(&address, "listen", "127.0.0.1:7331", "loopback web UI address")
 	f.StringVar(&root, "state", "", "private server state directory")
 	f.StringVar(&config, "workers", "", "JSON array of worker connection configurations")
+	f.Func("service", "NAME=HOST:PORT reachable from this server, published to tasks at /services/NAME/socket (repeatable)", keyValue(services, "service"))
 	if err := f.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, err = fmt.Fprintln(out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331]")
+			_, err = fmt.Fprintln(out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331] [--service NAME=HOST:PORT ...]")
 		}
 		return err
 	}
@@ -42,25 +45,40 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err := decodeFile(config, &workers); err != nil {
 		return err
 	}
-	s, err := server.Open(root, workers)
+	s, err := server.Open(root, workers, services)
 	if err != nil {
 		return err
 	}
 	err = s.Run(ctx, address)
 	return errors.Join(err, s.Close())
 }
+func keyValue(values map[string]string, kind string) func(string) error {
+	return func(value string) error {
+		name, text, ok := strings.Cut(value, "=")
+		if !ok || name == "" {
+			return fmt.Errorf("%s must be NAME=VALUE", kind)
+		}
+		if _, exists := values[name]; exists {
+			return fmt.Errorf("duplicate %s %s", kind, name)
+		}
+		values[name] = text
+		return nil
+	}
+}
+
 func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] == "--help" {
-		_, err := fmt.Fprintln(out, "Usage: ordo queue <submit|workflow|list|get|cancel|cancel-workflow> --state DIR [--file job.json | --id ID]")
+		_, err := fmt.Fprintln(out, "Usage: ordo queue <submit|workflow|list|get|cancel|cancel-workflow|stop> --state DIR [--file job.json | --id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents.")
 		return err
 	}
 	operation := args[0]
 	f := flag.NewFlagSet("queue", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
-	var root, file, id string
+	var root, file, id, reason string
 	f.StringVar(&root, "state", "", "server state directory")
 	f.StringVar(&file, "file", "", "JSON request")
 	f.StringVar(&id, "id", "", "job ID")
+	f.StringVar(&reason, "reason", "", "why a job is stopped or cancelled")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -83,12 +101,12 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 		if err := worker.Call(ctx, client, http.MethodPost, "/v1/workflows", flow, &result); err != nil {
 			return err
 		}
-	case "cancel", "cancel-workflow":
-		base := "/v1/jobs/"
+	case "cancel", "cancel-workflow", "stop":
+		endpoint := "/v1/jobs/" + id + "/" + operation
 		if operation == "cancel-workflow" {
-			base = "/v1/workflows/"
+			endpoint = "/v1/workflows/" + id + "/cancel"
 		}
-		if err := worker.Call(ctx, client, http.MethodPost, base+id+"/cancel", nil, &result); err != nil {
+		if err := worker.Call(ctx, client, http.MethodPost, endpoint, worker.StopRequest{Reason: reason}, &result); err != nil {
 			return err
 		}
 	case "submit":

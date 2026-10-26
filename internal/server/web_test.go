@@ -14,7 +14,7 @@ import (
 )
 
 func TestWebAuthenticationSubmissionCancellationAndLogs(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}})
+	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestWebListenerIsLoopbackOnly(t *testing.T) {
 	_ = l.Close()
 }
 func TestWebHTTPRoundTrip(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}})
+	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

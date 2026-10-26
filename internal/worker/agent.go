@@ -45,12 +45,20 @@ type Config struct {
 }
 
 type Spec struct {
-	Image          string            `json:"image"`
-	Args           []string          `json:"args,omitempty"`
-	Resources      Resources         `json:"resources"`
-	Inputs         map[string]string `json:"inputs,omitempty"`
-	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
-	Match          *Match            `json:"match,omitempty"`
+	Image     string            `json:"image"`
+	Args      []string          `json:"args,omitempty"`
+	Resources Resources         `json:"resources"`
+	Inputs    map[string]string `json:"inputs,omitempty"`
+	task.Sandbox
+	Secrets        []string `json:"secrets,omitempty"`
+	Services       []string `json:"services,omitempty"`
+	TimeoutSeconds int64    `json:"timeout_seconds,omitempty"`
+	Match          *Match   `json:"match,omitempty"`
+}
+
+type Submission struct {
+	Spec    Spec              `json:"spec"`
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 type Attempt struct {
@@ -64,6 +72,7 @@ type Attempt struct {
 	UpdatedAt     time.Time    `json:"updated_at"`
 	Result        *task.Record `json:"result,omitempty"`
 	StopRequested string       `json:"stop_requested,omitempty"`
+	StopReason    string       `json:"stop_reason,omitempty"`
 }
 
 func (a Attempt) Terminal() bool {
@@ -247,6 +256,18 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 		}
 		a.attempts[run.ID] = run
 	}
+	// Secrets outlive their attempt when a crash or failed write falls between the two records.
+	secrets, err := store.IDs("secret")
+	if err != nil {
+		return fail(err)
+	}
+	for _, id := range secrets {
+		if run, ok := a.attempts[id]; !ok || run.Terminal() {
+			if err := store.Delete("secret", id); err != nil {
+				return fail(err)
+			}
+		}
+	}
 	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "runs"), 0o700); err != nil {
 		return fail(err)
 	}
@@ -263,7 +284,7 @@ func (a *Agent) Close() error {
 	return errors.Join(err, releaseHost(a.owner, clear && err == nil))
 }
 
-func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
+func (a *Agent) Submit(id string, spec Spec, secrets map[string]string) (Attempt, error) {
 	// nvidia-smi pmon samples for about a second; probing under a.mu would stall the agent.
 	var busy []string
 	var busyErr error
@@ -301,6 +322,21 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	}
 	spec.Args = slices.Clone(spec.Args)
 	spec.Inputs = maps.Clone(spec.Inputs)
+	spec.Env = maps.Clone(spec.Env)
+	spec.CapAdd = slices.Sorted(slices.Values(spec.CapAdd))
+	spec.Secrets = slices.Sorted(slices.Values(spec.Secrets))
+	spec.Services = slices.Sorted(slices.Values(spec.Services))
+	if !slices.Equal(spec.Secrets, slices.Sorted(maps.Keys(secrets))) {
+		return Attempt{}, fmt.Errorf("%w: secret values must match the declared secret names", ErrInvalidRequest)
+	}
+	if err := spec.Validate(secrets); err != nil {
+		return Attempt{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
+	}
+	for i, name := range spec.Services {
+		if !ValidName(name) || (i > 0 && spec.Services[i-1] == name) {
+			return Attempt{}, fmt.Errorf("%w: invalid or duplicate service name", ErrInvalidRequest)
+		}
+	}
 	for name, digest := range spec.Inputs {
 		if !ValidName(name) || !content.Valid(digest) {
 			return Attempt{}, fmt.Errorf("%w: invalid input name/digest", ErrInvalidRequest)
@@ -342,6 +378,11 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	}
 	now := time.Now().UTC()
 	run := Attempt{ID: id, Spec: spec, Allocation: allocation, Hardware: a.info.Hardware, State: "accepted", CreatedAt: now, UpdatedAt: now}
+	if len(secrets) > 0 {
+		if err := a.put("secret", id, secrets); err != nil {
+			return Attempt{}, err
+		}
+	}
 	if err := a.save(run); err != nil {
 		return Attempt{}, err
 	}
@@ -358,17 +399,19 @@ func (a *Agent) held() []Allocation {
 	return held
 }
 
-func (a *Agent) put(kind, id string, value any) error {
-	if err := a.store.Put(kind, id, value); err != nil {
+func (a *Agent) put(kind, id string, value any) error { return a.latch(a.store.Put(kind, id, value)) }
+
+func (a *Agent) latch(err error) error {
+	if err != nil {
 		a.info.Error = err.Error()
-		return err
 	}
-	return nil
+	return err
 }
 
 func (a *Agent) save(run Attempt) error {
 	if old, ok := a.attempts[run.ID]; ok && old.StopRequested != "" {
 		run.StopRequested = old.StopRequested
+		run.StopReason = old.StopReason
 	}
 	if run.State == "finished" && run.StopRequested == "cancel" {
 		run.State = "cancelled"
@@ -378,6 +421,9 @@ func (a *Agent) save(run Attempt) error {
 		return err
 	}
 	a.attempts[run.ID] = run
+	if run.Terminal() && len(run.Spec.Secrets) > 0 {
+		return a.latch(a.store.Delete("secret", run.ID))
+	}
 	return nil
 }
 
@@ -414,14 +460,22 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 	for name, digest := range run.Spec.Inputs {
 		mounts[name] = filepath.Join(a.cfg.StateDir, "trees", digest)
 	}
-	req := task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: ReservationID(a.info.ID, run.ID), Inputs: mounts, ExportOutputs: true, GPUs: run.Allocation.GPUs, CDISpecDir: filepath.Join(a.cfg.StateDir, "cdi")}
+	services := map[string]string{}
+	for _, name := range run.Spec.Services {
+		services[name] = a.serviceDir(name)
+	}
+	req := task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: ReservationID(a.info.ID, run.ID), Inputs: mounts, ExportOutputs: true, GPUs: run.Allocation.GPUs, CDISpecDir: filepath.Join(a.cfg.StateDir, "cdi"), Sandbox: run.Spec.Sandbox, Services: services}
 	matches := func(r task.Record) bool {
 		got := r.Request
-		return got.ReservationID == req.ReservationID && got.Image == req.Image && got.CPUs == req.CPUs && got.MemoryMiB == req.MemoryMiB && slices.Equal(got.Args, req.Args) && maps.Equal(got.Inputs, req.Inputs) && slices.Equal(got.GPUs, req.GPUs)
+		return got.ReservationID == req.ReservationID && got.Image == req.Image && got.CPUs == req.CPUs && got.MemoryMiB == req.MemoryMiB && slices.Equal(got.Args, req.Args) && maps.Equal(got.Inputs, req.Inputs) && slices.Equal(got.GPUs, req.GPUs) &&
+			maps.Equal(got.Env, req.Env) && got.Network == req.Network && slices.Equal(got.CapAdd, req.CapAdd) && slices.Equal(got.Secrets.Names(), run.Spec.Secrets) && maps.Equal(got.Services, req.Services)
 	}
 	var err error
 	if fresh {
-		err = task.Run(a.ctx, req)
+		err = a.prepareLaunch(run, &req)
+		if err == nil {
+			err = task.Run(a.ctx, req)
+		}
 	} else {
 		var r task.Record
 		r, err = task.ReadResult(dir)
@@ -466,6 +520,27 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 	defer a.mu.Unlock()
 	// A failed write latches admission closed until restart reconciles the database.
 	_ = a.save(run)
+}
+
+func (a *Agent) serviceDir(name string) string {
+	return filepath.Join(a.cfg.StateDir, "services", name)
+}
+
+func (a *Agent) prepareLaunch(run Attempt, req *task.Request) error {
+	for _, dir := range req.Services {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	if len(run.Spec.Secrets) == 0 {
+		return nil
+	}
+	var values map[string]string
+	if err := a.store.Get("secret", run.ID, &values); err != nil {
+		return fmt.Errorf("load secrets: %w", err)
+	}
+	req.Secrets = values
+	return nil
 }
 
 func (a *Agent) Serve() error {

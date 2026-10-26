@@ -29,20 +29,20 @@ func testSpec() Spec {
 
 func TestReservationIdempotenceAndRestart(t *testing.T) {
 	a, cfg, h := testAgent(t)
-	first, err := a.Submit("one", testSpec())
+	first, err := a.Submit("one", testSpec(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(first.Allocation.CPUs, []int{0, 64}) {
 		t.Fatal(first)
 	}
-	again, err := a.Submit("one", testSpec())
+	again, err := a.Submit("one", testSpec(), nil)
 	if err != nil || !again.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("not idempotent: %v", err)
 	}
 	changed := testSpec()
 	changed.Args = []string{"different"}
-	if _, err := a.Submit("one", changed); !errors.Is(err, ErrConflict) {
+	if _, err := a.Submit("one", changed, nil); !errors.Is(err, ErrConflict) {
 		t.Fatalf("accepted changed request: %v", err)
 	}
 	if err := a.Close(); err != nil {
@@ -53,14 +53,14 @@ func TestReservationIdempotenceAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = a.Close() }()
-	second, err := a.Submit("two", testSpec())
+	second, err := a.Submit("two", testSpec(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(second.Allocation.CPUs, []int{1, 65}) {
 		t.Fatal("reservation lost across restart")
 	}
-	if _, err := a.Submit("three", testSpec()); !errors.Is(err, ErrCapacity) {
+	if _, err := a.Submit("three", testSpec(), nil); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("overcommitted: %v", err)
 	}
 }
@@ -73,7 +73,7 @@ func TestConcurrentReservations(t *testing.T) {
 	var accepted []Attempt
 	for _, id := range []string{"a", "b", "c", "d"} {
 		wg.Go(func() {
-			run, err := a.Submit(id, testSpec())
+			run, err := a.Submit(id, testSpec(), nil)
 			if err == nil {
 				mu.Lock()
 				accepted = append(accepted, run)
@@ -96,7 +96,7 @@ func TestConcurrentReservations(t *testing.T) {
 
 func TestChangedPoolCannotDiscardReservations(t *testing.T) {
 	a, cfg, h := testAgent(t)
-	if _, err := a.Submit("one", testSpec()); err != nil {
+	if _, err := a.Submit("one", testSpec(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Close(); err != nil {

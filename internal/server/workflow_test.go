@@ -37,7 +37,7 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(filepath.Join(root, "state"), []worker.Remote{{Host: "worker"}})
+	s, err := Open(filepath.Join(root, "state"), []worker.Remote{{Host: "worker"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

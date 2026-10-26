@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +30,10 @@ import (
 
 var hostAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]*$`)
 var remoteStateDir = regexp.MustCompile(`^/[a-zA-Z0-9_./-]+$`)
+var serviceHost = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.-]*$`)
+
+// Unix socket paths stop at 108 bytes, and ssh's temporary bind names are longer than the final path.
+const maxSocketPath = 100
 
 type Remote struct {
 	Host      string   `json:"host"`
@@ -81,7 +88,7 @@ func (r Remote) validate() error {
 	if !remoteStateDir.MatchString(r.StateDir) || path.Clean(r.StateDir) != r.StateDir || r.StateDir == "/" {
 		return errors.New("remote state must be a clean absolute path without spaces or colons")
 	}
-	if len(path.Join(r.StateDir, "agent.sock")) > 100 {
+	if len(path.Join(r.StateDir, "agent.sock")) > maxSocketPath {
 		return errors.New("remote state path is too long for a Unix socket")
 	}
 	if _, err := cpuList(r.CPUs); err != nil {
@@ -188,9 +195,48 @@ func Bootstrap(ctx context.Context, r Remote) error {
 	return nil
 }
 
-func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
+func (r Remote) serviceSocket(name string) string {
+	return path.Join(r.StateDir, "services", name, "socket")
+}
+
+func (r Remote) ServiceForward(name, address string) (string, error) {
+	if !ValidName(name) {
+		return "", fmt.Errorf("invalid service name %q", name)
+	}
+	socket := r.serviceSocket(name)
+	if len(socket) > maxSocketPath {
+		return "", fmt.Errorf("service %s socket path is too long for a Unix socket", name)
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("service %s: %w", name, err)
+	}
+	if number, err := strconv.Atoi(port); err != nil || number < 1 || number > 65535 || (net.ParseIP(host) == nil && !serviceHost.MatchString(host)) {
+		return "", fmt.Errorf("service %s needs a HOST:PORT address", name)
+	}
+	return socket + ":" + net.JoinHostPort(host, port), nil
+}
+
+func Connect(ctx context.Context, r Remote, services map[string]string) (*Tunnel, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
+	}
+	var forwards []string
+	if len(services) > 0 {
+		// sshd keeps a stale socket file by default (StreamLocalBindUnlink no), which would fail the bind.
+		prepare := "set -eu; umask 077"
+		for _, name := range slices.Sorted(maps.Keys(services)) {
+			forward, err := r.ServiceForward(name, services[name])
+			if err != nil {
+				return nil, err
+			}
+			socket := r.serviceSocket(name)
+			prepare += "; mkdir -p -- " + shellQuote(path.Dir(socket)) + "; rm -f -- " + shellQuote(socket)
+			forwards = append(forwards, "-R", forward)
+		}
+		if _, err := runSSH(ctx, r.Host, prepare, nil); err != nil {
+			return nil, err
+		}
 	}
 	dir, err := os.MkdirTemp("", "ordo-tunnel-")
 	if err != nil {
@@ -200,7 +246,9 @@ func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
 	t := &Tunnel{cancel: cancel, done: make(chan error, 1), dir: dir}
 	socket := filepath.Join(dir, "control.sock")
 	t.Client = Client(socket)
-	cmd := exec.CommandContext(child, "ssh", "-S", "none", "-T", "-oBatchMode=yes", "-oExitOnForwardFailure=yes", "-oStreamLocalBindUnlink=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", "-L", socket+":"+path.Join(r.StateDir, "agent.sock"), r.Host, "exec cat >/dev/null")
+	args := []string{"-S", "none", "-T", "-oBatchMode=yes", "-oExitOnForwardFailure=yes", "-oStreamLocalBindUnlink=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", "-L", socket + ":" + path.Join(r.StateDir, "agent.sock")}
+	args = append(append(args, forwards...), r.Host, "exec cat >/dev/null")
+	cmd := exec.CommandContext(child, "ssh", args...)
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		cancel()

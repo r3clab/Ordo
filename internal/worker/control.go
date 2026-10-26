@@ -11,31 +11,39 @@ type cancellation struct {
 	Reason string `json:"reason"`
 }
 
-func (a *Agent) Cancel(id string) error {
+const MaxReasonBytes = 1024
+
+func (a *Agent) Cancel(id, reason string) error { return a.requestStop(id, "cancel", reason) }
+
+func (a *Agent) Stop(id, reason string) error { return a.requestStop(id, "stop", reason) }
+
+func (a *Agent) requestStop(id, kind, reason string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !ValidName(id) {
+	if !ValidName(id) || len(reason) > MaxReasonBytes {
 		return ErrInvalidRequest
 	}
 	if a.info.Error != "" {
 		return ErrUnavailable
 	}
 	if run, ok := a.attempts[id]; ok {
-		if run.Terminal() {
+		if run.Terminal() || run.StopRequested != "" {
 			return nil
 		}
-		run.StopRequested = "cancel"
+		run.StopRequested = kind
+		run.StopReason = reason
 		if run.State == "accepted" && !a.busy[id] {
 			run.State = "cancelled"
 		}
 		return a.save(run)
 	}
-	if err := a.put("cancel", id, cancellation{ID: id, Reason: "cancel"}); err != nil {
+	if err := a.put("cancel", id, cancellation{ID: id, Reason: reason}); err != nil {
 		return err
 	}
 	a.cancelled[id] = true
 	return nil
 }
+
 func (a *Agent) enforceStops() {
 	a.mu.Lock()
 	defer a.mu.Unlock()

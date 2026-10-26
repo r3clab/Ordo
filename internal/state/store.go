@@ -55,7 +55,7 @@ func Open(dir string) (*Store, error) {
 	}
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)", "foreign_keys(ON)"} {
+	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)", "foreign_keys(ON)", "secure_delete(ON)"} {
 		q.Add("_pragma", pragma)
 	}
 	u.RawQuery = q.Encode()
@@ -127,6 +127,33 @@ func (s *Store) Get(kind, id string, value any) error {
 		return err
 	}
 	return json.Unmarshal(data, value)
+}
+
+// Delete leaves no copy of the record on disk: secure_delete zeroes its freed pages, and
+// truncating the write-ahead log discards the frames that still hold it.
+func (s *Store) Delete(kind, id string) error {
+	if _, err := s.db.Exec("DELETE FROM records WHERE kind=? AND id=?", kind, id); err != nil {
+		return err
+	}
+	_, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	return err
+}
+
+func (s *Store) IDs(kind string) ([]string, error) {
+	rows, err := s.db.Query("SELECT id FROM records WHERE kind=? ORDER BY id", kind)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *Store) List(kind string) ([][]byte, error) {

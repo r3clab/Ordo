@@ -275,6 +275,33 @@ The agent independently enforces these constraints, including after restart.
 A job with no eligible worker remains queued; it never falls back to weaker hardware.
 Matching uses the worker's reported inventory and does not control clocks, thermal state, shared memory bandwidth, or unrelated host activity.
 
+## Task environment
+
+Queue/workflow tasks may declare environment, secrets, network access, capabilities, and controller-side services:
+
+```json
+{"env":{"MODE":"eval"},"secrets":{"MODEL_TOKEN":"VALUE"},"network":"egress","cap_add":["NET_ADMIN"],"services":["model"]}
+```
+
+- `env` values are part of the job's specification and appear in job records, `run.json`, and the web UI.
+  Names starting with `NVIDIA_` are reserved, since NVIDIA's container hooks read them to inject devices.
+- `secrets` values are stored apart from jobs in the server's and worker's private state, deleted once the job or attempt ends, and never returned by the API or written to `run.json`, which lists only their names.
+  They reach Podman through a mode-0600 env file removed right after container creation, never through argv.
+  Values cannot contain NUL or line breaks.
+  Secret values are not part of a job's identity: resubmitting an existing ID keeps the original values.
+  `podman inspect` on the worker shows them while the container exists.
+- `network` is `none` (default, loopback only) or `egress` (rootless pasta with full outbound access).
+  Domain filtering belongs in the image, for example with nftables under `NET_ADMIN`.
+- `cap_add` accepts only `NET_ADMIN`, which acts on the container's own network namespace under rootless Podman.
+- `services` names endpoints configured on the server with repeated `--service NAME=HOST:PORT`, resolved from the server.
+  The server's SSH tunnel to each worker forwards each one to a Unix socket, and the task sees it at `/services/NAME/socket`, even with `network` set to `none`.
+  The directory is mounted rather than the socket, so a task keeps reaching the service after a tunnel reconnect; while the server is disconnected, connections fail and the task must retry.
+  Only the container's root user (the worker user) can connect.
+  Clients that need TCP bridge inside the image, for example `socat TCP-LISTEN:8317,bind=127.0.0.1,fork UNIX-CONNECT:/services/model/socket`.
+  Workers' sshd must allow stream-local forwarding (`AllowStreamLocalForwarding`, the default).
+  The server refuses a configuration that drops a service an unfinished job uses.
+- Direct worker submissions support `--env NAME=VALUE`, `--secret NAME` (value read from the CLI's own environment), `--network`, and `--cap-add`, but not services, since their tunnel closes when the command exits.
+
 ## Workflows
 
 `ordo queue workflow --state SERVER_DIR --file workflow.json` submits the entire graph atomically:
@@ -302,8 +329,16 @@ Matching uses the worker's reported inventory and does not control clocks, therm
 - `timeout_seconds` is a per-attempt wall-clock limit from worker acceptance, enforced by the worker even when the controller is unavailable.
   Zero disables it; the maximum is one year.
 - `ordo queue cancel --id JOB_ID` and `ordo queue cancel-workflow --id WORKFLOW_ID` persist cancellation intent.
+  A cancelled job ends `cancelled` and its dependents are skipped.
   Unknown outcomes stay pending/blocked until reconciled.
   `ordo worker cancel --id ATTEMPT_ID` also supports direct worker control.
+- `ordo queue stop --id JOB_ID` ends a running job early, for example when an external budget runs out, but keeps its result.
+  The container gets SIGTERM, then SIGKILL after 10 seconds, and the attempt is collected and classified by its exit status like any other exit, so a task that traps SIGTERM and exits zero succeeds and its dependents run.
+  A stopped job is never retried; stopping a job before it starts cancels it.
+  `ordo worker stop --id ATTEMPT_ID` stops one attempt directly.
+- Every stop and cancel accepts `--reason TEXT` (up to 1 KiB), recorded as `stop_reason` on the job and attempt.
+  Attempts also record `stop_requested`: `cancel`, `stop`, or `timeout`.
+  The first request reaching an attempt wins, but a later cancel still marks the job `cancelled`.
 
 ## Development
 

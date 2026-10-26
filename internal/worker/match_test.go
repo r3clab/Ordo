@@ -34,7 +34,7 @@ func TestAgentEnforcesMatching(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	spec := testSpec()
 	spec.Match = &Match{Arch: "arm64"}
-	if _, err := a.Submit("mismatch", spec); !errors.Is(err, ErrCapacity) {
+	if _, err := a.Submit("mismatch", spec, nil); !errors.Is(err, ErrCapacity) {
 		t.Fatal("direct client bypassed matching", err)
 	}
 }

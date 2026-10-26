@@ -41,7 +41,7 @@ func TestFailedLaunchWithoutSavedIdentityKeepsReservation(t *testing.T) {
 	t.Setenv("INVOCATION_ID", "")
 	a, _, _ := testAgent(t)
 	defer func() { _ = a.Close() }()
-	run, err := a.Submit("ambiguous", testSpec())
+	run, err := a.Submit("ambiguous", testSpec(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

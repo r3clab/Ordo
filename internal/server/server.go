@@ -1,8 +1,10 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/task"
 	"github.com/r3clab/Ordo/internal/worker"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,12 +23,15 @@ import (
 )
 
 type Request struct {
-	ID             string            `json:"id,omitempty"`
-	Image          string            `json:"image"`
-	Archive        string            `json:"archive,omitempty"`
-	Inputs         map[string]string `json:"inputs,omitempty"`
-	Args           []string          `json:"args,omitempty"`
-	Resources      worker.Resources  `json:"resources"`
+	ID        string            `json:"id,omitempty"`
+	Image     string            `json:"image"`
+	Archive   string            `json:"archive,omitempty"`
+	Inputs    map[string]string `json:"inputs,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Resources worker.Resources  `json:"resources"`
+	task.Sandbox
+	Secrets        map[string]string `json:"secrets,omitempty"`
+	Services       []string          `json:"services,omitempty"`
 	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
 	Retry          RetryPolicy       `json:"retry,omitempty"`
 	Match          *worker.Match     `json:"match,omitempty"`
@@ -54,6 +60,8 @@ type Job struct {
 	Parameters      map[string]string `json:"parameters,omitempty"`
 	Retry           RetryPolicy       `json:"retry,omitempty"`
 	CancelRequested bool              `json:"cancel_requested,omitempty"`
+	StopRequested   bool              `json:"stop_requested,omitempty"`
+	StopReason      string            `json:"stop_reason,omitempty"`
 }
 
 func (j Job) Terminal() bool {
@@ -61,17 +69,18 @@ func (j Job) Terminal() bool {
 }
 
 type Server struct {
-	mu      sync.Mutex
-	Root    string
-	store   *state.Store
-	workers []worker.Remote
-	jobs    map[string]Job
-	busy    map[string]bool
-	fault   error
-	nodes   map[string]WorkerStatus
+	mu       sync.Mutex
+	Root     string
+	store    *state.Store
+	workers  []worker.Remote
+	services map[string]string
+	jobs     map[string]Job
+	busy     map[string]bool
+	fault    error
+	nodes    map[string]WorkerStatus
 }
 
-func Open(root string, workers []worker.Remote) (*Server, error) {
+func Open(root string, workers []worker.Remote, services map[string]string) (*Server, error) {
 	if len(workers) == 0 || len(workers) > 10 {
 		return nil, errors.New("configure 1-10 workers")
 	}
@@ -81,6 +90,11 @@ func Open(root string, workers []worker.Remote) (*Server, error) {
 			return nil, errors.New("worker SSH aliases must be unique")
 		}
 		seen[w.Host] = true
+		for name, address := range services {
+			if _, err := w.ServiceForward(name, address); err != nil {
+				return nil, err
+			}
+		}
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -90,7 +104,7 @@ func Open(root string, workers []worker.Remote) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{Root: root, store: db, workers: workers, jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(services), jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	rows, err := db.List("job")
 	if err != nil {
 		_ = db.Close()
@@ -106,11 +120,33 @@ func Open(root string, workers []worker.Remote) (*Server, error) {
 			_ = db.Close()
 			return nil, errors.New("invalid saved job ID")
 		}
-		if !j.Terminal() && len(j.Attempts) > 0 && !seen[j.Attempts[len(j.Attempts)-1].Worker] {
-			_ = db.Close()
-			return nil, errors.New("configuration removes a worker with unfinished attempts")
+		if !j.Terminal() {
+			if len(j.Attempts) > 0 && !seen[j.Attempts[len(j.Attempts)-1].Worker] {
+				_ = db.Close()
+				return nil, errors.New("configuration removes a worker with unfinished attempts")
+			}
+			for _, name := range j.Spec.Services {
+				if _, ok := services[name]; !ok {
+					_ = db.Close()
+					return nil, fmt.Errorf("configuration removes service %s, which unfinished job %s uses", name, j.ID)
+				}
+			}
 		}
 		s.jobs[j.ID] = j
+	}
+	// Secrets outlive their job when a crash or failed write falls between the two records.
+	secrets, err := db.IDs("secret")
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	for _, id := range secrets {
+		if j, ok := s.jobs[id]; !ok || j.Terminal() {
+			if err := db.Delete("secret", id); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
 	}
 	return s, nil
 }
@@ -137,13 +173,38 @@ func (s *Server) List() []Job {
 func (s *Server) save(j Job) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.jobs[j.ID]; ok && old.CancelRequested {
-		j.CancelRequested = true
-		if j.Terminal() {
-			j.State = "cancelled"
-		}
-	}
+	s.refreshLocked(&j)
 	return s.commitLocked(j)
+}
+
+// refresh adopts cancel and stop requests that arrived after reconcile copied j.
+func (s *Server) refresh(j *Job) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked(j)
+}
+
+func (s *Server) refreshLocked(j *Job) {
+	old, ok := s.jobs[j.ID]
+	if !ok {
+		return
+	}
+	j.CancelRequested = j.CancelRequested || old.CancelRequested
+	j.StopRequested = j.StopRequested || old.StopRequested
+	j.StopReason = cmp.Or(old.StopReason, j.StopReason)
+	if j.CancelRequested && j.Terminal() {
+		j.State = "cancelled"
+	}
+}
+
+func (j Job) stopKind() string {
+	switch {
+	case j.CancelRequested:
+		return "cancel"
+	case j.StopRequested:
+		return "stop"
+	}
+	return ""
 }
 
 // commitLocked latches s.fault on a failed write so no later mutation diverges from the store.
@@ -162,6 +223,14 @@ func (s *Server) commitLocked(jobs ...Job) error {
 	for _, j := range jobs {
 		j.Attempts = slices.Clone(j.Attempts)
 		s.jobs[j.ID] = j
+	}
+	for _, j := range jobs {
+		if j.Terminal() && len(j.Spec.Secrets) > 0 {
+			if err := s.store.Delete("secret", j.ID); err != nil {
+				s.fault = err
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -188,6 +257,15 @@ func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, erro
 	}
 	if r.TimeoutSeconds < 0 || r.TimeoutSeconds > worker.MaxTimeoutSeconds {
 		return Job{}, fmt.Errorf("timeout must be 0..%d seconds", worker.MaxTimeoutSeconds)
+	}
+	if err := r.Validate(r.Secrets); err != nil {
+		return Job{}, err
+	}
+	services := slices.Sorted(slices.Values(r.Services))
+	for i, name := range services {
+		if _, ok := s.services[name]; !ok || (i > 0 && services[i-1] == name) {
+			return Job{}, fmt.Errorf("service %q is unknown or repeated; configure it with ordo server --service", name)
+		}
 	}
 	if r.ID == "" {
 		r.ID = strings.ToLower(rand.Text())
@@ -221,7 +299,8 @@ func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, erro
 		}
 		st.images[key] = image
 	}
-	spec := worker.Spec{Image: image.id, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}
+	spec := worker.Spec{Image: image.id, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match,
+		Sandbox: task.Sandbox{Env: maps.Clone(r.Env), Network: r.Network, CapAdd: slices.Sorted(slices.Values(r.CapAdd))}, Secrets: slices.Sorted(maps.Keys(r.Secrets)), Services: services}
 	for name, source := range r.Inputs {
 		if !worker.ValidName(name) {
 			return Job{}, errors.New("invalid input name")
@@ -262,6 +341,12 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 			return Job{}, errors.New("job ID already has a different immutable specification")
 		}
 		return old, nil
+	}
+	// Secrets live apart from jobs, which the API and UI return in full.
+	if len(r.Secrets) > 0 {
+		if err := s.store.Put("secret", j.ID, r.Secrets); err != nil {
+			return Job{}, err
+		}
 	}
 	if err := s.commitLocked(j); err != nil {
 		return Job{}, err
@@ -321,7 +406,7 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 			probe, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			err := worker.Bootstrap(probe, remote)
 			if err == nil {
-				tunnel, err = worker.Connect(ctx, remote)
+				tunnel, err = worker.Connect(ctx, remote, s.services)
 			}
 			cancel()
 			if err != nil {
@@ -380,7 +465,7 @@ func (s *Server) reconcileAll(ctx context.Context, host string, info worker.Info
 }
 func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.Info, client *http.Client) error {
 	if j.State == "queued" {
-		if j.CancelRequested {
+		if j.stopKind() != "" {
 			j.State = "cancelled"
 			return s.save(j)
 		}
@@ -426,13 +511,27 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 			j.Error = "worker lost an acknowledged attempt"
 			return s.save(j)
 		}
-		if j.CancelRequested {
-			if err := worker.Call(ctx, client, http.MethodPost, "/v1/attempts/"+at.ID+"/cancel", nil, nil); err != nil {
+		s.refresh(&j)
+		if j.stopKind() != "" {
+			if err := stopAttempt(ctx, client, at.ID, "cancel", j.StopReason); err != nil {
 				return err
 			}
 			return s.finish(j, "cancel")
 		}
-		err = worker.Call(ctx, client, http.MethodPut, "/v1/attempts/"+at.ID, j.Spec, &run)
+		submission := worker.Submission{Spec: j.Spec}
+		if len(j.Spec.Secrets) > 0 {
+			err := s.store.Get("secret", j.ID, &submission.Secrets)
+			if errors.Is(err, sql.ErrNoRows) {
+				at.Failure = "infrastructure"
+				j.State = "failed"
+				j.Error = "job secrets are missing; resubmit it under a new ID"
+				return s.save(j)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		err = worker.Call(ctx, client, http.MethodPut, "/v1/attempts/"+at.ID, submission, &run)
 		if errors.As(err, &api) && api.Status == http.StatusTooManyRequests {
 			j.Attempts = j.Attempts[:len(j.Attempts)-1]
 			j.State = "queued"
@@ -446,9 +545,14 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 	at.Seen = true
 	at.Remote = &run
 	j.Error = run.Error
+	// A stop sent to the worker directly still ends the job, as a server-side stop does.
+	if run.StopRequested == "stop" {
+		j.StopRequested = true
+		j.StopReason = cmp.Or(j.StopReason, run.StopReason)
+	}
 	if !run.Terminal() {
-		if j.CancelRequested {
-			if err := worker.Call(ctx, client, http.MethodPost, "/v1/attempts/"+at.ID+"/cancel", nil, nil); err != nil {
+		if kind := j.stopKind(); kind != "" && run.StopRequested == "" {
+			if err := stopAttempt(ctx, client, at.ID, kind, j.StopReason); err != nil {
 				return err
 			}
 		}
@@ -503,20 +607,19 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 	}
 	return s.finish(j, class)
 }
+func stopAttempt(ctx context.Context, client *http.Client, id, kind, reason string) error {
+	return worker.Call(ctx, client, http.MethodPost, "/v1/attempts/"+id+"/"+kind, worker.StopRequest{Reason: reason}, nil)
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.webRoutes(mux)
 	cancel := func(workflow bool) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			if err := s.Cancel(r.PathValue("id"), workflow); err != nil {
-				http.Error(w, err.Error(), 500)
-				return
-			}
-			worker.WriteJSON(w, http.StatusOK, map[string]bool{"requested": true})
-		}
+		return worker.StopHandler(func(id, reason string) error { return s.Cancel(id, workflow, reason) }, 500)
 	}
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", cancel(false))
 	mux.HandleFunc("POST /v1/workflows/{id}/cancel", cancel(true))
+	mux.HandleFunc("POST /v1/jobs/{id}/stop", worker.StopHandler(s.Stop, 500))
 	mux.HandleFunc("POST /v1/workflows", func(w http.ResponseWriter, r *http.Request) {
 		var flow Workflow
 		if err := worker.DecodeJSON(http.MaxBytesReader(w, r.Body, 8<<20), &flow); err != nil {

@@ -9,7 +9,7 @@ import (
 
 func TestCancellationTombstonePreventsLateLaunch(t *testing.T) {
 	a, cfg, h := testAgent(t)
-	if err := a.Cancel("late"); err != nil {
+	if err := a.Cancel("late", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Close(); err != nil {
@@ -20,18 +20,18 @@ func TestCancellationTombstonePreventsLateLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = a.Close() }()
-	if _, err := a.Submit("late", testSpec()); !errors.Is(err, ErrConflict) {
+	if _, err := a.Submit("late", testSpec(), nil); !errors.Is(err, ErrConflict) {
 		t.Fatalf("late launch admitted: %v", err)
 	}
 }
 func TestCancelAndTimeoutBeforeLaunchReleaseOnlyUnstartedWork(t *testing.T) {
 	a, _, _ := testAgent(t)
 	defer func() { _ = a.Close() }()
-	run, err := a.Submit("cancel", testSpec())
+	run, err := a.Submit("cancel", testSpec(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Cancel(run.ID); err != nil {
+	if err := a.Cancel(run.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if a.attempts[run.ID].State != "cancelled" {
@@ -39,7 +39,7 @@ func TestCancelAndTimeoutBeforeLaunchReleaseOnlyUnstartedWork(t *testing.T) {
 	}
 	spec := testSpec()
 	spec.TimeoutSeconds = 1
-	run, err = a.Submit("timeout", spec)
+	run, err = a.Submit("timeout", spec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

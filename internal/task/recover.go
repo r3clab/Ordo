@@ -33,6 +33,10 @@ func recoverRun(ctx context.Context, outputDir string, podman command) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
+	// A crash during launch can leave the secrets file behind; the container no longer needs it.
+	if err := removeSecrets(outputDir); err != nil {
+		return err
+	}
 	r, err := loadRecord(outputDir)
 	if err != nil {
 		return err

@@ -25,7 +25,7 @@ func TestHostOwnershipSurvivesStoppedAgentWithUnfinishedWork(t *testing.T) {
 		_ = other.Close()
 		t.Fatal("allowed a concurrent agent")
 	}
-	if _, err := a.Submit("held", testSpec()); err != nil {
+	if _, err := a.Submit("held", testSpec(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Close(); err != nil {

@@ -42,7 +42,7 @@ func TestContentTransfer(t *testing.T) {
 	}
 	spec := testSpec()
 	spec.Inputs = map[string]string{"sample": hash}
-	run, err := a.Submit("with-input", spec)
+	run, err := a.Submit("with-input", spec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

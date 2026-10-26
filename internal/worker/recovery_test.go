@@ -31,7 +31,7 @@ func savedRun(t *testing.T, a *Agent, run Attempt, r task.Record) {
 func TestReconcileCompletedExecutionWithoutPodman(t *testing.T) {
 	a, _, _ := testAgent(t)
 	defer func() { _ = a.Close() }()
-	run, err := a.Submit("completed", testSpec())
+	run, err := a.Submit("completed", testSpec(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestReconcileCompletedExecutionWithoutPodman(t *testing.T) {
 	spec := testSpec()
 	spec.Resources.Cores = 2
 	spec.Resources.MemoryMiB = 512
-	if _, err := a.Submit("after", spec); err != nil {
+	if _, err := a.Submit("after", spec, nil); err != nil {
 		t.Fatalf("completed reservation not released: %v", err)
 	}
 }
@@ -56,7 +56,7 @@ func TestAmbiguousLaunchAndMismatchedRecordKeepReservation(t *testing.T) {
 		spec := testSpec()
 		spec.Resources.Cores = 2
 		spec.Resources.MemoryMiB = 512
-		run, err := a.Submit("unknown", spec)
+		run, err := a.Submit("unknown", spec, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -68,7 +68,7 @@ func TestAmbiguousLaunchAndMismatchedRecordKeepReservation(t *testing.T) {
 		if got := a.attempts[run.ID]; got.State != "blocked" {
 			t.Fatalf("ambiguous task released: %+v", got)
 		}
-		if _, err := a.Submit("other", testSpec()); !errors.Is(err, ErrCapacity) {
+		if _, err := a.Submit("other", testSpec(), nil); !errors.Is(err, ErrCapacity) {
 			t.Fatalf("lost reservation: %v", err)
 		}
 		if err := a.Close(); err != nil {
@@ -79,16 +79,16 @@ func TestAmbiguousLaunchAndMismatchedRecordKeepReservation(t *testing.T) {
 
 func TestPersistenceFailureStopsAdmissions(t *testing.T) {
 	a, _, _ := testAgent(t)
-	if _, err := a.Submit("one", testSpec()); err != nil {
+	if _, err := a.Submit("one", testSpec(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Submit("two", testSpec()); err == nil {
+	if _, err := a.Submit("two", testSpec(), nil); err == nil {
 		t.Fatal("accepted request without durability")
 	}
-	if _, err := a.Submit("three", testSpec()); !errors.Is(err, ErrUnavailable) {
+	if _, err := a.Submit("three", testSpec(), nil); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("failed to latch admission closed: %v", err)
 	}
 	a.cancel()

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/worker"
 	"maps"
 	"path/filepath"
@@ -202,11 +204,15 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		return nil, err
 	}
 	jobs := make([]Job, 0, len(steps))
+	secrets := map[string]map[string]string{}
 	st := newStaging()
 	for _, step := range steps {
 		j, err := s.prepare(ctx, step.Request, st)
 		if err != nil {
 			return nil, err
+		}
+		if len(step.Secrets) > 0 {
+			secrets[j.ID] = step.Secrets
 		}
 		j.Workflow = w.ID
 		j.Depends = step.Depends
@@ -241,6 +247,11 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 			return nil, errors.New("workflow ID has a different task set")
 		}
 		return jobs, nil
+	}
+	if len(secrets) > 0 {
+		if err := state.PutMany(s.store, "secret", secrets); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.commitLocked(jobs...); err != nil {
 		return nil, err
@@ -303,7 +314,18 @@ func (s *Server) importOutputs(j *Job) error {
 	}
 	return nil
 }
-func (s *Server) Cancel(id string, workflow bool) error {
+func (s *Server) Cancel(id string, workflow bool, reason string) error {
+	return s.requestStop(id, workflow, reason, func(j *Job) { j.CancelRequested = true })
+}
+
+func (s *Server) Stop(id, reason string) error {
+	return s.requestStop(id, false, reason, func(j *Job) { j.StopRequested = true })
+}
+
+func (s *Server) requestStop(id string, workflow bool, reason string, mark func(*Job)) error {
+	if len(reason) > worker.MaxReasonBytes {
+		return fmt.Errorf("reason exceeds %d bytes", worker.MaxReasonBytes)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fault != nil {
@@ -317,7 +339,8 @@ func (s *Server) Cancel(id string, workflow bool) error {
 		if j.Terminal() {
 			continue
 		}
-		j.CancelRequested = true
+		mark(&j)
+		j.StopReason = cmp.Or(j.StopReason, reason)
 		if j.State == "queued" && !s.busy[key] {
 			j.State = "cancelled"
 		}
@@ -329,6 +352,7 @@ func (s *Server) Cancel(id string, workflow bool) error {
 	return s.commitLocked(changed...)
 }
 func (s *Server) finish(j Job, class string) error {
+	s.refresh(&j)
 	at := &j.Attempts[len(j.Attempts)-1]
 	at.Failure = class
 	if j.CancelRequested || class == "cancel" {
@@ -350,7 +374,7 @@ func (s *Server) finish(j Job, class string) error {
 		limit = j.Retry.infra()
 	}
 	j.State = "failed"
-	if count <= limit {
+	if count <= limit && !j.StopRequested {
 		j.State = "queued"
 	}
 	return s.save(j)

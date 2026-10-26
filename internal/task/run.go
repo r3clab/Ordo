@@ -33,6 +33,9 @@ type Request struct {
 	ExportOutputs bool              `json:"export_outputs,omitempty"`
 	GPUs          []string          `json:"gpus,omitempty"`
 	CDISpecDir    string            `json:"cdi_spec_dir,omitempty"`
+	Sandbox
+	Secrets  Secrets           `json:"secrets,omitempty"`
+	Services map[string]string `json:"services,omitempty"`
 }
 
 type ExitError struct {
@@ -131,17 +134,14 @@ func (r Request) validate() error {
 			seen[id] = true
 		}
 	}
-	for name, dir := range r.Inputs {
-		if name == "" || strings.ContainsAny(name, "/\\:\x00\n") || name == "." || name == ".." || !filepath.IsAbs(dir) || strings.ContainsAny(dir, ":\x00\n") {
-			return errors.New("invalid input mount")
-		}
-		info, err := os.Stat(dir)
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			return errors.New("input mount must be a directory")
-		}
+	if err := checkMounts("input", r.Inputs); err != nil {
+		return err
+	}
+	if err := checkMounts("service", r.Services); err != nil {
+		return err
+	}
+	if err := r.Validate(r.Secrets); err != nil {
+		return err
 	}
 	if strings.TrimSpace(r.Image) == "" {
 		return errors.New("--image is required (load a nix2container image into Podman first)")
@@ -163,6 +163,22 @@ func (r Request) validate() error {
 			if err != nil || start > end {
 				return fmt.Errorf("invalid CPU range %q", part)
 			}
+		}
+	}
+	return nil
+}
+
+func checkMounts(kind string, mounts map[string]string) error {
+	for name, dir := range mounts {
+		if name == "" || strings.ContainsAny(name, "/\\:\x00\n") || name == "." || name == ".." || !filepath.IsAbs(dir) || strings.ContainsAny(dir, ":\x00\n") {
+			return fmt.Errorf("invalid %s mount", kind)
+		}
+		info, err := os.Stat(dir)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s mount must be a directory", kind)
 		}
 	}
 	return nil
@@ -192,10 +208,15 @@ func execute(ctx context.Context, r *record, podman command) error {
 		"run", "--detach", "--pull=never", "--name", r.ContainerName,
 		"--label", runLabel + "=" + r.ContainerName,
 		"--cpuset-cpus", r.Request.CPUs, "--memory", memory, "--memory-swap", memory,
-		"--network=none", "--image-volume=ignore", "--log-driver=k8s-file",
 	}
+	args = append(args, r.Request.podmanArgs()...)
+	args = append(args, "--image-volume=ignore", "--log-driver=k8s-file")
 	for _, name := range slices.Sorted(maps.Keys(r.Request.Inputs)) {
 		args = append(args, "--volume", r.Request.Inputs[name]+":/inputs/"+name+":ro")
+	}
+	// A directory mount, unlike a socket file mount, sees the socket recreated by a reconnecting tunnel.
+	for _, name := range slices.Sorted(maps.Keys(r.Request.Services)) {
+		args = append(args, "--volume", r.Request.Services[name]+":/services/"+name+":ro")
 	}
 	if r.Request.ExportOutputs {
 		outputs := filepath.Join(r.Request.OutputDir, "outputs")
@@ -214,10 +235,16 @@ func execute(ctx context.Context, r *record, podman command) error {
 		}
 		args = append(args, "--env", "NVIDIA_VISIBLE_DEVICES=void")
 	}
+	if len(r.Request.Secrets) > 0 {
+		if err := writeSecrets(r.Request.OutputDir, r.Request.Secrets); err != nil {
+			return errors.Join(err, removeSecrets(r.Request.OutputDir))
+		}
+		args = append(args, "--env-file", filepath.Join(r.Request.OutputDir, secretsFile))
+	}
 	args = append(args, "--", r.ImageID)
 	args = append(args, r.Request.Args...)
 	containerID, err := podman.output(ctx, args...)
-	if err != nil {
+	if err := errors.Join(err, removeSecrets(r.Request.OutputDir)); err != nil {
 		return err
 	}
 	id := strings.TrimSpace(string(containerID))
