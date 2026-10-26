@@ -83,6 +83,19 @@ func PutFile(dir, file, want string) (string, error) {
 	return id, errors.Join(err, f.Close())
 }
 
+func PutTree(dir, tree string) (string, error) {
+	r, w := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = w.CloseWithError(Tar(w, Part{Path: tree}))
+	}()
+	id, err := Put(dir, r, "")
+	_ = r.Close()
+	<-done
+	return id, err
+}
+
 func WriteAtomic(path string, write func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".tmp-")

@@ -35,6 +35,12 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if err != nil || id != first {
 		t.Fatal(err)
 	}
+	if id, err := PutTree(filepath.Join(root, "blobs"), src); err != nil || id != first {
+		t.Fatal("tree blob differs from its archive", err)
+	}
+	if _, err := PutTree(filepath.Join(root, "blobs"), filepath.Join(src, "data")); err == nil {
+		t.Fatal("stored a file as a tree")
+	}
 	dest := filepath.Join(root, "tree")
 	if err := Extract(archive, dest); err != nil {
 		t.Fatal(err)
