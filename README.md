@@ -293,6 +293,21 @@ The agent independently enforces these constraints, including after restart.
 A job with no eligible worker remains queued; it never falls back to weaker hardware.
 Matching uses the worker's reported inventory and does not control clocks, thermal state, shared memory bandwidth, or unrelated host activity.
 
+### Worker tags
+
+Hardware fields match exact strings, so they cannot group differing machines.
+Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-class"]` in each of their `workers.json` entries, then require it in `match.tags`:
+
+```json
+{"resources":{"cores":1,"gpus":2,"memory_mib":8192},"match":{"tags":["l40s-class"]}}
+```
+
+- A job runs only on workers carrying every tag it lists; jobs without tags still run on any worker.
+- Tags combine with the hardware fields above.
+- Submission rejects tags that no single configured worker carries together.
+- Tags are server policy: agents do not know their own tags, so only the server enforces them, and direct worker submissions take no tags.
+  Changing a worker's tags needs a server restart, not an agent restart.
+
 ## Task environment
 
 Queue/workflow tasks may declare environment, secrets, network access, capabilities, and controller-side services:

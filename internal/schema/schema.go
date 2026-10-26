@@ -147,6 +147,8 @@ func refineRequest(s *jsonschema.Schema) {
 	}
 	at(s, "match", "arch").Enum = enum(worker.Architectures())
 	at(s, "match", "min_gpu_memory_mib").Minimum = jsonschema.Ptr(0.0)
+	at(s, "match", "tags").UniqueItems = true
+	at(s, "match", "tags", "[]").Pattern = worker.NamePattern
 }
 
 func refineWorkflow(s *jsonschema.Schema) {

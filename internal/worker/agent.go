@@ -38,6 +38,16 @@ const MaxTimeoutSeconds = 365 * 24 * 60 * 60
 
 func ValidName(name string) bool { return identifier.MatchString(name) }
 
+func ValidNameSet(names []string) bool {
+	sorted := slices.Sorted(slices.Values(names))
+	for i, name := range sorted {
+		if !ValidName(name) || (i > 0 && sorted[i-1] == name) {
+			return false
+		}
+	}
+	return true
+}
+
 func ReservationID(agentID, attemptID string) string { return agentID + "/" + attemptID }
 
 type Config struct {
@@ -62,6 +72,7 @@ type Spec struct {
 func (s Spec) Normalize() Spec {
 	if s.Match != nil {
 		match := *s.Match
+		match.Tags = slices.Sorted(slices.Values(match.Tags))
 		s.Match = &match
 	}
 	s.Args = slices.Clone(s.Args)
@@ -91,11 +102,8 @@ func (s Spec) Validate(secrets map[string]string) error {
 	if err := s.Sandbox.Validate(secrets); err != nil {
 		return err
 	}
-	services := slices.Sorted(slices.Values(s.Services))
-	for i, name := range services {
-		if !ValidName(name) || (i > 0 && services[i-1] == name) {
-			return errors.New("invalid or duplicate service name")
-		}
+	if !ValidNameSet(s.Services) {
+		return errors.New("invalid or duplicate service name")
 	}
 	return nil
 }

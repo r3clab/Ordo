@@ -32,17 +32,18 @@ func validator(t *testing.T, name string) func(string) error {
 func TestRequestSchemaMatchesValidation(t *testing.T) {
 	validate := validator(t, "request")
 	base := `"id":"grep-1","resources":{"cores":2,"memory_mib":4096}`
+	tagged := []worker.Remote{{Tags: []string{"l40s"}}}
 	for _, valid := range []string{
 		`{` + base + `,"image":"localhost/klee:1"}`,
-		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"match":{"arch":"amd64"}}`,
+		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"match":{"arch":"amd64","tags":["l40s"]}}`,
 		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"},"secrets":{"TOKEN":"x"},"inputs":{"corpus":"/data"}}`,
 	} {
 		if err := validate(valid); err != nil {
 			t.Errorf("rejected %s: %v", valid, err)
 		}
 		var r server.Request
-		if err := json.Unmarshal([]byte(valid), &r); err != nil || r.Check(nil) != nil && !strings.Contains(r.Check(nil).Error(), "service") {
-			t.Errorf("the schema accepts what Go rejects: %s: %v %v", valid, err, r.Check(nil))
+		if err := json.Unmarshal([]byte(valid), &r); err != nil || r.Check(nil, tagged) != nil && !strings.Contains(r.Check(nil, tagged).Error(), "service") {
+			t.Errorf("the schema accepts what Go rejects: %s: %v %v", valid, err, r.Check(nil, tagged))
 		}
 	}
 	for _, invalid := range []string{
@@ -66,6 +67,8 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{"id":"bad id","image":"x","resources":{"cores":1,"memory_mib":1}}`,
 		`{"id":"a","image":"x","resources":{"cores":0,"memory_mib":1}}`,
 		`{` + base + `,"image":"x","match":{"arch":"riscv64"}}`,
+		`{` + base + `,"image":"x","match":{"tags":["l40s","l40s"]}}`,
+		`{` + base + `,"image":"x","match":{"tags":["bad tag"]}}`,
 		`{` + base + `,"image":{"nix":"/src#a\nb"}}`,
 		`{` + base + `,"image":{"nix":"/` + strings.Repeat("x", image.MaxInstallableBytes) + `"}}`,
 		`{` + base + `,"image":"x","env":{"MODE":"a\u0000b"}}`,
@@ -74,7 +77,7 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 			t.Errorf("accepted %s", invalid)
 		}
 		var r server.Request
-		if err := worker.DecodeJSON(strings.NewReader(invalid), &r); err == nil && r.Check(nil) == nil {
+		if err := worker.DecodeJSON(strings.NewReader(invalid), &r); err == nil && r.Check(nil, tagged) == nil {
 			t.Errorf("Go accepts what the schema rejects: %s", invalid)
 		}
 	}

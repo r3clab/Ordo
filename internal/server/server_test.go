@@ -56,7 +56,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := worker.Info{ID: "agent", Hardware: worker.Hardware{Cores: [][]int{{0, 64}}, MemoryMiB: 128}}
-	if err := s.reconcile(context.Background(), j, "worker", &info, client); err == nil {
+	if err := s.reconcile(context.Background(), j, workers[0], &info, client); err == nil {
 		t.Fatal("expected response failure")
 	}
 	if err := s.Close(); err != nil {
@@ -71,7 +71,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 	if len(j.Attempts) != 1 || j.State != "dispatching" {
 		t.Fatal("dispatch not durable")
 	}
-	if err := s.reconcile(context.Background(), j, "worker", &info, client); err != nil {
+	if err := s.reconcile(context.Background(), j, workers[0], &info, client); err != nil {
 		t.Fatal(err)
 	}
 	j = s.List()[0]
@@ -79,7 +79,7 @@ func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
 		t.Fatal("duplicated execution")
 	}
 	info.ID = "replacement"
-	if err := s.reconcile(context.Background(), j, "worker", &info, client); err != nil {
+	if err := s.reconcile(context.Background(), j, workers[0], &info, client); err != nil {
 		t.Fatal(err)
 	}
 	if s.List()[0].State != "blocked" || puts != 1 {
@@ -95,4 +95,45 @@ func fakeWorker(t *testing.T, handler http.HandlerFunc) *http.Client {
 	}}}
 	t.Cleanup(client.CloseIdleConnections)
 	return client
+}
+
+func TestTagsSelectWorkers(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Open(filepath.Join(root, "bad"), []worker.Remote{{Host: "a", Tags: []string{"l40s", "l40s"}}}, nil, image.Tools{}); err == nil {
+		t.Fatal("accepted a duplicate worker tag")
+	}
+	archive := filepath.Join(root, "image.tar")
+	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workers := []worker.Remote{{Host: "plain"}, {Host: "a", Tags: []string{"l40s"}}, {Host: "b", Tags: []string{"fast"}}}
+	s, err := Open(filepath.Join(root, "state"), workers, nil, image.Tools{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	req := Request{ID: "tagged", Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}, Match: &worker.Match{Tags: []string{"l40s"}}}
+	split := req
+	split.Match = &worker.Match{Tags: []string{"l40s", "fast"}}
+	if _, err := s.Submit(ctx, split); err == nil {
+		t.Fatal("accepted tags that no single worker has")
+	}
+	j, err := s.Submit(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contacted := false
+	client := fakeWorker(t, func(w http.ResponseWriter, r *http.Request) {
+		contacted = true
+		http.NotFound(w, r)
+	})
+	info := worker.Info{ID: "agent", Hardware: worker.Hardware{Cores: [][]int{{0}}, MemoryMiB: 128}}
+	for _, remote := range workers {
+		contacted = false
+		_ = s.reconcile(ctx, j, remote, &info, client)
+		if want := remote.Host == "a"; contacted != want {
+			t.Fatalf("worker %s contacted = %v, want %v", remote.Host, contacted, want)
+		}
+	}
 }

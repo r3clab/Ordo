@@ -2,6 +2,7 @@ package worker
 
 import (
 	"errors"
+	"slices"
 	"testing"
 )
 
@@ -36,5 +37,12 @@ func TestAgentEnforcesMatching(t *testing.T) {
 	spec.Match = &Match{Arch: "arm64"}
 	if _, err := a.Submit("mismatch", spec, nil); !errors.Is(err, ErrCapacity) {
 		t.Fatal("direct client bypassed matching", err)
+	}
+}
+
+func TestNormalizeSortsMatchTags(t *testing.T) {
+	m := Spec{Match: &Match{Tags: []string{"l40s", "fast"}}}.Normalize().Match
+	if !slices.Equal(m.Tags, []string{"fast", "l40s"}) {
+		t.Fatal("tag order changes job identity", m.Tags)
 	}
 }

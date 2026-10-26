@@ -24,6 +24,7 @@ let
     atLeast low n && n <= high;
   optional = check: value: value == null || check value;
   distinct = values: lib.unique values == values;
+  distinctNames = names: distinct names && builtins.all validName names;
   compact = lib.filterAttrs (_: value: value != null);
 
   # Discarding the output dependency keeps only the .drv in a written task file's
@@ -79,9 +80,10 @@ let
     assert require (optional (
       caps: distinct caps && builtins.all (c: builtins.elem c capabilities) caps
     ) capAdd) "${id}: capAdd allows only distinct ${toString capabilities}";
-    assert require (optional (
-      s: distinct s && builtins.all validName s
-    ) services) "${id}: services must be distinct names";
+    assert require (optional distinctNames services) "${id}: services must be distinct names";
+    assert require (optional distinctNames (
+      match.tags or null
+    )) "${id}: match.tags must be distinct names";
     assert require (optional (
       r: builtins.all (n: between 0 maxRetry n) (builtins.attrValues r)
     ) retry) "${id}: retry counts must be 0..${toString maxRetry}";
@@ -120,6 +122,7 @@ let
             gpu_model = match.gpuModel or null;
             gpu_driver = match.gpuDriver or null;
             min_gpu_memory_mib = match.minGPUMemoryMiB or null;
+            tags = match.tags or null;
           };
     };
 in

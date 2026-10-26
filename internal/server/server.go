@@ -123,6 +123,9 @@ func Open(root string, workers []worker.Remote, services map[string]string, tool
 		if seen[w.Host] || w.Host == "" {
 			return nil, errors.New("worker SSH aliases must be unique")
 		}
+		if !worker.ValidNameSet(w.Tags) {
+			return nil, fmt.Errorf("worker %s: tags must be distinct names", w.Host)
+		}
 		seen[w.Host] = true
 		for name, address := range services {
 			if _, err := w.ServiceForward(name, address); err != nil {
@@ -306,7 +309,7 @@ func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
 	seen := map[image.Source]bool{}
 	var wg sync.WaitGroup
 	for _, r := range requests {
-		if r.Image.IsNix() && !seen[r.Image] && r.Check(s.services) == nil {
+		if r.Image.IsNix() && !seen[r.Image] && r.Check(s.services, s.workers) == nil {
 			seen[r.Image] = true
 			wg.Go(func() { _, _ = st.image(ctx, r.Image) })
 		}
@@ -328,7 +331,7 @@ func (st *staging) image(ctx context.Context, src image.Source) (image.Resolved,
 	return staged.Resolved, staged.err
 }
 
-func (r Request) Check(services map[string]string) error {
+func (r Request) Check(services map[string]string, workers []worker.Remote) error {
 	if err := r.Image.Validate(); err != nil {
 		return err
 	}
@@ -351,7 +354,14 @@ func (r Request) Check(services map[string]string) error {
 			return fmt.Errorf("service %q is unknown; configure it with ordo server --service", name)
 		}
 	}
+	if r.Match != nil && !slices.ContainsFunc(workers, func(w worker.Remote) bool { return carriesTags(w, r.Match) }) {
+		return fmt.Errorf("no configured worker has all match tags %q; add them to a worker's \"tags\" in the ordo server --workers file", r.Match.Tags)
+	}
 	return nil
+}
+
+func carriesTags(w worker.Remote, m *worker.Match) bool {
+	return m == nil || !slices.ContainsFunc(m.Tags, func(tag string) bool { return !slices.Contains(w.Tags, tag) })
 }
 
 func (r Request) nix() bool { return r.Image.IsNix() }
@@ -361,7 +371,7 @@ func (r Request) spec() worker.Spec {
 }
 
 func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, error) {
-	if err := r.Check(s.services); err != nil {
+	if err := r.Check(s.services, s.workers); err != nil {
 		return Job{}, err
 	}
 	if r.ID == "" {
@@ -506,7 +516,7 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 		err := worker.Call(ctx, tunnel.Client, http.MethodGet, "/v1/info", nil, &info)
 		if err == nil {
 			s.workerStatus(remote.Host, &info, nil)
-			err = s.reconcileAll(ctx, remote.Host, info, tunnel.Client)
+			err = s.reconcileAll(ctx, remote, info, tunnel.Client)
 		}
 		if err != nil {
 			s.workerStatus(remote.Host, nil, err)
@@ -539,7 +549,7 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func (s *Server) reconcileAll(ctx context.Context, host string, info worker.Info, client *http.Client) error {
+func (s *Server) reconcileAll(ctx context.Context, remote worker.Remote, info worker.Info, client *http.Client) error {
 	for _, id := range s.unfinished() {
 		s.mu.Lock()
 		j := s.jobs[id].clone()
@@ -551,7 +561,7 @@ func (s *Server) reconcileAll(ctx context.Context, host string, info worker.Info
 		if !available {
 			continue
 		}
-		err := s.reconcile(ctx, j, host, &info, client)
+		err := s.reconcile(ctx, j, remote, &info, client)
 		s.mu.Lock()
 		delete(s.busy, id)
 		s.mu.Unlock()
@@ -563,7 +573,7 @@ func (s *Server) reconcileAll(ctx context.Context, host string, info worker.Info
 }
 
 // reconcile records each new reservation in info.Held so later queued jobs in the same pass see the reduced capacity.
-func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker.Info, client *http.Client) error {
+func (s *Server) reconcile(ctx context.Context, j Job, remote worker.Remote, info *worker.Info, client *http.Client) error {
 	if j.State == Queued {
 		if j.stopKind() != "" {
 			j.State = Cancelled
@@ -573,7 +583,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 		if err != nil || !ready {
 			return err
 		}
-		if info.Error != "" || !worker.FitsSpec(info.Hardware, j.Spec, info.Held) {
+		if info.Error != "" || !carriesTags(remote, j.Spec.Match) || !worker.FitsSpec(info.Hardware, j.Spec, info.Held) {
 			return nil
 		}
 		if err := s.importOutputs(&j); err != nil {
@@ -587,14 +597,14 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 				return err
 			}
 		}
-		j.Attempts = append(j.Attempts, Attempt{ID: strings.ToLower(rand.Text()), Worker: host, AgentID: info.ID})
+		j.Attempts = append(j.Attempts, Attempt{ID: strings.ToLower(rand.Text()), Worker: remote.Host, AgentID: info.ID})
 		j.State = Dispatching
 		if err := s.save(j); err != nil {
 			return err
 		}
 	}
 	at := &j.Attempts[len(j.Attempts)-1]
-	if at.Worker != host {
+	if at.Worker != remote.Host {
 		return nil
 	}
 	if at.AgentID != info.ID {

@@ -35,7 +35,7 @@ export interface Spec {
   resources: Resources;
   inputs?: Record<string, string>;
   timeout_seconds?: number;
-  match?: Record<string, string | number>;
+  match?: { tags?: string[] };
 }
 
 export interface TaskRecord {
@@ -89,6 +89,7 @@ export interface WorkerStatus {
   last_seen: string;
   error?: string;
   info?: { id: string; hardware: Hardware; held: Allocation[] | null; error?: string };
+  tags?: string[];
 }
 
 export class ApiError extends Error {

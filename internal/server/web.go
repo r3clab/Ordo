@@ -37,6 +37,7 @@ type WorkerStatus struct {
 	LastSeen  time.Time    `json:"last_seen"`
 	Error     string       `json:"error,omitempty"`
 	Info      *worker.Info `json:"info,omitempty"`
+	Tags      []string     `json:"tags,omitempty"`
 }
 
 func (s *Server) workerStatus(host string, info *worker.Info, err error) {
@@ -61,6 +62,7 @@ func (s *Server) Workers() []WorkerStatus {
 	for _, cfg := range s.workers {
 		status := s.nodes[cfg.Host]
 		status.Host = cfg.Host
+		status.Tags = cfg.Tags
 		result = append(result, status)
 	}
 	return result

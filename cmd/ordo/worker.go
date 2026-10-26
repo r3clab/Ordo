@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 
 	"github.com/r3clab/Ordo/internal/content"
@@ -125,7 +126,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		}
 		result = map[string]string{"output": outputDir}
 	case "submit":
-		if match != (worker.Match{}) {
+		if !reflect.ValueOf(match).IsZero() {
 			spec.Match = &match
 		}
 		spec.Inputs = map[string]string{}

@@ -197,6 +197,17 @@
         },
         "gpu_driver": {
           "type": "string"
+        },
+        "tags": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+          },
+          "uniqueItems": true
         }
       },
       "additionalProperties": false

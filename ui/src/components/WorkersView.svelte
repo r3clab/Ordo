@@ -32,6 +32,14 @@
         <StateBadge state={w.connected ? "connected" : "offline"} />
       </header>
 
+      {#if w.tags?.length}
+        <ul class="flex flex-wrap gap-1.5" aria-label="Tags">
+          {#each w.tags as tag (tag)}
+            <li class="rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">{tag}</li>
+          {/each}
+        </ul>
+      {/if}
+
       {#if w.error || w.info?.error}
         <p class="alert font-mono text-xs">{w.error || w.info?.error}</p>
       {/if}

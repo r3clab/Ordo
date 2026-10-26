@@ -10,11 +10,12 @@ var architectures = []string{"amd64", "arm64"}
 func Architectures() []string { return slices.Clone(architectures) }
 
 type Match struct {
-	Arch            string `json:"arch,omitempty"`
-	CPUModel        string `json:"cpu_model,omitempty"`
-	GPUModel        string `json:"gpu_model,omitempty"`
-	MinGPUMemoryMiB int64  `json:"min_gpu_memory_mib,omitempty"`
-	GPUDriver       string `json:"gpu_driver,omitempty"`
+	Arch            string   `json:"arch,omitempty"`
+	CPUModel        string   `json:"cpu_model,omitempty"`
+	GPUModel        string   `json:"gpu_model,omitempty"`
+	MinGPUMemoryMiB int64    `json:"min_gpu_memory_mib,omitempty"`
+	GPUDriver       string   `json:"gpu_driver,omitempty"`
+	Tags            []string `json:"tags,omitempty"`
 }
 
 func (m Match) Validate(resources Resources) error {
@@ -27,8 +28,12 @@ func (m Match) Validate(resources Resources) error {
 	if resources.GPUs == 0 && (m.GPUModel != "" || m.MinGPUMemoryMiB > 0 || m.GPUDriver != "") {
 		return errors.New("GPU matching requires a positive GPU request")
 	}
+	if !ValidNameSet(m.Tags) {
+		return errors.New("match.tags must be distinct names")
+	}
 	return nil
 }
+
 func matchedHardware(h Hardware, m *Match) (Hardware, bool) {
 	if m == nil {
 		return h, true

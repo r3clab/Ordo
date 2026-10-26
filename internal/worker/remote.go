@@ -44,6 +44,7 @@ type Remote struct {
 	MemoryMiB int64    `json:"memory_mib"`
 	GPUs      []string `json:"gpus,omitempty"`
 	Binary    string   `json:"binary,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
 }
 
 type Tunnel struct {

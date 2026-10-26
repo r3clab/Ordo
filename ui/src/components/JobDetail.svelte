@@ -20,6 +20,7 @@
       ["Timeout", job.spec.timeout_seconds ? `${job.spec.timeout_seconds}s` : "None"],
       ["Retries", `${job.retry?.task ?? 0} task · ${job.retry?.infrastructure ?? 1} infrastructure`],
       ["Created", new Date(job.created_at).toLocaleString()],
+      ["Worker tags", job.spec.match?.tags?.join(", ") ?? ""],
       ["Arguments", job.spec.args?.length ? job.spec.args.join(" ") : ""],
       ["Parameters", Object.entries(job.parameters ?? {}).map(([k, v]) => `${k}=${v}`).join(", ")],
       ["Inputs", Object.keys({ ...job.spec.inputs, ...job.from }).join(", ")],
