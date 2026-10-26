@@ -16,7 +16,7 @@ Keep each acceptance item in its own buildable commit where possible; mark it co
 - [x] JSON workflow validation, dependency readiness, parameter expansion, bounded infrastructure/task retries, timeout, cancellation (M5).
 - [x] User-selected hardware matching; rootless GPU isolation validated on vegeta and goku, never silently weakened (M6b).
 - [x] Minimal authenticated web UI for submission, status, logs, and cancellation (M7).
-- [ ] Formatting, lint, race tests, Nix package checks, and multi-host smoke tests.
+- [x] Formatting, lint, race tests, Nix package checks, and multi-host smoke tests (M8).
 
 ## Test boundary
 
