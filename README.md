@@ -9,7 +9,8 @@ Immutable image/input transfer and output collection are implemented.
 The durable server queue reconnects and reconciles original attempts after controller failure.
 JSON DAGs, parameter sweeps, bounded retries, timeouts, and cancellation are implemented.
 Exclusive NVIDIA GPU allocation and restart recovery are implemented.
-Hardware-matching policy and the web UI are still planned.
+Hardware-matching policy is enforced by both scheduler and agent.
+The web UI is still planned.
 
 ## Direction
 
@@ -229,6 +230,22 @@ An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, 
   The nix2container GPU fixture uses this directory to load `libcuda.so.1`.
 - `tests/gpu-smoke.sh` verifies exactly one visible GPU UUID, a tiny CUDA allocation/set/copy, overlap rejection, and agent-crash recovery.
   Run it only against a GPU confirmed free of existing processes.
+
+## Hardware matching
+
+Queue/workflow tasks accept an optional `match` object:
+
+```json
+{"match":{"arch":"amd64","cpu_model":"AMD EPYC 9554 64-Core Processor","gpu_model":"NVIDIA L40S","min_gpu_memory_mib":40000,"gpu_driver":"580.178.04"}}
+```
+
+Omitted fields are relaxed.
+Model/driver strings match exactly; architecture is `amd64` or `arm64`.
+GPU constraints require a positive GPU count and filter the devices actually allocated, not merely the host inventory.
+Direct worker submissions support equivalent `--arch`, `--cpu-model`, `--gpu-model`, `--min-gpu-memory-mib`, and `--gpu-driver` flags.
+The agent independently enforces these constraints, including after restart.
+A job with no eligible worker remains queued; it never falls back to weaker hardware.
+Matching uses the worker's reported inventory and does not control clocks, thermal state, shared memory bandwidth, or unrelated host activity.
 
 ## Workflows
 

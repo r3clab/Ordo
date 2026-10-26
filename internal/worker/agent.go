@@ -46,6 +46,7 @@ type Spec struct {
 	Resources      Resources         `json:"resources"`
 	Inputs         map[string]string `json:"inputs,omitempty"`
 	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
+	Match          *Match            `json:"match,omitempty"`
 }
 
 type Attempt struct {
@@ -198,16 +199,20 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 			return fail(fmt.Errorf("invalid saved attempt state %q", run.State))
 		}
 		if !run.Terminal() {
+			selected, ok := matchedHardware(h, run.Spec.Match)
+			if !ok {
+				return fail(errors.New("worker no longer matches a reserved attempt"))
+			}
 			if len(run.Allocation.GPUs) != run.Spec.Resources.GPUs {
 				return fail(errors.New("saved GPU reservation count mismatch"))
 			}
 			for _, id := range run.Allocation.GPUs {
-				current := slices.IndexFunc(h.GPUs, func(g GPU) bool { return g.UUID == id })
+				current := slices.IndexFunc(selected.GPUs, func(g GPU) bool { return g.UUID == id })
 				previous := slices.IndexFunc(run.Hardware.GPUs, func(g GPU) bool { return g.UUID == id })
 				if current < 0 || previous < 0 || gpuUsed[id] {
 					return fail(errors.New("saved GPU reservations conflict or a device is missing"))
 				}
-				now, old := h.GPUs[current], run.Hardware.GPUs[previous]
+				now, old := selected.GPUs[current], run.Hardware.GPUs[previous]
 				if now.Driver != old.Driver || now.Model != old.Model || now.MemoryMiB != old.MemoryMiB {
 					return fail(errors.New("reserved GPU hardware or driver changed"))
 				}
@@ -282,6 +287,13 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	if a.cancelled[id] {
 		return Attempt{}, fmt.Errorf("%w: attempt was cancelled before submission", ErrConflict)
 	}
+	if spec.Match != nil {
+		copy := *spec.Match
+		if err := copy.Validate(spec.Resources); err != nil {
+			return Attempt{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
+		}
+		spec.Match = &copy
+	}
 	spec.Args = slices.Clone(spec.Args)
 	spec.Inputs = maps.Clone(spec.Inputs)
 	for name, digest := range spec.Inputs {
@@ -323,7 +335,11 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 		}
 		held = append(held, Allocation{GPUs: busy})
 	}
-	allocation, err := allocate(a.info.Hardware, spec.Resources, held)
+	filtered, ok := matchedHardware(a.info.Hardware, spec.Match)
+	if !ok {
+		return Attempt{}, ErrCapacity
+	}
+	allocation, err := allocate(filtered, spec.Resources, held)
 	if err != nil {
 		return Attempt{}, err
 	}

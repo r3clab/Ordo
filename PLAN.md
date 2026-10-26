@@ -14,7 +14,7 @@ Keep each acceptance item in its own buildable commit where possible; mark it co
 - [x] Immutable image transfer, content-addressed input caching, read-only inputs, and output collection (M3).
 - [x] Durable server queue and reconciliation after server/tunnel failure; no retries merely because a worker disconnects (M4).
 - [x] JSON workflow validation, dependency readiness, parameter expansion, bounded infrastructure/task retries, timeout, cancellation (M5).
-- [ ] User-selected hardware matching; rootless GPU isolation validated or rejected, never silently weakened.
+- [x] User-selected hardware matching; rootless GPU isolation validated on vegeta and goku, never silently weakened (M6b).
 - [ ] Minimal authenticated web UI for submission, status, logs, and cancellation.
 - [ ] Formatting, lint, race tests, Nix package checks, and multi-host smoke tests.
 

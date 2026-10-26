@@ -32,6 +32,7 @@ type Request struct {
 	Resources      worker.Resources  `json:"resources"`
 	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
 	Retry          RetryPolicy       `json:"retry,omitempty"`
+	Match          *worker.Match     `json:"match,omitempty"`
 }
 type Attempt struct {
 	ID        string          `json:"id"`
@@ -149,6 +150,11 @@ func (s *Server) save(j Job) error {
 	return nil
 }
 func (s *Server) prepare(ctx context.Context, r Request) (Job, error) {
+	if r.Match != nil {
+		if err := r.Match.Validate(r.Resources); err != nil {
+			return Job{}, err
+		}
+	}
 	if err := r.Retry.validate(); err != nil {
 		return Job{}, err
 	}
@@ -186,7 +192,7 @@ func (s *Server) prepare(ctx context.Context, r Request) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	spec := worker.Spec{Image: image, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds}
+	spec := worker.Spec{Image: image, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}
 	for name, source := range r.Inputs {
 		if !namePattern.MatchString(name) {
 			return Job{}, errors.New("invalid input name")
@@ -355,7 +361,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 		if err != nil || !ready {
 			return err
 		}
-		if info.Error != "" || !worker.Fits(info.Hardware, j.Spec.Resources, info.Held) {
+		if info.Error != "" || !worker.FitsSpec(info.Hardware, j.Spec, info.Held) {
 			return nil
 		}
 		if err := worker.EnsureImage(ctx, client, filepath.Join(s.Root, "blobs", j.Archive), j.Spec.Image); err != nil {

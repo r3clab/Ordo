@@ -21,7 +21,14 @@ base=(--host "$host" --state "$root" --cpus 62,63,126,127 --memory-mib 512 --gpu
 ssh "$host" "if ! podman image exists '$ORDO_TEST_IMAGE'; then touch '$root/image-introduced'; fi"
 "$ORDO_TEST_BINARY" worker start "${base[@]}" --binary "$ORDO_TEST_BINARY" > "$work/start.json"
 "$ORDO_TEST_BINARY" worker put-image "${base[@]}" --archive "$ORDO_TEST_ARCHIVE" --image "$ORDO_TEST_IMAGE" > "$work/image.json"
-"$ORDO_TEST_BINARY" worker submit "${base[@]}" --id gpu --image "$ORDO_TEST_IMAGE" --cores 1 --task-memory-mib 256 --task-gpus 1 --timeout-seconds 30 -- -c 'timeout --kill-after=2 10 ordo-gpu-probe || exit $?; sleep 12' > "$work/submitted.json"
+cpu_model=$(jq -r .hardware.cpu_model "$work/start.json")
+gpu_model=$(jq -r '.hardware.gpus[0].model' "$work/start.json")
+gpu_driver=$(jq -r '.hardware.gpus[0].driver' "$work/start.json")
+status=0
+"$ORDO_TEST_BINARY" worker submit "${base[@]}" --id mismatch --image "$ORDO_TEST_IMAGE" --cores 1 --task-memory-mib 128 --cpu-model not-this-hardware > "$work/mismatch.stdout" 2> "$work/mismatch.stderr" || status=$?
+test "$status" = 2
+grep -F 'insufficient unreserved resources' "$work/mismatch.stderr"
+"$ORDO_TEST_BINARY" worker submit "${base[@]}" --id gpu --image "$ORDO_TEST_IMAGE" --cores 1 --task-memory-mib 256 --task-gpus 1 --arch amd64 --cpu-model "$cpu_model" --gpu-model "$gpu_model" --gpu-driver "$gpu_driver" --min-gpu-memory-mib 40000 --timeout-seconds 30 -- -c 'timeout --kill-after=2 10 ordo-gpu-probe || exit $?; sleep 12' > "$work/submitted.json"
 status=0
 "$ORDO_TEST_BINARY" worker submit "${base[@]}" --id overlap --image "$ORDO_TEST_IMAGE" --cores 1 --task-memory-mib 128 --task-gpus 1 > "$work/overlap.stdout" 2> "$work/overlap.stderr" || status=$?
 test "$status" = 2

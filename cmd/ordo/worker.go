@@ -29,6 +29,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	var id, archive, outputDir string
 	inputs := map[string]string{}
 	var spec worker.Spec
+	var match worker.Match
 	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&remote.Host, "host", "", "SSH alias")
@@ -36,6 +37,11 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	flags.StringVar(&remote.CPUs, "cpus", "", "logical CPU pool including complete SMT sibling sets")
 	flags.Int64Var(&remote.MemoryMiB, "memory-mib", 0, "aggregate worker memory budget")
 	flags.Func("gpus", "allowed worker GPU UUID pool", func(value string) error { ids, err := worker.GPUList(value); remote.GPUs = ids; return err })
+	flags.StringVar(&match.Arch, "arch", "", "required worker architecture (amd64/arm64)")
+	flags.StringVar(&match.CPUModel, "cpu-model", "", "exact CPU model requirement")
+	flags.StringVar(&match.GPUModel, "gpu-model", "", "exact GPU model requirement")
+	flags.StringVar(&match.GPUDriver, "gpu-driver", "", "exact GPU driver requirement")
+	flags.Int64Var(&match.MinGPUMemoryMiB, "min-gpu-memory-mib", 0, "minimum memory per GPU")
 	flags.IntVar(&spec.Resources.GPUs, "task-gpus", 0, "exclusive GPU devices")
 	flags.StringVar(&remote.Binary, "binary", "", "static Linux agent executable")
 	flags.StringVar(&id, "id", "", "stable attempt ID")
@@ -110,6 +116,9 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		}
 		result = map[string]string{"output": outputDir}
 	case "submit":
+		if match != (worker.Match{}) {
+			spec.Match = &match
+		}
 		spec.Inputs = map[string]string{}
 		for name, source := range inputs {
 			dir, err := os.MkdirTemp("", "ordo-input-")
