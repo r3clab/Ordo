@@ -153,6 +153,11 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 	return h, nil
 }
 
+func Fits(h Hardware, req Resources, held []Allocation) bool {
+	_, err := allocate(h, req, held)
+	return err == nil
+}
+
 func allocate(h Hardware, req Resources, held []Allocation) (Allocation, error) {
 	if req.Cores <= 0 || req.MemoryMiB <= 0 {
 		return Allocation{}, errors.New("cores and memory_mib must be positive")

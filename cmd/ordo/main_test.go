@@ -16,7 +16,7 @@ func TestRunHelp(t *testing.T) {
 			if err := run(context.Background(), args, &output); err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []string{"Usage: ordo", "scheduling is not implemented yet"} {
+			for _, want := range []string{"Usage: ordo", "server", "queue"} {
 				if !strings.Contains(output.String(), want) {
 					t.Errorf("output %q does not contain %q", output.String(), want)
 				}

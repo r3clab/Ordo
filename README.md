@@ -6,7 +6,8 @@ Every task runs in rootless Podman using a [nix2container](https://github.com/nl
 **Status:** Local CPU-only execution/recovery and persistent SSH worker agents are implemented.
 Agents provide durable, idempotent attempts, exclusive physical cores, and aggregate memory accounting.
 Immutable image/input transfer and output collection are implemented.
-The server scheduler, workflows, GPU allocation, and web UI are still planned.
+The durable server queue reconnects and reconciles original attempts after controller failure.
+Workflows, GPU allocation, and web UI are still planned.
 
 ## Direction
 
@@ -187,6 +188,27 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ordo-linux-amd64 ./cmd/ordo
 ```
 
 The opt-in [worker smoke test](tests/README.md) checks real crash/stop/reconnect behavior without enabling services permanently.
+
+## Durable queue
+
+Start `ordo server --state SERVER_DIR --workers workers.json` with 1–10 worker entries:
+
+```json
+[{"host":"WORKER","state_dir":"/home/worker/.local/state/ordo","cpus":"0,1,64,65","memory_mib":512,"binary":"/absolute/path/ordo-linux-amd64"}]
+```
+
+Submit `ordo queue submit --state SERVER_DIR --file job.json`:
+
+```json
+{"id":"evaluation-001","image":"sha256:IMAGE_ID","archive":"/absolute/path/image.tar","inputs":{"dataset":"/absolute/path/data"},"resources":{"cores":1,"memory_mib":256},"args":["-c","cp /inputs/dataset/value /outputs/value"]}
+```
+
+Without `archive`, the server resolves and exports `image` from its local Podman storage.
+`ordo queue list` and `ordo queue get --id ID` accept the same `--state` argument.
+The control socket is private.
+Server shutdown/disconnection never cancels attempts; dispatch IDs are committed before submission, and worker identity must match before reconciliation.
+A worker losing an acknowledged attempt or changing identity blocks that job rather than rerunning it.
+Results must be downloaded and validated before the server marks success.
 
 ## Development
 

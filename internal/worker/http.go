@@ -45,7 +45,9 @@ func (a *Agent) handler() http.Handler {
 				status = http.StatusBadRequest
 			case errors.Is(err, ErrConflict):
 				status = http.StatusConflict
-			case errors.Is(err, ErrCapacity), errors.Is(err, ErrUnavailable), errors.Is(err, context.Canceled):
+			case errors.Is(err, ErrCapacity):
+				status = http.StatusTooManyRequests
+			case errors.Is(err, ErrUnavailable), errors.Is(err, context.Canceled):
 				status = http.StatusServiceUnavailable
 			}
 			http.Error(w, err.Error(), status)

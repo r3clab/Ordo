@@ -38,6 +38,7 @@ type Tunnel struct {
 	dir      string
 	once     sync.Once
 	closeErr error
+	input    *os.File
 }
 
 func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
@@ -197,11 +198,21 @@ func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
 	t := &Tunnel{cancel: cancel, done: make(chan error, 1), dir: dir}
 	socket := filepath.Join(dir, "control.sock")
 	t.Client = Client(socket)
-	cmd := exec.CommandContext(child, "ssh", "-S", "none", "-T", "-N", "-oBatchMode=yes", "-oExitOnForwardFailure=yes", "-oStreamLocalBindUnlink=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", "-L", socket+":"+path.Join(r.StateDir, "agent.sock"), r.Host)
+	cmd := exec.CommandContext(child, "ssh", "-S", "none", "-T", "-oBatchMode=yes", "-oExitOnForwardFailure=yes", "-oStreamLocalBindUnlink=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", "-L", socket+":"+path.Join(r.StateDir, "agent.sock"), r.Host, "exec cat >/dev/null")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		cancel()
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	t.input = writer
+	cmd.Stdin = reader
+	defer func() { _ = reader.Close() }()
 	cmd.WaitDelay = 2 * time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
+		_ = writer.Close()
 		cancel()
 		_ = os.RemoveAll(dir)
 		return nil, err
@@ -234,6 +245,7 @@ func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
 		}
 		select {
 		case err := <-t.done:
+			_ = writer.Close()
 			cancel()
 			t.Client.CloseIdleConnections()
 			_ = os.RemoveAll(dir)
@@ -249,6 +261,8 @@ func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
 func (t *Tunnel) Close() error {
 	t.once.Do(func() {
 		t.Client.CloseIdleConnections()
+		// EOF ends the remote transport command even if the controller was killed.
+		_ = t.input.Close()
 		t.cancel()
 		waitErr := <-t.done
 		var exit *exec.ExitError
