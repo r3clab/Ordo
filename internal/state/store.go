@@ -93,14 +93,78 @@ func openDB(file string) (_ *sql.DB, err error) {
 
 func (s *Store) Close() error { return errors.Join(s.db.Close(), s.lock.Close()) }
 
-// Put commits an aggregate (including its reservations/attempt history) atomically.
 func (s *Store) Put(kind, id string, value any) error {
+	return s.Update(func(tx *Tx) error { return tx.Put(kind, id, value) })
+}
+
+type Tx struct {
+	tx      *sql.Tx
+	deleted bool
+}
+
+// Update leaves no copy of a deleted record on disk: secure_delete zeroes its freed pages, and
+// truncating the write-ahead log after commit discards the frames that still hold it.
+func (s *Store) Update(fn func(*Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	t := &Tx{tx: tx}
+	if err := fn(t); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if t.deleted {
+		_, err = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	}
+	return err
+}
+
+func (t *Tx) Put(kind, id string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(upsert, kind, id, data)
+	_, err = t.tx.Exec(upsert, kind, id, data)
 	return err
+}
+
+func (t *Tx) Delete(kind, id string) error {
+	t.deleted = true
+	_, err := t.tx.Exec("DELETE FROM records WHERE kind=? AND id=?", kind, id)
+	return err
+}
+
+func (s *Store) Get(kind, id string, value any) error {
+	var data []byte
+	if err := s.db.QueryRow("SELECT body FROM records WHERE kind=? AND id=?", kind, id).Scan(&data); err != nil {
+		return err
+	}
+	return json.Unmarshal(data, value)
+}
+
+func List[T any](s *Store, kind string) ([]T, error) {
+	rows, err := s.db.Query("SELECT body FROM records WHERE kind=? ORDER BY id", kind)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var result []T
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var value T
+		if err := json.Unmarshal(data, &value); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
 }
 
 // PutMany publishes a whole workflow atomically, never a partially visible graph.
@@ -124,14 +188,6 @@ func PutMany[T any](s *Store, kind string, values map[string]T) error {
 		}
 	}
 	return tx.Commit()
-}
-
-func (s *Store) Get(kind, id string, value any) error {
-	var data []byte
-	if err := s.db.QueryRow("SELECT body FROM records WHERE kind=? AND id=?", kind, id).Scan(&data); err != nil {
-		return err
-	}
-	return json.Unmarshal(data, value)
 }
 
 // Delete leaves no copy of the record on disk: secure_delete zeroes its freed pages, and
@@ -159,25 +215,4 @@ func (s *Store) IDs(kind string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
-}
-
-func List[T any](s *Store, kind string) ([]T, error) {
-	rows, err := s.db.Query("SELECT body FROM records WHERE kind=? ORDER BY id", kind)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var result []T
-	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
-			return nil, err
-		}
-		var value T
-		if err := json.Unmarshal(data, &value); err != nil {
-			return nil, err
-		}
-		result = append(result, value)
-	}
-	return result, rows.Err()
 }

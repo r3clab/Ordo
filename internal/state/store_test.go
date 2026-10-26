@@ -2,10 +2,10 @@ package state
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"syscall"
 	"testing"
 )
@@ -84,11 +84,15 @@ func TestDeleteLeavesNoCopyOnDisk(t *testing.T) {
 	if err := s.Put("secret", "gone", map[string]string{"TOKEN": "hunter2-deleted"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Delete("secret", "gone"); err != nil {
+	if err := s.Update(func(tx *Tx) error { return tx.Delete("secret", "gone") }); err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := s.IDs("secret"); err != nil || !slices.Equal(ids, []string{"kept"}) {
-		t.Fatalf("ids = %q, %v", ids, err)
+	var values map[string]string
+	if err := s.Get("secret", "gone", &values); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted record still readable: %v", err)
+	}
+	if err := s.Get("secret", "kept", &values); err != nil || values["TOKEN"] != "visible" {
+		t.Fatalf("kept record lost: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "state.sqlite*"))
 	if err != nil || len(files) == 0 {
