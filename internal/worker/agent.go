@@ -34,9 +34,10 @@ var imageIdentity = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 const ProtocolVersion = 1
 
 type Config struct {
-	StateDir  string `json:"state_dir"`
-	CPUs      string `json:"cpus"`
-	MemoryMiB int64  `json:"memory_mib"`
+	StateDir  string   `json:"state_dir"`
+	CPUs      string   `json:"cpus"`
+	MemoryMiB int64    `json:"memory_mib"`
+	GPUs      []string `json:"gpus,omitempty"`
 }
 
 type Spec struct {
@@ -120,6 +121,10 @@ func Open(ctx context.Context, cfg Config) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	h.GPUs, err = discoverGPUs(probe, cfg.GPUs, cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
 	a, err := open(ctx, cfg, h)
 	if err != nil {
 		return nil, err
@@ -177,6 +182,7 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 		return fail(err)
 	}
 	used := map[int]bool{}
+	gpuUsed := map[string]bool{}
 	var heldMemory int64
 	for _, data := range rows {
 		var run Attempt
@@ -192,6 +198,21 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 			return fail(fmt.Errorf("invalid saved attempt state %q", run.State))
 		}
 		if !run.Terminal() {
+			if len(run.Allocation.GPUs) != run.Spec.Resources.GPUs {
+				return fail(errors.New("saved GPU reservation count mismatch"))
+			}
+			for _, id := range run.Allocation.GPUs {
+				current := slices.IndexFunc(h.GPUs, func(g GPU) bool { return g.UUID == id })
+				previous := slices.IndexFunc(run.Hardware.GPUs, func(g GPU) bool { return g.UUID == id })
+				if current < 0 || previous < 0 || gpuUsed[id] {
+					return fail(errors.New("saved GPU reservations conflict or a device is missing"))
+				}
+				now, old := h.GPUs[current], run.Hardware.GPUs[previous]
+				if now.Driver != old.Driver || now.Model != old.Model || now.MemoryMiB != old.MemoryMiB {
+					return fail(errors.New("reserved GPU hardware or driver changed"))
+				}
+				gpuUsed[id] = true
+			}
 			if run.Allocation.MemoryMiB <= 0 || run.Allocation.MemoryMiB > h.MemoryMiB-heldMemory {
 				return fail(errors.New("saved reservations exceed configured memory"))
 			}
@@ -252,6 +273,9 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	if !identifier.MatchString(id) || !imageIdentity.MatchString(spec.Image) || spec.Resources.Cores <= 0 || spec.Resources.MemoryMiB <= 0 {
 		return Attempt{}, fmt.Errorf("%w: valid attempt ID, immutable sha256 image ID, positive cores/memory are required", ErrInvalidRequest)
 	}
+	if spec.Resources.GPUs < 0 {
+		return Attempt{}, fmt.Errorf("%w: GPU count cannot be negative", ErrInvalidRequest)
+	}
 	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > 31536000 {
 		return Attempt{}, fmt.Errorf("%w: timeout must be 0..31536000 seconds", ErrInvalidRequest)
 	}
@@ -286,6 +310,18 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 		if !old.Terminal() {
 			held = append(held, old.Allocation)
 		}
+	}
+	if spec.Resources.GPUs > len(a.info.Hardware.GPUs) {
+		return Attempt{}, ErrCapacity
+	}
+	if spec.Resources.GPUs > 0 {
+		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		busy, err := busyGPUs(ctx, a.info.Hardware.GPUs)
+		cancel()
+		if err != nil {
+			return Attempt{}, err
+		}
+		held = append(held, Allocation{GPUs: busy})
 	}
 	allocation, err := allocate(a.info.Hardware, spec.Resources, held)
 	if err != nil {
@@ -350,11 +386,11 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 		mounts[name] = filepath.Join(a.cfg.StateDir, "trees", digest)
 	}
 	matches := func(r task.Record) bool {
-		return r.Request.ReservationID == reservation && r.Request.Image == run.Spec.Image && r.Request.CPUs == CPUString(run.Allocation.CPUs) && r.Request.MemoryMiB == run.Allocation.MemoryMiB && slices.Equal(r.Request.Args, run.Spec.Args) && maps.Equal(r.Request.Inputs, mounts)
+		return r.Request.ReservationID == reservation && r.Request.Image == run.Spec.Image && r.Request.CPUs == CPUString(run.Allocation.CPUs) && r.Request.MemoryMiB == run.Allocation.MemoryMiB && slices.Equal(r.Request.Args, run.Spec.Args) && maps.Equal(r.Request.Inputs, mounts) && slices.Equal(r.Request.GPUs, run.Allocation.GPUs)
 	}
 	var err error
 	if fresh {
-		err = task.Run(a.ctx, task.Request{Image: run.Spec.Image, CPUs: CPUString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: reservation, Inputs: mounts, ExportOutputs: true})
+		err = task.Run(a.ctx, task.Request{Image: run.Spec.Image, CPUs: CPUString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: reservation, Inputs: mounts, ExportOutputs: true, GPUs: run.Allocation.GPUs, CDISpecDir: filepath.Join(a.cfg.StateDir, "cdi")})
 	} else {
 		var r task.Record
 		r, err = task.ReadResult(dir)

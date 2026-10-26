@@ -8,7 +8,8 @@ Agents provide durable, idempotent attempts, exclusive physical cores, and aggre
 Immutable image/input transfer and output collection are implemented.
 The durable server queue reconnects and reconciles original attempts after controller failure.
 JSON DAGs, parameter sweeps, bounded retries, timeouts, and cancellation are implemented.
-GPU allocation and web UI are still planned.
+Exclusive NVIDIA GPU allocation and restart recovery are implemented.
+Hardware-matching policy and the web UI are still planned.
 
 ## Direction
 
@@ -210,6 +211,24 @@ The control socket is private.
 Server shutdown/disconnection never cancels attempts; dispatch IDs are committed before submission, and worker identity must match before reconciliation.
 A worker losing an acknowledged attempt or changing identity blocks that job rather than rerunning it.
 Results must be downloaded and validated before the server marks success.
+
+## GPU workers
+
+Configure a worker's optional `gpus` array with full NVIDIA GPU UUIDs, or pass `--gpus UUID,UUID` to `worker start` and subsequent worker commands.
+Request `resources.gpus` in queue/workflow JSON or `--task-gpus N` with `worker submit`.
+An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, and unsupported device controls are rejected.
+
+- Agents discover UUID/model/memory/driver information and generate a private CDI specification under `STATE/cdi`, using `nvidia-ctk`.
+  No global CDI registration or host configuration change is needed.
+- GPU reservations are exclusive and durable.
+  Restart rejects missing/changed reserved hardware or drivers.
+  Admission checks compute/graphics processes, not merely utilization; unrelated processes starting afterward remain outside Ordo's guarantee.
+- Podman receives only allocated CDI devices, with legacy NVIDIA hook visibility disabled.
+  No privileged mode or device-isolation fallback is used.
+- GPU images must work with the injected driver libraries; NVIDIA CDI supplies `NVIDIA_CTK_LIBCUDA_DIR`.
+  The nix2container GPU fixture uses this directory to load `libcuda.so.1`.
+- `tests/gpu-smoke.sh` verifies exactly one visible GPU UUID, a tiny CUDA allocation/set/copy, overlap rejection, and agent-crash recovery.
+  Run it only against a GPU confirmed free of existing processes.
 
 ## Workflows
 

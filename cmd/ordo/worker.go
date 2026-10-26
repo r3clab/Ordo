@@ -35,6 +35,8 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 	flags.StringVar(&remote.StateDir, "state", "", "absolute private remote state directory")
 	flags.StringVar(&remote.CPUs, "cpus", "", "logical CPU pool including complete SMT sibling sets")
 	flags.Int64Var(&remote.MemoryMiB, "memory-mib", 0, "aggregate worker memory budget")
+	flags.Func("gpus", "allowed worker GPU UUID pool", func(value string) error { ids, err := worker.GPUList(value); remote.GPUs = ids; return err })
+	flags.IntVar(&spec.Resources.GPUs, "task-gpus", 0, "exclusive GPU devices")
 	flags.StringVar(&remote.Binary, "binary", "", "static Linux agent executable")
 	flags.StringVar(&id, "id", "", "stable attempt ID")
 	flags.StringVar(&archive, "archive", "", "OCI archive for put-image; otherwise export a local image")

@@ -16,6 +16,7 @@ func agentCommand(ctx context.Context, args []string, out io.Writer) error {
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&cfg.StateDir, "state", "", "private local state directory")
 	flags.StringVar(&cfg.CPUs, "cpus", "", "allowed logical CPUs, including every SMT sibling")
+	flags.Func("gpus", "allowed NVIDIA GPU UUIDs (comma-separated)", func(value string) error { ids, err := worker.GPUList(value); cfg.GPUs = ids; return err })
 	flags.Int64Var(&cfg.MemoryMiB, "memory-mib", 0, "aggregate task memory budget")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

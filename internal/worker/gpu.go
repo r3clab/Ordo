@@ -1,0 +1,174 @@
+package worker
+
+import (
+	"context"
+	"encoding/csv"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/r3clab/Ordo/internal/content"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+var gpuUUID = regexp.MustCompile(`^GPU-[a-fA-F0-9-]{36}$`)
+
+type GPU struct {
+	UUID      string `json:"uuid"`
+	Index     int    `json:"index"`
+	Model     string `json:"model"`
+	MemoryMiB int64  `json:"memory_mib"`
+	Driver    string `json:"driver"`
+}
+
+func GPUList(text string) ([]string, error) {
+	if text == "" {
+		return nil, nil
+	}
+	ids := strings.Split(text, ",")
+	slices.Sort(ids)
+	for i, id := range ids {
+		if !gpuUUID.MatchString(id) || (i > 0 && ids[i-1] == id) {
+			return nil, errors.New("GPU pool must contain unique full NVIDIA GPU UUIDs")
+		}
+	}
+	return ids, nil
+}
+func discoverGPUs(ctx context.Context, ids []string, root string) ([]GPU, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := GPUList(strings.Join(ids, ",")); err != nil {
+		return nil, err
+	}
+	data, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,memory.total,driver_version,mig.mode.current", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return nil, fmt.Errorf("GPU discovery: %w", err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(string(data))).ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	gpus := []GPU{}
+	for _, row := range rows {
+		if len(row) != 6 {
+			return nil, errors.New("unexpected NVIDIA inventory format")
+		}
+		for i := range row {
+			row[i] = strings.TrimSpace(row[i])
+		}
+		if !slices.Contains(ids, row[1]) {
+			continue
+		}
+		if row[5] != "Disabled" && row[5] != "[N/A]" {
+			return nil, errors.New("MIG allocations are unsupported")
+		}
+		index, err := strconv.Atoi(row[0])
+		if err != nil {
+			return nil, err
+		}
+		memory, err := strconv.ParseInt(row[3], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		gpus = append(gpus, GPU{UUID: row[1], Index: index, Model: row[2], MemoryMiB: memory, Driver: row[4]})
+	}
+	if len(gpus) != len(ids) {
+		return nil, errors.New("configured GPU UUID is missing")
+	}
+	dir := filepath.Join(root, "cdi")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	args := []string{"cdi", "generate", "--format=json", "--device-name-strategy=uuid", "--no-all-device"}
+	for _, id := range ids {
+		args = append(args, "--device-id", id)
+	}
+	data, err = exec.CommandContext(ctx, "nvidia-ctk", args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("private NVIDIA CDI generation: %w", err)
+	}
+	var spec struct {
+		Kind    string `json:"kind"`
+		Devices []struct {
+			Name string `json:"name"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return nil, err
+	}
+	if spec.Kind != "nvidia.com/gpu" || len(spec.Devices) != len(ids) {
+		return nil, errors.New("CDI specification contains unexpected devices")
+	}
+	seen := map[string]bool{}
+	for _, device := range spec.Devices {
+		if !slices.Contains(ids, device.Name) || seen[device.Name] {
+			return nil, errors.New("CDI device identity mismatch")
+		}
+		seen[device.Name] = true
+	}
+	f, err := os.CreateTemp(dir, ".spec-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
+	if _, err := f.Write(data); err != nil {
+		return nil, err
+	}
+	if err := f.Sync(); err != nil {
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(f.Name(), filepath.Join(dir, "nvidia.json")); err != nil {
+		return nil, err
+	}
+	if err := content.SyncDir(dir); err != nil {
+		return nil, err
+	}
+	return gpus, nil
+}
+func busyGPUs(ctx context.Context, gpus []GPU) ([]string, error) {
+	data, err := exec.CommandContext(ctx, "nvidia-smi", "pmon", "-c", "1").Output()
+	if err != nil {
+		return nil, fmt.Errorf("check GPU processes: %w", err)
+	}
+	seen := map[int]bool{}
+	busy := map[int]bool{}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		if len(fields) < 3 {
+			return nil, errors.New("unrecognized GPU process inventory")
+		}
+		index, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return nil, err
+		}
+		seen[index] = true
+		if fields[1] != "-" {
+			if _, err := strconv.Atoi(fields[1]); err != nil {
+				return nil, errors.New("GPU process state is unavailable")
+			}
+			busy[index] = true
+		}
+	}
+	var result []string
+	for _, gpu := range gpus {
+		if !seen[gpu.Index] {
+			return nil, errors.New("GPU process inventory incomplete")
+		}
+		if busy[gpu.Index] {
+			result = append(result, gpu.UUID)
+		}
+	}
+	return result, nil
+}

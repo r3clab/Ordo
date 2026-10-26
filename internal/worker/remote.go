@@ -17,17 +17,19 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
 type Remote struct {
-	Host      string `json:"host"`
-	StateDir  string `json:"state_dir"`
-	CPUs      string `json:"cpus"`
-	MemoryMiB int64  `json:"memory_mib"`
-	Binary    string `json:"binary,omitempty"`
+	Host      string   `json:"host"`
+	StateDir  string   `json:"state_dir"`
+	CPUs      string   `json:"cpus"`
+	MemoryMiB int64    `json:"memory_mib"`
+	GPUs      []string `json:"gpus,omitempty"`
+	Binary    string   `json:"binary,omitempty"`
 }
 
 type Tunnel struct {
@@ -65,6 +67,9 @@ func Unit(stateDir string) string {
 }
 
 func (r Remote) validate() error {
+	if _, err := GPUList(strings.Join(r.GPUs, ",")); err != nil {
+		return err
+	}
 	if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]*$`).MatchString(r.Host) {
 		return errors.New("invalid SSH host alias")
 	}
@@ -172,7 +177,7 @@ func Bootstrap(ctx context.Context, r Remote) error {
 		return errors.New("unexpected SSH bootstrap output")
 	}
 	unit := Unit(r.StateDir)
-	start := "set -eu; test \"$(loginctl show-user \"$(id -u)\" -p Linger --value)\" = yes; if ! systemctl --user is-active --quiet " + Quote(unit) + "; then systemd-run --user --collect --unit=" + Quote(unit) + " --property=Type=exec --property=Restart=on-failure --property=RestartSec=1 --property=Delegate=yes --property=TimeoutStopSec=20 --setenv=PATH=\"$PATH\" " + Quote(target) + " agent --state " + root + " --cpus " + Quote(r.CPUs) + fmt.Sprintf(" --memory-mib %d", r.MemoryMiB) + "; fi"
+	start := "set -eu; test \"$(loginctl show-user \"$(id -u)\" -p Linger --value)\" = yes; if ! systemctl --user is-active --quiet " + Quote(unit) + "; then systemd-run --user --collect --unit=" + Quote(unit) + " --property=Type=exec --property=Restart=on-failure --property=RestartSec=1 --property=Delegate=yes --property=TimeoutStopSec=20 --setenv=PATH=\"$PATH\" " + Quote(target) + " agent --state " + root + " --cpus " + Quote(r.CPUs) + fmt.Sprintf(" --memory-mib %d", r.MemoryMiB) + " --gpus " + Quote(strings.Join(r.GPUs, ",")) + "; fi"
 	if _, err := SSH(ctx, r.Host, start, nil); err != nil {
 		return err
 	}
@@ -230,6 +235,16 @@ func Connect(ctx context.Context, r Remote) (*Tunnel, error) {
 			if t.Info.Protocol != ProtocolVersion || t.Info.ID == "" {
 				_ = t.Close()
 				return nil, errors.New("incompatible agent protocol or identity")
+			}
+			requestedGPUs, _ := GPUList(strings.Join(r.GPUs, ","))
+			var actualGPUs []string
+			for _, gpu := range t.Info.Hardware.GPUs {
+				actualGPUs = append(actualGPUs, gpu.UUID)
+			}
+			slices.Sort(actualGPUs)
+			if !slices.Equal(requestedGPUs, actualGPUs) {
+				_ = t.Close()
+				return nil, errors.New("live agent GPU pool differs from configuration")
 			}
 			configured, _ := CPUList(r.CPUs)
 			var actual []int

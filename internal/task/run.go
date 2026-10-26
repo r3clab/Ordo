@@ -30,6 +30,8 @@ type Request struct {
 	ReservationID string            `json:"reservation_id,omitempty"`
 	Inputs        map[string]string `json:"inputs,omitempty"`
 	ExportOutputs bool              `json:"export_outputs,omitempty"`
+	GPUs          []string          `json:"gpus,omitempty"`
+	CDISpecDir    string            `json:"cdi_spec_dir,omitempty"`
 }
 
 type ExitError struct {
@@ -116,6 +118,18 @@ func outcome(r *record, err error) error {
 }
 
 func (r Request) validate() error {
+	if len(r.GPUs) > 0 {
+		if !filepath.IsAbs(r.CDISpecDir) {
+			return errors.New("GPU requests require a private CDI specification directory")
+		}
+		seen := map[string]bool{}
+		for _, id := range r.GPUs {
+			if len(id) != 40 || !strings.HasPrefix(id, "GPU-") || strings.ContainsAny(id, "/,:\n\x00") || seen[id] {
+				return errors.New("invalid GPU identity")
+			}
+			seen[id] = true
+		}
+	}
 	for name, dir := range r.Inputs {
 		if name == "" || strings.ContainsAny(name, "/\\:\x00\n") || name == "." || name == ".." || !filepath.IsAbs(dir) || strings.ContainsAny(dir, ":\x00\n") {
 			return errors.New("invalid input mount")
@@ -202,6 +216,13 @@ func execute(ctx context.Context, r *record, podman command) error {
 			return err
 		}
 		args = append(args, "--volume", outputs+":/outputs:rw")
+	}
+	if len(r.Request.GPUs) > 0 {
+		args = append([]string{"--cdi-spec-dir", r.Request.CDISpecDir}, args...)
+		for _, id := range r.Request.GPUs {
+			args = append(args, "--device", "nvidia.com/gpu="+id)
+		}
+		args = append(args, "--env", "NVIDIA_VISIBLE_DEVICES=void")
 	}
 	args = append(args, "--", r.ImageID)
 	args = append(args, r.Request.Args...)

@@ -10,7 +10,7 @@ Keep each acceptance item in its own buildable commit where possible; mark it co
 - [x] Live local execution and interrupted-run recovery on vegeta and goku (M1).
 - [x] Persistent agents behind private SSH-forwarded Unix sockets; durable, idempotent attempt submission (M2).
 - [x] Exclusive physical-core allocations and aggregate memory accounting, restored before new work after restart (M2).
-- [ ] Exclusive GPU allocations and recovery.
+- [x] Exclusive GPU allocations and recovery (M6a).
 - [x] Immutable image transfer, content-addressed input caching, read-only inputs, and output collection (M3).
 - [x] Durable server queue and reconciliation after server/tunnel failure; no retries merely because a worker disconnects (M4).
 - [x] JSON workflow validation, dependency readiness, parameter expansion, bounded infrastructure/task retries, timeout, cancellation (M5).

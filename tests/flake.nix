@@ -14,8 +14,23 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          gpuProbe = pkgs.runCommand "ordo-gpu-probe" { nativeBuildInputs = [ pkgs.stdenv.cc ]; } ''
+            mkdir -p $out/bin
+            $CC -Wall -Wextra ${./gpu-probe.c} -ldl -o $out/bin/ordo-gpu-probe
+          '';
         in
         {
+          gpu-image = nix2container.packages.${system}.nix2container.buildImage {
+            name = "localhost/ordo-gpu-smoke";
+            config = {
+              Entrypoint = [ "${pkgs.bash}/bin/bash" ];
+              Cmd = [
+                "-c"
+                "ordo-gpu-probe"
+              ];
+              Env = [ "PATH=${gpuProbe}/bin:${pkgs.coreutils}/bin" ];
+            };
+          };
           image = nix2container.packages.${system}.nix2container.buildImage {
             name = "localhost/ordo-smoke";
             config = {

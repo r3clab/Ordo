@@ -19,16 +19,19 @@ type Hardware struct {
 	CPUModel  string  `json:"cpu_model"`
 	Cores     [][]int `json:"cores"`
 	MemoryMiB int64   `json:"memory_mib"`
+	GPUs      []GPU   `json:"gpus,omitempty"`
 }
 
 type Resources struct {
 	Cores     int   `json:"cores"`
 	MemoryMiB int64 `json:"memory_mib"`
+	GPUs      int   `json:"gpus,omitempty"`
 }
 
 type Allocation struct {
-	CPUs      []int `json:"cpus"`
-	MemoryMiB int64 `json:"memory_mib"`
+	CPUs      []int    `json:"cpus"`
+	MemoryMiB int64    `json:"memory_mib"`
+	GPUs      []string `json:"gpus,omitempty"`
 }
 
 func CPUList(text string) ([]int, error) {
@@ -163,12 +166,19 @@ func allocate(h Hardware, req Resources, held []Allocation) (Allocation, error) 
 		return Allocation{}, errors.New("cores and memory_mib must be positive")
 	}
 	used := map[int]bool{}
+	gpuUsed := map[string]bool{}
+	if req.GPUs < 0 {
+		return Allocation{}, errors.New("GPU count cannot be negative")
+	}
 	remaining := h.MemoryMiB
 	for _, a := range held {
 		if a.MemoryMiB < 0 || a.MemoryMiB > remaining {
 			return Allocation{}, errors.New("saved reservations exceed the memory budget")
 		}
 		remaining -= a.MemoryMiB
+		for _, id := range a.GPUs {
+			gpuUsed[id] = true
+		}
 		for _, cpu := range a.CPUs {
 			used[cpu] = true
 		}
@@ -185,8 +195,22 @@ func allocate(h Hardware, req Resources, held []Allocation) (Allocation, error) 
 		a.CPUs = append(a.CPUs, core...)
 		count++
 		if count == req.Cores {
-			return a, nil
+			break
 		}
 	}
-	return Allocation{}, ErrCapacity
+	if count != req.Cores {
+		return Allocation{}, ErrCapacity
+	}
+	for _, gpu := range h.GPUs {
+		if len(a.GPUs) == req.GPUs {
+			break
+		}
+		if !gpuUsed[gpu.UUID] {
+			a.GPUs = append(a.GPUs, gpu.UUID)
+		}
+	}
+	if len(a.GPUs) != req.GPUs {
+		return Allocation{}, ErrCapacity
+	}
+	return a, nil
 }

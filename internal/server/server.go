@@ -158,7 +158,7 @@ func (s *Server) prepare(ctx context.Context, r Request) (Job, error) {
 	if r.ID == "" {
 		r.ID = strings.ToLower(rand.Text())
 	}
-	if !namePattern.MatchString(r.ID) || r.Resources.Cores <= 0 || r.Resources.MemoryMiB <= 0 {
+	if !namePattern.MatchString(r.ID) || r.Resources.Cores <= 0 || r.Resources.MemoryMiB <= 0 || r.Resources.GPUs < 0 {
 		return Job{}, errors.New("valid ID and positive cores/memory required")
 	}
 	tmp, err := os.MkdirTemp(s.Root, ".prepare-")
