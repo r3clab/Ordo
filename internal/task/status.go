@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,31 @@ func ReadResult(dir string) (Record, error) {
 	var r Record
 	err = json.Unmarshal(data, &r)
 	return r, err
+}
+
+// Stop targets only a verified existing execution. Absence is not proof of cancellation.
+func Stop(ctx context.Context, dir string) error {
+	r, status, err := Status(ctx, dir)
+	if err != nil {
+		return err
+	}
+	switch status {
+	case "removed", "exited":
+		return nil
+	case "running", "paused", "created", "configured", "stopping":
+		selector := r.ContainerID
+		if selector == "" {
+			selector = r.ContainerName
+		}
+		c, err := command(execPodman).inspectOwned(ctx, &r, selector)
+		if err != nil {
+			return err
+		}
+		_, err = command(execPodman).output(ctx, "stop", "--time=10", "--", c.ID)
+		return err
+	default:
+		return errors.New("execution is not yet identifiable; cancellation remains pending")
+	}
 }
 
 // Status inspects an existing execution; it never creates or starts a container.

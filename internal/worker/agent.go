@@ -40,22 +40,24 @@ type Config struct {
 }
 
 type Spec struct {
-	Image     string            `json:"image"`
-	Args      []string          `json:"args,omitempty"`
-	Resources Resources         `json:"resources"`
-	Inputs    map[string]string `json:"inputs,omitempty"`
+	Image          string            `json:"image"`
+	Args           []string          `json:"args,omitempty"`
+	Resources      Resources         `json:"resources"`
+	Inputs         map[string]string `json:"inputs,omitempty"`
+	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
 }
 
 type Attempt struct {
-	ID         string       `json:"id"`
-	Spec       Spec         `json:"spec"`
-	Allocation Allocation   `json:"allocation"`
-	Hardware   Hardware     `json:"hardware"`
-	State      string       `json:"state"`
-	Error      string       `json:"error,omitempty"`
-	CreatedAt  time.Time    `json:"created_at"`
-	UpdatedAt  time.Time    `json:"updated_at"`
-	Result     *task.Record `json:"result,omitempty"`
+	ID            string       `json:"id"`
+	Spec          Spec         `json:"spec"`
+	Allocation    Allocation   `json:"allocation"`
+	Hardware      Hardware     `json:"hardware"`
+	State         string       `json:"state"`
+	Error         string       `json:"error,omitempty"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+	Result        *task.Record `json:"result,omitempty"`
+	StopRequested string       `json:"stop_requested,omitempty"`
 }
 
 func (a Attempt) Terminal() bool {
@@ -76,16 +78,18 @@ type identity struct {
 }
 
 type Agent struct {
-	mu       sync.Mutex
-	cfg      Config
-	info     Info
-	store    *state.Store
-	owner    *os.File
-	attempts map[string]Attempt
-	busy     map[string]bool
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	mu        sync.Mutex
+	cfg       Config
+	info      Info
+	store     *state.Store
+	owner     *os.File
+	attempts  map[string]Attempt
+	busy      map[string]bool
+	stopping  map[string]bool
+	cancelled map[string]bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 func Open(ctx context.Context, cfg Config) (*Agent, error) {
@@ -152,6 +156,22 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 	child, cancel := context.WithCancel(ctx)
 	a := &Agent{cfg: cfg, info: Info{Protocol: ProtocolVersion, ID: ident.ID, Hardware: h}, store: store, attempts: map[string]Attempt{}, busy: map[string]bool{}, ctx: child, cancel: cancel}
 	fail := func(err error) (*Agent, error) { _ = a.Close(); return nil, err }
+	a.stopping = map[string]bool{}
+	a.cancelled = map[string]bool{}
+	tombstones, err := store.List("cancel")
+	if err != nil {
+		return fail(err)
+	}
+	for _, data := range tombstones {
+		var c cancellation
+		if err := json.Unmarshal(data, &c); err != nil {
+			return fail(err)
+		}
+		if !identifier.MatchString(c.ID) {
+			return fail(errors.New("invalid cancellation record"))
+		}
+		a.cancelled[c.ID] = true
+	}
 	rows, err := store.List("attempt")
 	if err != nil {
 		return fail(err)
@@ -232,6 +252,12 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 	if !identifier.MatchString(id) || !imageIdentity.MatchString(spec.Image) || spec.Resources.Cores <= 0 || spec.Resources.MemoryMiB <= 0 {
 		return Attempt{}, fmt.Errorf("%w: valid attempt ID, immutable sha256 image ID, positive cores/memory are required", ErrInvalidRequest)
 	}
+	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > 31536000 {
+		return Attempt{}, fmt.Errorf("%w: timeout must be 0..31536000 seconds", ErrInvalidRequest)
+	}
+	if a.cancelled[id] {
+		return Attempt{}, fmt.Errorf("%w: attempt was cancelled before submission", ErrConflict)
+	}
 	spec.Args = slices.Clone(spec.Args)
 	spec.Inputs = maps.Clone(spec.Inputs)
 	for name, digest := range spec.Inputs {
@@ -274,6 +300,12 @@ func (a *Agent) Submit(id string, spec Spec) (Attempt, error) {
 }
 
 func (a *Agent) save(run Attempt) error {
+	if old, ok := a.attempts[run.ID]; ok && old.StopRequested != "" {
+		run.StopRequested = old.StopRequested
+	}
+	if run.State == "finished" && run.StopRequested == "cancel" {
+		run.State = "cancelled"
+	}
 	run.UpdatedAt = time.Now().UTC()
 	if err := a.store.Put("attempt", run.ID, run); err != nil {
 		a.info.Error = err.Error()
@@ -412,6 +444,7 @@ func (a *Agent) Serve() error {
 			}
 			return err
 		case <-ticker.C:
+			a.enforceStops()
 			a.launchPending()
 		}
 	}

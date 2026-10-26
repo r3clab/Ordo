@@ -26,6 +26,7 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("PUT /v1/blobs/{hash}", func(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		hash, err := content.Put(blobs, r.Body, r.PathValue("hash"))
 		if err != nil {
 			http.Error(w, err.Error(), 400)
@@ -34,6 +35,7 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 		respond(w, 200, map[string]string{"sha256": hash})
 	})
 	mux.HandleFunc("POST /v1/inputs/{hash}", func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		hash := r.PathValue("hash")
 		if !content.Valid(hash) {
 			http.Error(w, "invalid digest", 400)
@@ -83,7 +85,7 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			http.NotFound(w, r)
 			return
 		}
-		if run.State != "finished" {
+		if (run.State != "finished" && run.State != "cancelled") || run.Result == nil || run.Result.State != "finished" {
 			http.Error(w, "results are not ready", http.StatusConflict)
 			return
 		}

@@ -7,7 +7,8 @@ Every task runs in rootless Podman using a [nix2container](https://github.com/nl
 Agents provide durable, idempotent attempts, exclusive physical cores, and aggregate memory accounting.
 Immutable image/input transfer and output collection are implemented.
 The durable server queue reconnects and reconciles original attempts after controller failure.
-Workflows, GPU allocation, and web UI are still planned.
+JSON DAGs, parameter sweeps, bounded retries, timeouts, and cancellation are implemented.
+GPU allocation and web UI are still planned.
 
 ## Direction
 
@@ -209,6 +210,36 @@ The control socket is private.
 Server shutdown/disconnection never cancels attempts; dispatch IDs are committed before submission, and worker identity must match before reconciliation.
 A worker losing an acknowledged attempt or changing identity blocks that job rather than rerunning it.
 Results must be downloaded and validated before the server marks success.
+
+## Workflows
+
+`ordo queue workflow --state SERVER_DIR --file workflow.json` submits the entire graph atomically:
+
+```json
+{"id":"example","image":"sha256:IMAGE_ID","archive":"/absolute/image.tar","tasks":[
+  {"id":"produce","resources":{"cores":1,"memory_mib":128},"args":["-c","printf data > /outputs/value"]},
+  {"id":"consume","from":{"data":"produce"},"resources":{"cores":1,"memory_mib":128},"args":["-c","cp /inputs/data/value /outputs/value"]},
+  {"id":"sweep","depends_on":["produce"],"matrix":{"seed":["1","2"]},"resources":{"cores":1,"memory_mib":128},"timeout_seconds":60,"retry":{"task":1,"infrastructure":1},"args":["-c","printf {{seed}} > /outputs/seed"]}
+]}
+```
+
+- Workflow IDs are at most 24 characters, task IDs 32; expanded jobs use `WORKFLOW--TASK` IDs.
+  A workflow expands to at most 1,000 tasks.
+- Matrices form a deterministic Cartesian product of string values; `{{parameter}}` is substituted in command arguments, never evaluated by a host shell.
+  Expanded IDs have numeric suffixes starting at `-0`.
+- `depends_on` requires every referenced task to succeed.
+  A sweep reference creates a barrier across all its instances.
+  `from` selects one task's collected output directory and adds its dependency automatically; select an explicit instance for sweep outputs.
+- Failed/cancelled dependencies skip downstream tasks; independent branches continue.
+- Task-exit retries default to zero, confirmed infrastructure-failure retries to one.
+  Each count is bounded to 0–10.
+  Every executed attempt remains visible.
+  Unknown/disconnected executions do not consume retries.
+- `timeout_seconds` is a per-attempt wall-clock limit from worker acceptance, enforced by the worker even when the controller is unavailable.
+  Zero disables it; the maximum is one year.
+- `ordo queue cancel --id JOB_ID` and `ordo queue cancel-workflow --id WORKFLOW_ID` persist cancellation intent.
+  Unknown outcomes stay pending/blocked until reconciled.
+  `ordo worker cancel --id ATTEMPT_ID` also supports direct worker control.
 
 ## Development
 

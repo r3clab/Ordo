@@ -14,6 +14,13 @@ import (
 func (a *Agent) handler() http.Handler {
 	mux := http.NewServeMux()
 	a.contentRoutes(mux)
+	mux.HandleFunc("POST /v1/attempts/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.Cancel(r.PathValue("id")); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		respond(w, http.StatusOK, map[string]bool{"requested": true})
+	})
 	mux.HandleFunc("GET /v1/info", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		info := a.info

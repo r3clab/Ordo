@@ -9,6 +9,7 @@ import (
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/task"
 	"github.com/r3clab/Ordo/internal/worker"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -23,12 +24,14 @@ import (
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
 type Request struct {
-	ID        string            `json:"id,omitempty"`
-	Image     string            `json:"image"`
-	Archive   string            `json:"archive,omitempty"`
-	Inputs    map[string]string `json:"inputs,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Resources worker.Resources  `json:"resources"`
+	ID             string            `json:"id,omitempty"`
+	Image          string            `json:"image"`
+	Archive        string            `json:"archive,omitempty"`
+	Inputs         map[string]string `json:"inputs,omitempty"`
+	Args           []string          `json:"args,omitempty"`
+	Resources      worker.Resources  `json:"resources"`
+	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
+	Retry          RetryPolicy       `json:"retry,omitempty"`
 }
 type Attempt struct {
 	ID        string          `json:"id"`
@@ -37,15 +40,23 @@ type Attempt struct {
 	Seen      bool            `json:"seen"`
 	Remote    *worker.Attempt `json:"remote,omitempty"`
 	ResultDir string          `json:"result_dir,omitempty"`
+	Failure   string          `json:"failure,omitempty"`
 }
 type Job struct {
-	ID        string      `json:"id"`
-	Spec      worker.Spec `json:"spec"`
-	Archive   string      `json:"archive"`
-	State     string      `json:"state"`
-	Error     string      `json:"error,omitempty"`
-	CreatedAt time.Time   `json:"created_at"`
-	Attempts  []Attempt   `json:"attempts,omitempty"`
+	ID              string            `json:"id"`
+	Spec            worker.Spec       `json:"spec"`
+	Archive         string            `json:"archive"`
+	State           string            `json:"state"`
+	Error           string            `json:"error,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	Attempts        []Attempt         `json:"attempts,omitempty"`
+	Key             string            `json:"submission_key,omitempty"`
+	Workflow        string            `json:"workflow,omitempty"`
+	Depends         []string          `json:"depends_on,omitempty"`
+	From            map[string]string `json:"from,omitempty"`
+	Parameters      map[string]string `json:"parameters,omitempty"`
+	Retry           RetryPolicy       `json:"retry,omitempty"`
+	CancelRequested bool              `json:"cancel_requested,omitempty"`
 }
 
 func (j Job) Terminal() bool {
@@ -123,6 +134,12 @@ func (s *Server) save(j Job) error {
 	if s.fault != nil {
 		return s.fault
 	}
+	if old, ok := s.jobs[j.ID]; ok && old.CancelRequested {
+		j.CancelRequested = true
+		if j.Terminal() {
+			j.State = "cancelled"
+		}
+	}
 	if err := s.store.Put("job", j.ID, j); err != nil {
 		s.fault = err
 		return err
@@ -131,7 +148,13 @@ func (s *Server) save(j Job) error {
 	s.jobs[j.ID] = j
 	return nil
 }
-func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
+func (s *Server) prepare(ctx context.Context, r Request) (Job, error) {
+	if err := r.Retry.validate(); err != nil {
+		return Job{}, err
+	}
+	if r.TimeoutSeconds < 0 || r.TimeoutSeconds > 31536000 {
+		return Job{}, errors.New("timeout must be 0..31536000 seconds")
+	}
 	if r.ID == "" {
 		r.ID = strings.ToLower(rand.Text())
 	}
@@ -163,7 +186,7 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	spec := worker.Spec{Image: image, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}}
+	spec := worker.Spec{Image: image, Args: slices.Clone(r.Args), Resources: r.Resources, Inputs: map[string]string{}, TimeoutSeconds: r.TimeoutSeconds}
 	for name, source := range r.Inputs {
 		if !namePattern.MatchString(name) {
 			return Job{}, errors.New("invalid input name")
@@ -184,16 +207,26 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 		}
 		spec.Inputs[name] = hash
 	}
-	j := Job{ID: r.ID, Spec: spec, Archive: blob, State: "queued", CreatedAt: time.Now().UTC()}
+	j := Job{ID: r.ID, Spec: spec, Archive: blob, State: "queued", CreatedAt: time.Now().UTC(), Retry: r.Retry}
+	j.Key = jobKey(j)
+	return j, nil
+}
+func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
+	j, err := s.prepare(ctx, r)
+	if err != nil {
+		return Job{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fault != nil {
 		return Job{}, s.fault
 	}
 	if old, ok := s.jobs[j.ID]; ok {
-		left, _ := json.Marshal(old.Spec)
-		right, _ := json.Marshal(spec)
-		if string(left) != string(right) || old.Archive != blob {
+		key := old.Key
+		if key == "" {
+			key = jobKey(old)
+		}
+		if key != j.Key {
 			return Job{}, errors.New("job ID already has a different immutable specification")
 		}
 		return old, nil
@@ -313,7 +346,15 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 	}
 }
 func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.Info, client *http.Client) error {
-	if len(j.Attempts) == 0 {
+	if j.State == "queued" {
+		if j.CancelRequested {
+			j.State = "cancelled"
+			return s.save(j)
+		}
+		ready, err := s.dependencies(&j)
+		if err != nil || !ready {
+			return err
+		}
 		if info.Error != "" || !worker.Fits(info.Hardware, j.Spec.Resources, info.Held) {
 			return nil
 		}
@@ -349,6 +390,12 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 			j.Error = "worker lost an acknowledged attempt"
 			return s.save(j)
 		}
+		if j.CancelRequested {
+			if err := worker.Call(ctx, client, http.MethodPost, "/v1/attempts/"+at.ID+"/cancel", nil, nil); err != nil {
+				return err
+			}
+			return s.finish(j, "cancel")
+		}
 		err = worker.Call(ctx, client, http.MethodPut, "/v1/attempts/"+at.ID, j.Spec, &run)
 		if errors.As(err, &api) && api.Status == http.StatusTooManyRequests {
 			j.Attempts = j.Attempts[:len(j.Attempts)-1]
@@ -363,15 +410,25 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 	at.Remote = &run
 	j.Error = run.Error
 	if !run.Terminal() {
+		if j.CancelRequested {
+			if err := worker.Call(ctx, client, http.MethodPost, "/v1/attempts/"+at.ID+"/cancel", nil, nil); err != nil {
+				return err
+			}
+		}
 		j.State = "running"
 		if run.State == "blocked" {
 			j.State = "blocked"
 		}
 		return s.save(j)
 	}
-	if run.State != "finished" {
-		j.State = "failed"
-		return s.save(j)
+	if run.State != "finished" && (run.Result == nil || run.Result.State != "finished") {
+		class := "infrastructure"
+		if run.StopRequested == "timeout" {
+			class = "task"
+		} else if run.State == "cancelled" {
+			class = "cancel"
+		}
+		return s.finish(j, class)
 	}
 	if run.Result == nil || run.Result.ExitCode == nil {
 		return errors.New("worker finished without a result")
@@ -396,14 +453,44 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info worker.
 		return errors.New("downloaded result does not match the dispatched attempt")
 	}
 	at.ResultDir = dest
-	j.State = "succeeded"
-	if *result.ExitCode != 0 {
-		j.State = "failed"
+	class := ""
+	if *result.ExitCode != 0 || run.StopRequested == "timeout" {
+		class = "task"
 	}
-	return s.save(j)
+	if run.State == "cancelled" && run.StopRequested != "timeout" {
+		class = "cancel"
+	}
+	return s.finish(j, class)
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Cancel(r.PathValue("id"), false); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(w, map[string]bool{"requested": true})
+	})
+	mux.HandleFunc("POST /v1/workflows/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Cancel(r.PathValue("id"), true); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(w, map[string]bool{"requested": true})
+	})
+	mux.HandleFunc("POST /v1/workflows", func(w http.ResponseWriter, r *http.Request) {
+		var flow Workflow
+		if err := decodeRequest(w, r, 8<<20, &flow); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		jobs, err := s.SubmitWorkflow(r.Context(), flow)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		writeJSON(w, jobs)
+	})
 	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.List()) })
 	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		for _, j := range s.List() {
@@ -416,9 +503,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
 		var req Request
-		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-		d.DisallowUnknownFields()
-		if err := d.Decode(&req); err != nil {
+		if err := decodeRequest(w, r, 1<<20, &req); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -431,6 +516,18 @@ func (s *Server) Handler() http.Handler {
 	})
 	return mux
 }
+func decodeRequest(w http.ResponseWriter, r *http.Request, limit int64, value any) error {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	d.DisallowUnknownFields()
+	if err := d.Decode(value); err != nil {
+		return err
+	}
+	if err := d.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return errors.New("expected exactly one JSON value")
+	}
+	return nil
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)

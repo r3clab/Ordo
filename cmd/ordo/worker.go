@@ -19,7 +19,7 @@ import (
 )
 
 func workerCommand(ctx context.Context, args []string, out io.Writer) error {
-	usage := "Usage: ordo worker <start|info|submit|get|put-image|fetch> --host HOST --state REMOTE_DIR --cpus CPU_IDS --memory-mib POOL_MIB [flags]\n\nstart: upload --binary FILE (defaults to this executable) and start/reuse a persistent user service.\nsubmit: --id ID --image sha256:ID --cores N --task-memory-mib MIB [-- COMMAND ARGS...]\nget: --id ID. info: report capabilities and held reservations.\nput-image: --image LOCAL_REFERENCE, or --image sha256:ID --archive OCI_FILE.\nsubmit: optional repeated --input NAME=DIR. fetch: --id ID --output NEW_DIR.\nAll control traffic uses a private SSH-forwarded Unix socket. Closing the client does not stop tasks."
+	usage := "Usage: ordo worker <start|info|submit|get|put-image|fetch|cancel> --host HOST --state REMOTE_DIR --cpus CPU_IDS --memory-mib POOL_MIB [flags]\n\nstart: upload --binary FILE (defaults to this executable) and start/reuse a persistent user service.\nsubmit: --id ID --image sha256:ID --cores N --task-memory-mib MIB [-- COMMAND ARGS...]\nget: --id ID. info: report capabilities and held reservations.\nput-image: --image LOCAL_REFERENCE, or --image sha256:ID --archive OCI_FILE.\nsubmit: optional repeated --input NAME=DIR. fetch: --id ID --output NEW_DIR.\nAll control traffic uses a private SSH-forwarded Unix socket. Closing the client does not stop tasks."
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		_, err := fmt.Fprintln(out, usage)
 		return err
@@ -51,6 +51,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 	})
 	flags.StringVar(&spec.Image, "image", "", "immutable image ID already present on worker")
+	flags.Int64Var(&spec.TimeoutSeconds, "timeout-seconds", 0, "per-attempt wall-clock deadline; zero disables")
 	flags.IntVar(&spec.Resources.Cores, "cores", 0, "physical cores")
 	flags.Int64Var(&spec.Resources.MemoryMiB, "task-memory-mib", 0, "task memory limit")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -63,7 +64,7 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		return errors.New("unexpected positional arguments")
 	}
 	switch operation {
-	case "start", "info", "submit", "get", "put-image", "fetch":
+	case "start", "info", "submit", "get", "put-image", "fetch", "cancel":
 	default:
 		return fmt.Errorf("unknown worker command %q", operation)
 	}
@@ -133,6 +134,13 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		result = attempt
+	case "cancel":
+		if id == "" {
+			return errors.New("--id is required")
+		}
+		if err := worker.Call(ctx, tunnel.Client, http.MethodPost, "/v1/attempts/"+url.PathEscape(id)+"/cancel", nil, &result); err != nil {
+			return err
+		}
 	case "get":
 		if id == "" {
 			return errors.New("--id is required")

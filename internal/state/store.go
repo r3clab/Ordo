@@ -96,6 +96,29 @@ func (s *Store) Put(kind, id string, value any) error {
 	return err
 }
 
+// PutMany publishes a whole workflow atomically, never a partially visible graph.
+func (s *Store) PutMany(kind string, values map[string]any) error {
+	encoded := map[string][]byte{}
+	for id, value := range values {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		encoded[id] = data
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for id, data := range encoded {
+		if _, err := tx.Exec("INSERT INTO records(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", kind, id, data); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Get(kind, id string, value any) error {
 	var data []byte
 	if err := s.db.QueryRow("SELECT body FROM records WHERE kind=? AND id=?", kind, id).Scan(&data); err != nil {
