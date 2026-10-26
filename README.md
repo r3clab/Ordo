@@ -193,13 +193,31 @@ Start `ordo server --state SERVER_DIR --workers workers.json` with 1–10 worker
 [{"host":"WORKER","state_dir":"/home/worker/.local/state/ordo","cpus":"0,1,64,65","memory_mib":512,"binary":"/absolute/path/ordo-linux-amd64"}]
 ```
 
-Submit `ordo queue submit --state SERVER_DIR --file job.json`:
+`ordo submit --state SERVER_DIR` reads one job request per line from stdin (or `--file JOBS.jsonl`):
 
 ```json
-{"id":"evaluation-001","image":"sha256:IMAGE_ID","archive":"/absolute/path/image.tar","inputs":{"dataset":"/absolute/path/data"},"resources":{"cores":1,"memory_mib":256},"args":["-c","cp /inputs/dataset/value /outputs/value"]}
+{"id":"evaluation-001","image":{"nix":"/absolute/path/evaluation#images.grep"},"inputs":{"dataset":"/absolute/path/data"},"resources":{"cores":1,"memory_mib":256},"args":["-c","cp /inputs/dataset/value /outputs/value"]}
 ```
 
-Without `archive`, the server resolves and exports `image` from its local Podman storage.
+- Every line needs an `id`.
+  Resubmitting an ID with the same request returns the existing job, so rerunning a generator only queues what is new; the same ID with a different request is an error.
+- It prints one result per line (`id`, `line`, `state`, `existing`, or `error`), keeps going past bad lines, and exits nonzero if any line failed.
+- `image` takes one of three forms:
+  - `{"nix": INSTALLABLE}`: the server runs `nix build` on a flake attribute such as `/path/flake#images.grep` or a `/nix/store/….drv^*` path, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
+    Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
+    A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
+  - A local Podman reference, resolved and exported from the server's Podman storage.
+  - An immutable `sha256:IMAGE_ID` together with an OCI `archive` path.
+- The server finds `nix` on its `PATH` (`--nix` overrides it) and `skopeo` through `--skopeo` or `ORDO_SKOPEO`.
+  Stock `skopeo` lacks the `nix:` transport; run the server from `nix run .#ordo-server`, which sets `ORDO_SKOPEO`.
+- Only the private control socket accepts `{"nix": …}` images, since building an installable runs its code; the web UI's API refuses them.
+
+`ordo fetch --state SERVER_DIR --into results [--id ID …] [--wait]` writes each succeeded job's outputs, `stdout.log`, `stderr.log`, and `run.json` to `results/ID/`, creating `results` private (mode 0700).
+It skips jobs whose directory already exists, so a finished result is never fetched again, and receives each one into a temporary directory renamed into place only after its checksum matches.
+Without `--id` it selects every job; `--wait` polls until the selected jobs finish.
+It prints one line per job and exits nonzero if any selected job did not succeed.
+An output named `run.json`, `stdout.log`, or `stderr.log` would collide, so such a job is refused.
+
 `ordo queue list` and `ordo queue get --id ID` accept the same `--state` argument.
 The control socket is private.
 Server shutdown/disconnection never cancels attempts; dispatch IDs are committed before submission, and worker identity must match before reconciliation.
@@ -218,7 +236,7 @@ Do not expose the listener with a public proxy; public deployment/TLS/multi-user
 Authenticated API requests additionally enforce loopback Host headers and same-origin browser requests.
 
 The page accepts job or workflow JSON, shows worker connectivity/hardware/reservations and attempt histories, and cancels jobs or whole workflows.
-Image/input paths in submitted JSON refer to the **server's filesystem**.
+Image/input paths in submitted JSON refer to the **server's filesystem**; `{"nix": …}` images need `ordo submit`.
 Logs are available after result collection, with the last 1 MiB of each stream shown; full logs remain in each attempt's result directory.
 Untrusted task output is rendered as text, not HTML.
 Auto-refresh can be paused.
@@ -340,6 +358,36 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
   Attempts also record `stop_requested`: `cancel`, `stop`, or `timeout`.
   The first request reaching an attempt wins, but a later cancel still marks the job `cancelled`.
 
+## Typed specification
+
+`ordo schema [request|workflow]` prints the JSON Schema of a job request or workflow, generated from the Go types; `schema/` holds committed copies for editors and other tools.
+The schema covers names, enums, and limits; rules spanning fields, such as GPU matching or input conflicts, are checked only on submission.
+
+The flake's `lib` builds requests at Nix evaluation time, checking them against the patterns, enums, and limits it reads from `schema/`:
+
+```nix
+let
+  inherit (ordo.lib) mkTask toJSONL;
+  tasks = lib.mapAttrsToList (name: image: mkTask {
+    id = "klee-${name}";
+    inherit image;
+    args = [ "--max-time" "1h" ];
+    cores = 1;
+    memoryMiB = 40960;
+    timeoutSeconds = 7200;
+  }) klee-eval.images;
+in
+pkgs.writeText "tasks.jsonl" (toJSONL tasks)
+```
+
+- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`, `match.minGPUMemoryMiB`) and returns the request attrset.
+  `mkStep` adds `dependsOn`, `from`, and `matrix`, and `mkWorkflow` combines steps.
+- A derivation `image` becomes `{"nix": "/nix/store/….drv^*"}`: the task file keeps the `.drv` alive without building the image, which the server builds on submission.
+  The `.drv` must be in the server's Nix store, so evaluate on the server host or `nix copy --derivation` it there.
+  JSON printed by `nix eval` roots nothing, so garbage collection can remove the `.drv` before submission.
+- `mkTask` takes no `secrets`, since anything it returns lands in the world-readable store; add them at submit time.
+- Consumers should make Ordo's `nix2container` input follow their own, so the server's `skopeo` reads their image format.
+
 ## Development
 
 The Nix layout follows [Sermo](https://github.com/r3clab/Sermo): Blueprint assembles outputs from `nix/`, with inputs pinned in `flake.lock`.
@@ -359,7 +407,11 @@ nix flake check                # formatting, lint, build, race-enabled tests, an
 - `nix/devshell.nix`: tools and a fail-fast formatting/lint pre-commit hook, installed on shell entry.
 - `nix/formatter.nix`: treefmt configuration and formatting check.
 - `nix/package.nix`: Go build, tests, and sandboxed lint check.
+- `nix/packages/ordo-server.nix`: the server binary with nix2container's `skopeo`.
+- `nix/lib/default.nix`: `mkTask`, `mkStep`, `mkWorkflow`, and `toJSONL`.
 - `nix/checks/ui.nix`: UI type check and committed-build freshness check.
+- `nix/checks/schema.nix`: fails when `schema/` differs from `ordo schema --out`; regenerate with `go run ./cmd/ordo schema --out schema`.
+- `nix/checks/lib.nix`: validates `lib` output against the schema, with an unbuildable image to prove task files build no images, and requires every invalid sample to fail evaluation.
 
 CI runs `nix flake check` on every push to `main` and every pull request.
 
