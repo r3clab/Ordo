@@ -20,10 +20,10 @@ var pollInterval = 2 * time.Second
 const fetchUsage = "Usage: ordo fetch --state DIR --into DIR [--id ID ...] [--wait]\n\nWrites each succeeded job's outputs, stdout.log, stderr.log and run.json to DIR/ID,\nskipping jobs whose directory already exists. Without --id it fetches every job.\n--wait polls until the selected jobs finish."
 
 type fetchResult struct {
-	ID     string `json:"id"`
-	State  string `json:"state"`
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	ID     string       `json:"id"`
+	State  server.State `json:"state"`
+	Status string       `json:"status"`
+	Error  string       `json:"error,omitempty"`
 }
 
 func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
@@ -83,11 +83,11 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 			j := jobs[id]
 			result := fetchResult{ID: id, State: j.State}
 			switch {
-			case j.State == "succeeded":
+			case j.State == server.Succeeded:
 				if result.Status, err = fetchJob(ctx, client, id, filepath.Join(into, id)); err != nil {
 					result.Error = err.Error()
 				}
-			case j.Terminal():
+			case j.State.Terminal():
 				result.Status = "unsuccessful"
 			case wait:
 				waiting = append(waiting, id)

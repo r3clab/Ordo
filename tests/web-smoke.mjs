@@ -32,7 +32,7 @@ try {
   await evaluate('document.getElementById("login").requestSubmit()');
   await wait('!!document.querySelector("nav[aria-label=Views]")');
   assert(await evaluate('localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ""'));
-  const workflow = { id: "browser", image: process.env.ORDO_TEST_IMAGE, archive: process.env.ORDO_TEST_ARCHIVE, tasks: [
+  const workflow = { id: "browser", image: { archive: process.env.ORDO_TEST_ARCHIVE, id: process.env.ORDO_TEST_IMAGE }, tasks: [
     { id: "log", resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf '<script>globalThis.injection=true</script>\\n'"] },
     { id: "stop", resources: { cores: 1, memory_mib: 128 }, timeout_seconds: 60, args: ["-c", "sleep 45"] },
   ] };

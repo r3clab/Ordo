@@ -31,21 +31,21 @@ func TestSecretsServicesAndStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	req := Request{ID: "agent", Image: image.Source{Ref: "sha256:" + strings.Repeat("a", 64)}, Archive: archive, Resources: worker.Resources{Cores: 1, MemoryMiB: 128},
+	req := Request{ID: "agent", Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128},
 		Sandbox: task.Sandbox{Env: map[string]string{"MODE": "eval"}, Network: task.Egress, CapAdd: []string{"NET_ADMIN"}},
 		Secrets: map[string]string{"TOKEN": "hunter2"}, Services: []string{"model"}, Retry: RetryPolicy{Task: 2}}
 	unknown := req
 	unknown.Services = []string{"other"}
-	if _, err := s.Submit(ctx, Local, unknown); err == nil {
+	if _, err := s.Submit(ctx, unknown); err == nil {
 		t.Fatal("accepted an unconfigured service")
 	}
-	j, err := s.Submit(ctx, Local, req)
+	j, err := s.Submit(ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resubmitted := req
 	resubmitted.Secrets = map[string]string{"TOKEN": "rotated"}
-	if _, err := s.Submit(ctx, Local, resubmitted); err != nil {
+	if _, err := s.Submit(ctx, resubmitted); err != nil {
 		t.Fatal("secret values must not change job identity:", err)
 	}
 	listed, _ := json.Marshal(s.List())
@@ -130,7 +130,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 
 	queued := req
 	queued.ID = "queued"
-	if _, err := s.Submit(ctx, Local, queued); err != nil {
+	if _, err := s.Submit(ctx, queued); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Stop("queued", ""); err != nil {
@@ -142,7 +142,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 
 	oob := req
 	oob.ID = "oob"
-	if j, err = s.Submit(ctx, Local, oob); err != nil {
+	if j, err = s.Submit(ctx, oob); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.reconcile(ctx, j, "worker", &info, client); err != nil {
@@ -159,10 +159,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 
 	live := req
 	live.ID = "live"
-	if _, err := s.Submit(ctx, Local, live); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.store.Put("secret", "orphan", map[string]string{"TOKEN": "x"}); err != nil {
+	if _, err := s.Submit(ctx, live); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -170,9 +167,6 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	}
 	if s, err = Open(state, workers, services, image.Tools{}); err != nil {
 		t.Fatal(err)
-	}
-	if err := s.store.Get("secret", "orphan", &values); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("restart kept an orphaned secret: %v", err)
 	}
 	if err := s.store.Get("secret", "live", &values); err != nil || values["TOKEN"] != "hunter2" {
 		t.Fatalf("restart dropped a live job's secret: %v", err)

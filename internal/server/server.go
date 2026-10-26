@@ -25,7 +25,6 @@ import (
 type Request struct {
 	ID        string            `json:"id,omitempty"`
 	Image     image.Source      `json:"image"`
-	Archive   string            `json:"archive,omitempty"`
 	Inputs    map[string]string `json:"inputs,omitempty"`
 	Args      []string          `json:"args,omitempty"`
 	Resources worker.Resources  `json:"resources"`
@@ -36,20 +35,47 @@ type Request struct {
 	Retry          RetryPolicy       `json:"retry,omitempty"`
 	Match          *worker.Match     `json:"match,omitempty"`
 }
+
+type Failure string
+
+const (
+	TaskFailure           Failure = "task"
+	InfrastructureFailure Failure = "infrastructure"
+	CancelFailure         Failure = "cancel"
+)
+
 type Attempt struct {
 	ID        string          `json:"id"`
 	Worker    string          `json:"worker"`
 	AgentID   string          `json:"agent_id"`
-	Seen      bool            `json:"seen"`
 	Remote    *worker.Attempt `json:"remote,omitempty"`
 	ResultDir string          `json:"result_dir,omitempty"`
-	Failure   string          `json:"failure,omitempty"`
+	Failure   Failure         `json:"failure,omitempty"`
 }
+
+type State string
+
+const (
+	Queued      State = "queued"
+	Dispatching State = "dispatching"
+	Running     State = "running"
+	Blocked     State = "blocked"
+	Collecting  State = "collecting"
+	Succeeded   State = "succeeded"
+	Failed      State = "failed"
+	Cancelled   State = "cancelled"
+	Skipped     State = "skipped"
+)
+
+func (s State) Terminal() bool {
+	return s == Succeeded || s == Failed || s == Cancelled || s == Skipped
+}
+
 type Job struct {
 	ID              string            `json:"id"`
 	Spec            worker.Spec       `json:"spec"`
 	Archive         string            `json:"archive"`
-	State           string            `json:"state"`
+	State           State             `json:"state"`
 	Error           string            `json:"error,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
 	Attempts        []Attempt         `json:"attempts,omitempty"`
@@ -63,10 +89,6 @@ type Job struct {
 	StopRequested   bool              `json:"stop_requested,omitempty"`
 	StopReason      string            `json:"stop_reason,omitempty"`
 	ImageOrigin     *image.Origin     `json:"image_origin,omitempty"`
-}
-
-func (j Job) Terminal() bool {
-	return j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" || j.State == "skipped"
 }
 
 type Server struct {
@@ -130,7 +152,7 @@ func Open(root string, workers []worker.Remote, services map[string]string, tool
 		if !worker.ValidName(j.ID) {
 			return nil, errors.New("invalid saved job ID")
 		}
-		if !j.Terminal() {
+		if !j.State.Terminal() {
 			if len(j.Attempts) > 0 && !seen[j.Attempts[len(j.Attempts)-1].Worker] {
 				return nil, errors.New("configuration removes a worker with unfinished attempts")
 			}
@@ -141,18 +163,6 @@ func Open(root string, workers []worker.Remote, services map[string]string, tool
 			}
 		}
 		s.jobs[j.ID] = j
-	}
-	// Secrets outlive their job when a crash or failed write falls between the two records.
-	secrets, err := db.IDs("secret")
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range secrets {
-		if j, ok := s.jobs[id]; !ok || j.Terminal() {
-			if err := db.Delete("secret", id); err != nil {
-				return nil, err
-			}
-		}
 	}
 	s.images = image.NewResolver(filepath.Join(root, "blobs"), root, tools, imageCache{db})
 	return s, nil
@@ -165,15 +175,15 @@ func Socket(root string) string { return filepath.Join(root, "server.sock") }
 
 type imageCache struct{ store *state.Store }
 
-func (c imageCache) Load(output string) (image.Entry, bool, error) {
+func (c imageCache) Load(key string) (image.Entry, bool, error) {
 	var e image.Entry
-	err := c.store.Get("image", output, &e)
+	err := c.store.Get("image", key, &e)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, false, nil
 	}
 	return e, err == nil, err
 }
-func (c imageCache) Save(output string, e image.Entry) error { return c.store.Put("image", output, e) }
+func (c imageCache) Save(key string, e image.Entry) error { return c.store.Put("image", key, e) }
 func (j Job) clone() Job {
 	j.Attempts = slices.Clone(j.Attempts)
 	return j
@@ -200,7 +210,7 @@ func (s *Server) unfinished() []string {
 	defer s.mu.Unlock()
 	var ids []string
 	for id, j := range s.jobs {
-		if !j.Terminal() {
+		if !j.State.Terminal() {
 			ids = append(ids, id)
 		}
 	}
@@ -211,7 +221,7 @@ func (s *Server) save(j Job) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshLocked(&j)
-	return s.commitLocked(j)
+	return s.commitLocked(nil, j)
 }
 
 // refresh adopts cancel and stop requests that arrived after reconcile copied j.
@@ -229,51 +239,54 @@ func (s *Server) refreshLocked(j *Job) {
 	j.CancelRequested = j.CancelRequested || old.CancelRequested
 	j.StopRequested = j.StopRequested || old.StopRequested
 	j.StopReason = cmp.Or(old.StopReason, j.StopReason)
-	if j.CancelRequested && j.Terminal() {
-		j.State = "cancelled"
+	if j.CancelRequested && j.State.Terminal() {
+		j.State = Cancelled
 	}
 }
 
-func (j Job) stopKind() string {
+func (j Job) stopKind() worker.StopKind {
 	switch {
 	case j.CancelRequested:
-		return "cancel"
+		return worker.Cancel
 	case j.StopRequested:
-		return "stop"
+		return worker.Stop
 	}
 	return ""
 }
 
-// commitLocked latches s.fault on a failed write so no later mutation diverges from the store.
-func (s *Server) commitLocked(jobs ...Job) error {
-	if s.fault != nil {
+// commitLocked writes new jobs' secrets with the jobs and drops a job's secrets in the write that
+// finishes it, so secrets exist exactly while their job is unfinished. A failed write latches s.fault
+// so no later mutation diverges from the store.
+func (s *Server) commitLocked(secrets map[string]map[string]string, jobs ...Job) error {
+	if s.fault != nil || len(jobs) == 0 {
 		return s.fault
 	}
-	values := make(map[string]Job, len(jobs))
-	for _, j := range jobs {
-		values[j.ID] = j
-	}
-	if err := state.PutMany(s.store, "job", values); err != nil {
+	err := s.store.Update(func(tx *state.Tx) error {
+		for id, values := range secrets {
+			if err := tx.Put("secret", id, values); err != nil {
+				return err
+			}
+		}
+		for _, j := range jobs {
+			if err := tx.Put("job", j.ID, j); err != nil {
+				return err
+			}
+			if j.State.Terminal() && len(j.Spec.Secrets) > 0 {
+				if err := tx.Delete("secret", j.ID); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		s.fault = err
 		return err
 	}
 	for _, j := range jobs {
 		s.jobs[j.ID] = j.clone()
 	}
-	for _, j := range jobs {
-		if j.Terminal() && len(j.Spec.Secrets) > 0 {
-			if err := s.store.Delete("secret", j.ID); err != nil {
-				s.fault = err
-				return err
-			}
-		}
-	}
 	return nil
-}
-
-type imageKey struct {
-	image.Source
-	Archive string
 }
 
 type stagedImage struct {
@@ -282,49 +295,41 @@ type stagedImage struct {
 }
 
 type staging struct {
-	caller   Caller
 	resolver *image.Resolver
 	mu       sync.Mutex
-	images   map[imageKey]stagedImage
+	images   map[image.Source]stagedImage
 	inputs   map[string]string
 }
 
-func (s *Server) stage(ctx context.Context, caller Caller, requests ...Request) *staging {
-	st := &staging{caller: caller, resolver: s.images, images: map[imageKey]stagedImage{}, inputs: map[string]string{}}
-	if caller != Local {
-		return st
-	}
+func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
+	st := &staging{resolver: s.images, images: map[image.Source]stagedImage{}, inputs: map[string]string{}}
 	seen := map[image.Source]bool{}
 	var wg sync.WaitGroup
 	for _, r := range requests {
 		if r.Image.IsNix() && !seen[r.Image] && r.Check(s.services) == nil {
 			seen[r.Image] = true
-			wg.Go(func() { _, _ = st.image(ctx, r) })
+			wg.Go(func() { _, _ = st.image(ctx, r.Image) })
 		}
 	}
 	wg.Wait()
 	return st
 }
 
-func (st *staging) image(ctx context.Context, r Request) (image.Resolved, error) {
-	if r.Image.IsNix() && st.caller != Local {
-		return image.Resolved{}, ErrNixUntrusted
-	}
-	key := imageKey{r.Image, r.Archive}
+func (st *staging) image(ctx context.Context, src image.Source) (image.Resolved, error) {
 	st.mu.Lock()
-	staged, ok := st.images[key]
+	staged, ok := st.images[src]
 	st.mu.Unlock()
 	if !ok {
-		staged.Resolved, staged.err = st.resolver.Resolve(ctx, r.Image, r.Archive)
+		staged.Resolved, staged.err = st.resolver.Resolve(ctx, src)
 		st.mu.Lock()
-		st.images[key] = staged
+		st.images[src] = staged
 		st.mu.Unlock()
 	}
 	return staged.Resolved, staged.err
 }
 
 func (r Request) Check(services map[string]string) error {
-	if err := r.Image.Validate(r.Archive); err != nil {
+	if err := r.Image.Validate(); err != nil {
 		return err
 	}
 	if err := r.Retry.validate(); err != nil {
@@ -349,6 +354,8 @@ func (r Request) Check(services map[string]string) error {
 	return nil
 }
 
+func (r Request) nix() bool { return r.Image.IsNix() }
+
 func (r Request) spec() worker.Spec {
 	return worker.Spec{Args: r.Args, Resources: r.Resources, Sandbox: r.Sandbox, Secrets: slices.Collect(maps.Keys(r.Secrets)), Services: r.Services, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}.Normalize()
 }
@@ -360,7 +367,7 @@ func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, erro
 	if r.ID == "" {
 		r.ID = strings.ToLower(rand.Text())
 	}
-	img, err := st.image(ctx, r)
+	img, err := st.image(ctx, r.Image)
 	if err != nil {
 		return Job{}, err
 	}
@@ -379,44 +386,56 @@ func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, erro
 			spec.Inputs[name] = hash
 		}
 	}
-	return Job{ID: r.ID, Spec: spec, Archive: img.Blob, ImageOrigin: img.Origin, State: "queued", CreatedAt: time.Now().UTC(), Retry: r.Retry}, nil
+	return Job{ID: r.ID, Spec: spec, Archive: img.Blob, ImageOrigin: img.Origin, State: Queued, CreatedAt: time.Now().UTC(), Retry: r.Retry}, nil
 }
-func (s *Server) Submit(ctx context.Context, caller Caller, r Request) (Job, error) {
-	j, err := s.prepare(ctx, r, s.stage(ctx, caller))
+func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
+	j, err := s.prepare(ctx, r, s.stage(ctx, r))
 	if err != nil {
 		return Job{}, err
 	}
-	j, _, err = s.admit(j, r.Secrets)
-	return j, err
+	admitted := s.admit([]Job{j}, []map[string]string{r.Secrets})[0]
+	return admitted.job, admitted.err
 }
 
-func (s *Server) admit(j Job, secrets map[string]string) (Job, bool, error) {
-	j.Key = jobKey(j)
+type admission struct {
+	job      Job
+	existing bool
+	err      error
+}
+
+func (s *Server) admit(jobs []Job, secrets []map[string]string) []admission {
+	out := make([]admission, len(jobs))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.fault != nil {
-		return Job{}, false, s.fault
-	}
-	if old, ok := s.jobs[j.ID]; ok {
-		key := old.Key
-		if key == "" {
-			key = jobKey(old)
+	pending := map[string]Job{}
+	fresh := []Job{}
+	values := map[string]map[string]string{}
+	for i, j := range jobs {
+		j.Key = jobKey(j)
+		old, ok := s.jobs[j.ID]
+		if !ok {
+			old, ok = pending[j.ID]
 		}
-		if key != j.Key {
-			return Job{}, false, errors.New("job ID already has a different immutable specification")
+		switch {
+		case !ok:
+			pending[j.ID] = j
+			fresh = append(fresh, j)
+			if len(secrets[i]) > 0 {
+				values[j.ID] = secrets[i]
+			}
+			out[i].job = j
+		case cmp.Or(old.Key, jobKey(old)) != j.Key:
+			out[i].err = errors.New("job ID already has a different immutable specification")
+		default:
+			out[i] = admission{job: old, existing: true}
 		}
-		return old, true, nil
 	}
-	// Secrets live apart from jobs, which the API and UI return in full.
-	if len(secrets) > 0 {
-		if err := s.store.Put("secret", j.ID, secrets); err != nil {
-			return Job{}, false, err
+	if err := cmp.Or(s.fault, s.commitLocked(values, fresh...)); err != nil {
+		for i := range out {
+			out[i].err = cmp.Or(out[i].err, err)
 		}
 	}
-	if err := s.commitLocked(j); err != nil {
-		return Job{}, false, err
-	}
-	return j, false, nil
+	return out
 }
 
 func (s *Server) Run(ctx context.Context, address string) error {
@@ -459,6 +478,7 @@ func (s *Server) Run(ctx context.Context, address string) error {
 	wg.Wait()
 	return err
 }
+
 func (s *Server) work(ctx context.Context, remote worker.Remote) {
 	var tunnel *worker.Tunnel
 	defer func() {
@@ -466,20 +486,18 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 			_ = tunnel.Close()
 		}
 	}()
+	// Bootstrap hashes the agent binary and opens several SSH sessions, so it runs only until it
+	// succeeds and again after a connection to the running agent fails.
+	bootstrapped := false
 	for ctx.Err() == nil {
 		if tunnel == nil {
-			probe, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			err := worker.Bootstrap(probe, remote)
-			if err == nil {
-				tunnel, err = worker.Connect(ctx, remote, s.services)
-			}
-			cancel()
+			var err error
+			tunnel, err = s.connect(ctx, remote, !bootstrapped)
+			bootstrapped = err == nil
 			if err != nil {
 				s.workerStatus(remote.Host, nil, err)
-				select {
-				case <-ctx.Done():
+				if !sleep(ctx, 2*time.Second) {
 					return
-				case <-time.After(2 * time.Second):
 				}
 				continue
 			}
@@ -495,18 +513,37 @@ func (s *Server) work(ctx context.Context, remote worker.Remote) {
 			_ = tunnel.Close()
 			tunnel = nil
 		}
-		select {
-		case <-ctx.Done():
+		if !sleep(ctx, time.Second) {
 			return
-		case <-time.After(time.Second):
 		}
 	}
 }
+
+func (s *Server) connect(ctx context.Context, remote worker.Remote, bootstrap bool) (*worker.Tunnel, error) {
+	if bootstrap {
+		probe, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if err := worker.Bootstrap(probe, remote); err != nil {
+			return nil, err
+		}
+	}
+	return worker.Connect(ctx, remote, s.services)
+}
+
+func sleep(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
 func (s *Server) reconcileAll(ctx context.Context, host string, info worker.Info, client *http.Client) error {
 	for _, id := range s.unfinished() {
 		s.mu.Lock()
 		j := s.jobs[id].clone()
-		available := !s.busy[id] && s.fault == nil && !j.Terminal()
+		available := !s.busy[id] && s.fault == nil && !j.State.Terminal()
 		if available {
 			s.busy[id] = true
 		}
@@ -527,9 +564,9 @@ func (s *Server) reconcileAll(ctx context.Context, host string, info worker.Info
 
 // reconcile records each new reservation in info.Held so later queued jobs in the same pass see the reduced capacity.
 func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker.Info, client *http.Client) error {
-	if j.State == "queued" {
+	if j.State == Queued {
 		if j.stopKind() != "" {
-			j.State = "cancelled"
+			j.State = Cancelled
 			return s.save(j)
 		}
 		ready, err := s.dependencies(&j)
@@ -551,7 +588,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 			}
 		}
 		j.Attempts = append(j.Attempts, Attempt{ID: strings.ToLower(rand.Text()), Worker: host, AgentID: info.ID})
-		j.State = "dispatching"
+		j.State = Dispatching
 		if err := s.save(j); err != nil {
 			return err
 		}
@@ -561,7 +598,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 		return nil
 	}
 	if at.AgentID != info.ID {
-		j.State = "blocked"
+		j.State = Blocked
 		j.Error = "worker identity changed; reconcile the original attempt before retrying"
 		return s.save(j)
 	}
@@ -569,24 +606,24 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 	err := worker.Call(ctx, client, http.MethodGet, "/v1/attempts/"+at.ID, nil, &run)
 	var api *worker.HTTPError
 	if errors.As(err, &api) && api.Status == http.StatusNotFound {
-		if at.Seen {
-			j.State = "blocked"
+		if at.Remote != nil {
+			j.State = Blocked
 			j.Error = "worker lost an acknowledged attempt"
 			return s.save(j)
 		}
 		s.refresh(&j)
 		if j.stopKind() != "" {
-			if err := stopAttempt(ctx, client, at.ID, "cancel", j.StopReason); err != nil {
+			if err := worker.StopAttempt(ctx, client, at.ID, worker.Cancel, j.StopReason); err != nil {
 				return err
 			}
-			return s.finish(j, "cancel")
+			return s.finish(j, CancelFailure)
 		}
 		submission := worker.Submission{Spec: j.Spec}
 		if len(j.Spec.Secrets) > 0 {
 			err := s.store.Get("secret", j.ID, &submission.Secrets)
 			if errors.Is(err, sql.ErrNoRows) {
-				at.Failure = "infrastructure"
-				j.State = "failed"
+				at.Failure = InfrastructureFailure
+				j.State = Failed
 				j.Error = "job secrets are missing; resubmit it under a new ID"
 				return s.save(j)
 			}
@@ -597,7 +634,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 		err = worker.Call(ctx, client, http.MethodPut, "/v1/attempts/"+at.ID, submission, &run)
 		if errors.As(err, &api) && api.Status == http.StatusTooManyRequests {
 			j.Attempts = j.Attempts[:len(j.Attempts)-1]
-			j.State = "queued"
+			j.State = Queued
 			return s.save(j)
 		}
 		if err == nil {
@@ -607,24 +644,23 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 	if err != nil {
 		return err
 	}
-	unchanged := at.Seen && at.Remote != nil && at.Remote.State == run.State && at.Remote.UpdatedAt.Equal(run.UpdatedAt) && j.Error == run.Error
-	at.Seen = true
+	unchanged := at.Remote != nil && at.Remote.State == run.State && at.Remote.UpdatedAt.Equal(run.UpdatedAt) && j.Error == run.Error
 	at.Remote = &run
 	j.Error = run.Error
 	// A stop sent to the worker directly still ends the job, as a server-side stop does.
-	if run.StopRequested == "stop" {
+	if run.StopRequested == worker.Stop {
 		j.StopRequested = true
 		j.StopReason = cmp.Or(j.StopReason, run.StopReason)
 	}
 	if !run.State.Terminal() {
 		if kind := j.stopKind(); kind != "" && run.StopRequested == "" {
-			if err := stopAttempt(ctx, client, at.ID, kind, j.StopReason); err != nil {
+			if err := worker.StopAttempt(ctx, client, at.ID, kind, j.StopReason); err != nil {
 				return err
 			}
 		}
-		state := "running"
-		if run.State == "blocked" {
-			state = "blocked"
+		state := Running
+		if run.State == worker.Blocked {
+			state = Blocked
 		}
 		if unchanged && j.State == state {
 			return nil
@@ -632,20 +668,20 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 		j.State = state
 		return s.save(j)
 	}
-	if run.State != "finished" && (run.Result == nil || run.Result.State != "finished") {
-		class := "infrastructure"
-		if run.StopRequested == "timeout" {
-			class = "task"
-		} else if run.State == "cancelled" {
-			class = "cancel"
+	if run.Collectable() {
+		if err := s.collect(ctx, &j, at, run, info.ID, client); err != nil {
+			return err
 		}
-		return s.finish(j, class)
 	}
-	if run.Result == nil || run.Result.ExitCode == nil {
-		return errors.New("worker finished without a result")
+	return s.finish(j, failure(run))
+}
+
+func (s *Server) collect(ctx context.Context, j *Job, at *Attempt, run worker.Attempt, agent string, client *http.Client) error {
+	if run.Result.ExitCode == nil {
+		return errors.New("worker finished without an exit code")
 	}
-	j.State = "collecting"
-	if err := s.save(j); err != nil {
+	j.State = Collecting
+	if err := s.save(*j); err != nil {
 		return err
 	}
 	dest := filepath.Join(s.Root, "results", j.ID, at.ID)
@@ -660,21 +696,26 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 	if err != nil {
 		return err
 	}
-	if result.Request.ReservationID != worker.ReservationID(info.ID, at.ID) || result.ContainerID != run.Result.ContainerID || result.ImageID != j.Spec.Image || result.ExitCode == nil || *result.ExitCode != *run.Result.ExitCode {
+	if result.Request.ReservationID != worker.ReservationID(agent, at.ID) || result.ContainerID != run.Result.ContainerID || result.ImageID != j.Spec.Image || result.ExitCode == nil || *result.ExitCode != *run.Result.ExitCode {
 		return errors.New("downloaded result does not match the dispatched attempt")
 	}
 	at.ResultDir = dest
-	class := ""
-	if *result.ExitCode != 0 || run.StopRequested == "timeout" {
-		class = "task"
-	}
-	if run.State == "cancelled" && run.StopRequested != "timeout" {
-		class = "cancel"
-	}
-	return s.finish(j, class)
+	return nil
 }
-func stopAttempt(ctx context.Context, client *http.Client, id, kind, reason string) error {
-	return worker.Call(ctx, client, http.MethodPost, "/v1/attempts/"+id+"/"+kind, worker.StopRequest{Reason: reason}, nil)
+
+// failure counts a timeout against the task, although the worker is what stopped it.
+func failure(run worker.Attempt) Failure {
+	switch {
+	case run.StopRequested == worker.Timeout:
+		return TaskFailure
+	case run.State == worker.Cancelled:
+		return CancelFailure
+	case !run.Collectable():
+		return InfrastructureFailure
+	case *run.Result.ExitCode != 0:
+		return TaskFailure
+	}
+	return ""
 }
 
 func (s *Server) Handler() http.Handler { return s.handler(Local) }
@@ -687,11 +728,15 @@ func submitError(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), status)
 }
 
-func submitRoute[T, R any](limit int64, submit func(context.Context, T) (R, error)) http.HandlerFunc {
+func submitRoute[T interface{ nix() bool }, R any](caller Caller, limit int64, submit func(context.Context, T) (R, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req T
 		if err := worker.DecodeJSON(http.MaxBytesReader(w, r.Body, limit), &req); err != nil {
 			http.Error(w, err.Error(), 400)
+			return
+		}
+		if caller != Local && req.nix() {
+			submitError(w, ErrNixUntrusted)
 			return
 		}
 		result, err := submit(r.Context(), req)
@@ -712,7 +757,7 @@ func (s *Server) handler(caller Caller) http.Handler {
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", cancel(false))
 	mux.HandleFunc("POST /v1/workflows/{id}/cancel", cancel(true))
 	mux.HandleFunc("POST /v1/jobs/{id}/stop", worker.StopHandler(s.Stop, 500))
-	mux.HandleFunc("POST /v1/workflows", submitRoute(8<<20, func(ctx context.Context, flow Workflow) ([]Job, error) { return s.SubmitWorkflow(ctx, caller, flow) }))
+	mux.HandleFunc("POST /v1/workflows", submitRoute(caller, 8<<20, s.SubmitWorkflow))
 	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) { worker.WriteJSON(w, http.StatusOK, s.List()) })
 	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		j, ok := s.job(r.PathValue("id"))
@@ -722,7 +767,7 @@ func (s *Server) handler(caller Caller) http.Handler {
 		}
 		worker.WriteJSON(w, http.StatusOK, j)
 	})
-	mux.HandleFunc("POST /v1/jobs", submitRoute(1<<20, func(ctx context.Context, req Request) (Job, error) { return s.Submit(ctx, caller, req) }))
+	mux.HandleFunc("POST /v1/jobs", submitRoute(caller, 1<<20, s.Submit))
 	if caller == Local {
 		mux.HandleFunc("POST /v1/batches", s.serveBatch)
 		mux.HandleFunc("GET /v1/jobs/{id}/result", s.serveResult)

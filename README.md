@@ -207,7 +207,7 @@ Start `ordo server --state SERVER_DIR --workers workers.json` with 1–10 worker
     Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
     A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
   - A local Podman reference, resolved and exported from the server's Podman storage.
-  - An immutable `sha256:IMAGE_ID` together with an OCI `archive` path.
+  - `{"archive": FILE, "id": "sha256:IMAGE_ID"}`: an OCI archive on the server with its immutable image ID.
 - The server finds `nix` on its `PATH` (`--nix` overrides it) and `skopeo` through `--skopeo` or `ORDO_SKOPEO`.
   Stock `skopeo` lacks the `nix:` transport; run the server from `nix run .#ordo-server`, which sets `ORDO_SKOPEO`.
 - Only the private control socket accepts `{"nix": …}` images, since building an installable runs its code; the web UI's API refuses them.
@@ -325,7 +325,7 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
 `ordo queue workflow --state SERVER_DIR --file workflow.json` submits the entire graph atomically:
 
 ```json
-{"id":"example","image":"sha256:IMAGE_ID","archive":"/absolute/image.tar","tasks":[
+{"id":"example","image":{"archive":"/absolute/image.tar","id":"sha256:IMAGE_ID"},"tasks":[
   {"id":"produce","resources":{"cores":1,"memory_mib":128},"args":["-c","printf data > /outputs/value"]},
   {"id":"consume","from":{"data":"produce"},"resources":{"cores":1,"memory_mib":128},"args":["-c","cp /inputs/data/value /outputs/value"]},
   {"id":"sweep","depends_on":["produce"],"matrix":{"seed":["1","2"]},"resources":{"cores":1,"memory_mib":128},"timeout_seconds":60,"retry":{"task":1,"infrastructure":1},"args":["-c","printf {{seed}} > /outputs/seed"]}

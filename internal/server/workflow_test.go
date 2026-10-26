@@ -44,7 +44,7 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	req := Request{Image: image.Source{Ref: "sha256:" + strings.Repeat("a", 64)}, Archive: archive, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}}
+	req := Request{Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}}
 	a := Step{Request: req}
 	a.ID = "a"
 	a.Retry.Task = 1
@@ -55,14 +55,14 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	bad := flow
 	bad.Tasks = append([]Step(nil), flow.Tasks...)
 	bad.Tasks[1].Resources.Cores = 0
-	if _, err := s.SubmitWorkflow(context.Background(), Local, bad); err == nil || len(s.List()) != 0 {
+	if _, err := s.SubmitWorkflow(context.Background(), bad); err == nil || len(s.List()) != 0 {
 		t.Fatal("published partial workflow")
 	}
-	jobs, err := s.SubmitWorkflow(context.Background(), Local, flow)
+	jobs, err := s.SubmitWorkflow(context.Background(), flow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SubmitWorkflow(context.Background(), Local, flow); err != nil {
+	if _, err := s.SubmitWorkflow(context.Background(), flow); err != nil {
 		t.Fatal("idempotent workflow rejected", err)
 	}
 	j := jobs[0]

@@ -35,7 +35,7 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 	for _, valid := range []string{
 		`{` + base + `,"image":"localhost/klee:1"}`,
 		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"match":{"arch":"amd64"}}`,
-		`{` + base + `,"image":"sha256:` + strings.Repeat("a", 64) + `","archive":"/image.tar","secrets":{"TOKEN":"x"},"inputs":{"corpus":"/data"}}`,
+		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"},"secrets":{"TOKEN":"x"},"inputs":{"corpus":"/data"}}`,
 	} {
 		if err := validate(valid); err != nil {
 			t.Errorf("rejected %s: %v", valid, err)
@@ -50,6 +50,11 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{` + base + `,"image":"x","color":"red"}`,
 		`{` + base + `,"image":{"nix":"x","tag":"y"}}`,
 		`{` + base + `,"image":{"nix":"--option"}}`,
+		`{` + base + `,"image":{"archive":"/image.tar"}}`,
+		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:abc"}}`,
+		`{` + base + `,"image":{"archive":"","id":"sha256:` + strings.Repeat("a", 64) + `"}}`,
+		`{` + base + `,"image":{"nix":"/src#a","archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"}}`,
+		`{` + base + `,"image":"x","archive":"/image.tar"}`,
 		`{` + base + `,"image":"x","network":"host"}`,
 		`{` + base + `,"image":"x","cap_add":["SYS_ADMIN"]}`,
 		`{` + base + `,"image":"x","cap_add":["NET_ADMIN","NET_ADMIN"]}`,

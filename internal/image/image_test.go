@@ -60,6 +60,8 @@ func TestSourceJSON(t *testing.T) {
 	}{
 		{`"localhost/klee:1"`, Source{Ref: "localhost/klee:1"}, true},
 		{` {"nix": "/src#images.grep"} `, Source{Nix: "/src#images.grep"}, true},
+		{`{"archive":"/image.tar","id":"` + config + `"}`, Source{Archive: "/image.tar", ID: config}, true},
+		{`{"archive":"/image.tar","tag":"y"}`, Source{}, false},
 		{`null`, Source{}, true},
 		{`{"nix":""}`, Source{}, false},
 		{`{"nix":"x","tag":"y"}`, Source{}, false},
@@ -91,22 +93,23 @@ func TestSourceJSON(t *testing.T) {
 
 func TestSourceValidate(t *testing.T) {
 	for _, test := range []struct {
-		src     Source
-		archive string
-		ok      bool
+		src Source
+		ok  bool
 	}{
-		{Source{Ref: "localhost/x"}, "", true},
-		{Source{Ref: config}, "/image.tar", true},
-		{Source{Nix: "/src#x"}, "", true},
-		{Source{}, "", false},
-		{Source{Ref: "x", Nix: "y"}, "", false},
-		{Source{Nix: "/src#x"}, "/image.tar", false},
-		{Source{Nix: "--option"}, "", false},
-		{Source{Nix: "a\nb"}, "", false},
-		{Source{Nix: strings.Repeat("x", MaxInstallableBytes+1)}, "", false},
+		{Source{Ref: "localhost/x"}, true},
+		{Source{Archive: "/image.tar", ID: config}, true},
+		{Source{Nix: "/src#x"}, true},
+		{Source{}, false},
+		{Source{Ref: "x", Nix: "y"}, false},
+		{Source{Nix: "/src#x", Archive: "/image.tar"}, false},
+		{Source{Archive: "/image.tar", ID: "localhost/x:1"}, false},
+		{Source{ID: config}, false},
+		{Source{Nix: "--option"}, false},
+		{Source{Nix: "a\nb"}, false},
+		{Source{Nix: strings.Repeat("x", MaxInstallableBytes+1)}, false},
 	} {
-		if err := test.src.Validate(test.archive); (err == nil) != test.ok {
-			t.Fatalf("%+v with %q: %v", test.src, test.archive, err)
+		if err := test.src.Validate(); (err == nil) != test.ok {
+			t.Fatalf("%+v: %v", test.src, err)
 		}
 	}
 }
@@ -146,7 +149,7 @@ func TestResolverCachesNixExportsByStorePath(t *testing.T) {
 	r := newResolver(t, fake)
 	ctx := context.Background()
 	src := Source{Nix: "/src#images.grep"}
-	first, err := r.Resolve(ctx, src, "")
+	first, err := r.Resolve(ctx, src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,14 +163,14 @@ func TestResolverCachesNixExportsByStorePath(t *testing.T) {
 	if export := fake.Argv("skopeo"); !slices.Equal(export[:3], []string{"--insecure-policy", "copy", "nix:/nix/store/aaaa-image.json"}) {
 		t.Fatalf("skopeo argv %q", export)
 	}
-	again, err := r.Resolve(ctx, src, "")
+	again, err := r.Resolve(ctx, src)
 	if err != nil || again.Blob != first.Blob || fake.Exports.Load() != 1 || fake.Builds.Load() != 2 {
 		t.Fatalf("cache hit must skip skopeo: %+v %v exports=%d", again, err, fake.Exports.Load())
 	}
 	if err := os.Remove(filepath.Join(r.Blobs, first.Blob)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Resolve(ctx, src, ""); err != nil || fake.Exports.Load() != 2 {
+	if _, err := r.Resolve(ctx, src); err != nil || fake.Exports.Load() != 2 {
 		t.Fatalf("a lost blob must be exported again: %v exports=%d", err, fake.Exports.Load())
 	}
 }
@@ -178,13 +181,13 @@ func TestResolverSharesBuildsAndBoundsThem(t *testing.T) {
 	r := newResolver(t, fake)
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := r.Resolve(gone, Source{Nix: "/src#a"}, ""); !errors.Is(err, context.Canceled) {
+	if _, err := r.Resolve(gone, Source{Nix: "/src#a"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled waiter: %v", err)
 	}
 	var wg sync.WaitGroup
 	for i := range 3 * builds {
 		wg.Go(func() {
-			if _, err := r.Resolve(context.Background(), Source{Nix: fmt.Sprintf("/src#%c", 'a'+i%(2*builds))}, ""); err != nil {
+			if _, err := r.Resolve(context.Background(), Source{Nix: fmt.Sprintf("/src#%c", 'a'+i%(2*builds))}); err != nil {
 				t.Error(err)
 			}
 		})
@@ -207,24 +210,29 @@ func TestResolverSharesBuildsAndBoundsThem(t *testing.T) {
 func TestResolverLocalSources(t *testing.T) {
 	r := newResolver(t, fakeNix())
 	root := t.TempDir()
-	r.podman = func(_ context.Context, reference, dest string) (string, error) {
+	saves := 0
+	r.imageID = func(_ context.Context, reference string) (string, error) {
 		if reference != "localhost/x:1" {
-			t.Errorf("exported %s", reference)
+			t.Errorf("inspected %s", reference)
 		}
-		return config, os.WriteFile(dest, []byte("podman"), 0o600)
+		return config, nil
 	}
-	exported, err := r.Resolve(context.Background(), Source{Ref: "localhost/x:1"}, "")
+	r.save = func(_ context.Context, id, dest string) error {
+		saves++
+		return os.WriteFile(dest, []byte("podman"), 0o600)
+	}
+	exported, err := r.Resolve(context.Background(), Source{Ref: "localhost/x:1"})
 	if err != nil || exported.ID != config || exported.Origin != nil {
 		t.Fatalf("podman source: %+v %v", exported, err)
+	}
+	if again, err := r.Resolve(context.Background(), Source{Ref: "localhost/x:1"}); err != nil || again != exported || saves != 1 {
+		t.Fatalf("an exported image ID must be reused: %+v %v saves=%d", again, err, saves)
 	}
 	archive := filepath.Join(root, "image.tar")
 	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Resolve(context.Background(), Source{Ref: "localhost/x:1"}, archive); err == nil {
-		t.Fatal("an archive needs an immutable image ID")
-	}
-	if got, err := r.Resolve(context.Background(), Source{Ref: config}, archive); err != nil || got.ID != config || got.Blob == exported.Blob {
+	if got, err := r.Resolve(context.Background(), Source{Archive: archive, ID: config}); err != nil || got.ID != config || got.Blob == exported.Blob {
 		t.Fatalf("archive source: %+v %v", got, err)
 	}
 }

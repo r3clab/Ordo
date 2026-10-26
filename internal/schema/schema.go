@@ -4,6 +4,7 @@ package schema
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -74,16 +75,15 @@ func Write(dir string) error {
 }
 
 func imageSchema() *jsonschema.Schema {
+	closed := func(properties map[string]*jsonschema.Schema) *jsonschema.Schema {
+		return &jsonschema.Schema{Type: "object", Properties: properties, Required: slices.Sorted(maps.Keys(properties)), AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}}}
+	}
 	return &jsonschema.Schema{
-		Description: `A local Podman reference, or {"nix": INSTALLABLE} for a nix2container image the server builds.`,
+		Description: `A local Podman reference, {"nix": INSTALLABLE} for a nix2container image the server builds, or {"archive": FILE, "id": "sha256:IMAGE_ID"} for an OCI archive on the server.`,
 		OneOf: []*jsonschema.Schema{
 			{Type: "string", MinLength: jsonschema.Ptr(1)},
-			{
-				Type:                 "object",
-				Properties:           map[string]*jsonschema.Schema{"nix": {Type: "string", MaxLength: jsonschema.Ptr(image.MaxInstallableBytes), Pattern: image.InstallablePattern}},
-				Required:             []string{"nix"},
-				AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}},
-			},
+			closed(map[string]*jsonschema.Schema{"nix": {Type: "string", MaxLength: jsonschema.Ptr(image.MaxInstallableBytes), Pattern: image.InstallablePattern}}),
+			closed(map[string]*jsonschema.Schema{"archive": {Type: "string", MinLength: jsonschema.Ptr(1)}, "id": {Type: "string", Pattern: task.ImageIDPattern}}),
 		},
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/image"
-	"github.com/r3clab/Ordo/internal/state"
+	"github.com/r3clab/Ordo/internal/task"
 	"github.com/r3clab/Ordo/internal/worker"
 	"maps"
 	"path/filepath"
@@ -36,18 +36,21 @@ func (r RetryPolicy) validate() error {
 	}
 	return nil
 }
-func (r RetryPolicy) infra() int {
-	if r.Infrastructure == nil {
+
+func (r RetryPolicy) limit(class Failure) int {
+	switch {
+	case class == TaskFailure:
+		return r.Task
+	case r.Infrastructure == nil:
 		return 1
 	}
 	return *r.Infrastructure
 }
 
 type Workflow struct {
-	ID      string       `json:"id"`
-	Image   image.Source `json:"image,omitzero"`
-	Archive string       `json:"archive,omitempty"`
-	Tasks   []Step       `json:"tasks"`
+	ID    string       `json:"id"`
+	Image image.Source `json:"image,omitzero"`
+	Tasks []Step       `json:"tasks"`
 }
 type Step struct {
 	Request
@@ -55,6 +58,10 @@ type Step struct {
 	From       map[string]string   `json:"from,omitempty"`
 	Matrix     map[string][]string `json:"matrix,omitempty"`
 	Parameters map[string]string   `json:"-"`
+}
+
+func (w Workflow) nix() bool {
+	return w.Image.IsNix() || slices.ContainsFunc(w.Tasks, func(step Step) bool { return step.Image.IsNix() })
 }
 
 func expand(w Workflow) ([]Step, error) {
@@ -68,63 +75,26 @@ func expand(w Workflow) ([]Step, error) {
 		if !worker.ValidName(step.ID) || len(step.ID) > MaxStepID || groups[step.ID] != nil {
 			return nil, fmt.Errorf("task IDs must be unique and 1..%d characters", MaxStepID)
 		}
-		combos := []map[string]string{{}}
-		for _, key := range slices.Sorted(maps.Keys(step.Matrix)) {
-			values := step.Matrix[key]
-			if !worker.ValidName(key) || len(values) == 0 || len(values) > MaxWorkflowTasks || len(combos) > MaxWorkflowTasks/len(values) {
-				return nil, errors.New("invalid or oversized parameter matrix")
-			}
-			var next []map[string]string
-			for _, params := range combos {
-				for _, value := range values {
-					p := maps.Clone(params)
-					p[key] = value
-					next = append(next, p)
-				}
-			}
-			combos = next
+		instances, err := step.instances()
+		if err != nil {
+			return nil, err
 		}
-		for i, params := range combos {
-			task := step
-			task.Parameters = params
-			task.Args = slices.Clone(step.Args)
-			task.From = maps.Clone(step.From)
-			if len(step.Matrix) > 0 {
-				task.ID = fmt.Sprintf("%s-%d", step.ID, i)
-			}
-			if ids[task.ID] {
+		for _, t := range instances {
+			if ids[t.ID] {
 				return nil, errors.New("expanded task IDs collide")
 			}
-			ids[task.ID] = true
-			groups[step.ID] = append(groups[step.ID], task.ID)
-			replacements := []string{}
-			for _, key := range slices.Sorted(maps.Keys(params)) {
-				replacements = append(replacements, "{{"+key+"}}", params[key])
+			ids[t.ID] = true
+			groups[step.ID] = append(groups[step.ID], t.ID)
+			if t.Image.IsZero() {
+				t.Image = w.Image
 			}
-			replacer := strings.NewReplacer(replacements...)
-			for i, arg := range task.Args {
-				arg = replacer.Replace(arg)
-				if strings.Contains(arg, "{{") {
-					return nil, errors.New("unknown parameter placeholder")
-				}
-				task.Args[i] = arg
-			}
-			if task.Image.IsZero() {
-				task.Image = w.Image
-				if task.Archive == "" {
-					task.Archive = w.Archive
-				}
-			}
-			if err := task.Retry.validate(); err != nil {
-				return nil, err
-			}
-			expanded = append(expanded, task)
-			if len(expanded) > MaxWorkflowTasks {
-				return nil, fmt.Errorf("expanded workflow exceeds %d tasks", MaxWorkflowTasks)
-			}
+			expanded = append(expanded, t)
+		}
+		if len(expanded) > MaxWorkflowTasks {
+			return nil, fmt.Errorf("expanded workflow exceeds %d tasks", MaxWorkflowTasks)
 		}
 	}
-	resolve := func(id string) []string {
+	graph, err := link(w.ID, expanded, func(id string) []string {
 		if group, ok := groups[id]; ok {
 			return group
 		}
@@ -132,9 +102,67 @@ func expand(w Workflow) ([]Step, error) {
 			return []string{id}
 		}
 		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	return expanded, acyclic(graph)
+}
+
+func (step Step) instances() ([]Step, error) {
+	combos := []map[string]string{{}}
+	for _, key := range slices.Sorted(maps.Keys(step.Matrix)) {
+		values := step.Matrix[key]
+		if !worker.ValidName(key) || len(values) == 0 || len(values) > MaxWorkflowTasks || len(combos) > MaxWorkflowTasks/len(values) {
+			return nil, errors.New("invalid or oversized parameter matrix")
+		}
+		var next []map[string]string
+		for _, params := range combos {
+			for _, value := range values {
+				p := maps.Clone(params)
+				p[key] = value
+				next = append(next, p)
+			}
+		}
+		combos = next
+	}
+	instances := make([]Step, len(combos))
+	for i, params := range combos {
+		t := step
+		t.Parameters = params
+		t.From = maps.Clone(step.From)
+		if len(step.Matrix) > 0 {
+			t.ID = fmt.Sprintf("%s-%d", step.ID, i)
+		}
+		var err error
+		if t.Args, err = substitute(step.Args, params); err != nil {
+			return nil, err
+		}
+		instances[i] = t
+	}
+	return instances, nil
+}
+
+func substitute(args []string, params map[string]string) ([]string, error) {
+	var pairs []string
+	for _, key := range slices.Sorted(maps.Keys(params)) {
+		pairs = append(pairs, "{{"+key+"}}", params[key])
+	}
+	replacer := strings.NewReplacer(pairs...)
+	args = slices.Clone(args)
+	for i, arg := range args {
+		args[i] = replacer.Replace(arg)
+		if strings.Contains(args[i], "{{") {
+			return nil, errors.New("unknown parameter placeholder")
+		}
+	}
+	return args, nil
+}
+
+func link(workflow string, tasks []Step, resolve func(id string) []string) (map[string][]string, error) {
+	scoped := func(id string) string { return workflow + "--" + id }
 	graph := map[string][]string{}
-	for i, step := range expanded {
+	for i, step := range tasks {
 		deps := []string{}
 		for _, dep := range step.Depends {
 			targets := resolve(dep)
@@ -155,43 +183,49 @@ func expand(w Workflow) ([]Step, error) {
 				return nil, errors.New("dependency input must select exactly one expanded task")
 			}
 			deps = append(deps, targets[0])
-			step.From[name] = w.ID + "--" + targets[0]
+			step.From[name] = scoped(targets[0])
 		}
 		slices.Sort(deps)
 		deps = slices.Compact(deps)
 		graph[step.ID] = deps
 		step.Depends = nil
 		for _, dep := range deps {
-			step.Depends = append(step.Depends, w.ID+"--"+dep)
+			step.Depends = append(step.Depends, scoped(dep))
 		}
-		step.ID = w.ID + "--" + step.ID
-		expanded[i] = step
+		step.ID = scoped(step.ID)
+		tasks[i] = step
 	}
+	return graph, nil
+}
+
+func acyclic(graph map[string][]string) error {
+	const visiting, done = 1, 2
 	visited := map[string]int{}
 	var visit func(string) error
 	visit = func(id string) error {
-		if visited[id] == 1 {
+		switch visited[id] {
+		case visiting:
 			return errors.New("workflow dependency cycle")
-		}
-		if visited[id] == 2 {
+		case done:
 			return nil
 		}
-		visited[id] = 1
+		visited[id] = visiting
 		for _, dep := range graph[id] {
 			if err := visit(dep); err != nil {
 				return err
 			}
 		}
-		visited[id] = 2
+		visited[id] = done
 		return nil
 	}
 	for id := range graph {
 		if err := visit(id); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return expanded, nil
+	return nil
 }
+
 func jobKey(j Job) string {
 	data, _ := json.Marshal(struct {
 		Spec       any
@@ -204,7 +238,7 @@ func jobKey(j Job) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
-func (s *Server) SubmitWorkflow(ctx context.Context, caller Caller, w Workflow) ([]Job, error) {
+func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) {
 	steps, err := expand(w)
 	if err != nil {
 		return nil, err
@@ -215,7 +249,7 @@ func (s *Server) SubmitWorkflow(ctx context.Context, caller Caller, w Workflow) 
 	for i, step := range steps {
 		requests[i] = step.Request
 	}
-	st := s.stage(ctx, caller, requests...)
+	st := s.stage(ctx, requests...)
 	for _, step := range steps {
 		j, err := s.prepare(ctx, step.Request, st)
 		if err != nil {
@@ -258,12 +292,7 @@ func (s *Server) SubmitWorkflow(ctx context.Context, caller Caller, w Workflow) 
 		}
 		return jobs, nil
 	}
-	if len(secrets) > 0 {
-		if err := state.PutMany(s.store, "secret", secrets); err != nil {
-			return nil, err
-		}
-	}
-	if err := s.commitLocked(jobs...); err != nil {
+	if err := s.commitLocked(secrets, jobs...); err != nil {
 		return nil, err
 	}
 	return jobs, nil
@@ -281,21 +310,21 @@ func (s *Server) dependencies(j *Job) (bool, error) {
 	}
 	s.mu.Unlock()
 	for _, dep := range deps {
-		if dep.Terminal() && dep.State != "succeeded" {
-			j.State = "skipped"
+		if dep.State.Terminal() && dep.State != Succeeded {
+			j.State = Skipped
 			j.Error = "dependency did not succeed"
 			return false, s.save(*j)
 		}
 	}
 	for _, dep := range deps {
-		if dep.State != "succeeded" {
+		if dep.State != Succeeded {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-// importOutputs runs only once a worker fits, so a queued job never re-copies outputs per tick.
+// importOutputs runs only once a worker fits, so a queued job never re-imports outputs per tick.
 func (s *Server) importOutputs(j *Job) error {
 	if len(j.Attempts) > 0 {
 		return nil
@@ -317,7 +346,8 @@ func (s *Server) importOutputs(j *Job) error {
 			return errors.New("dependency has no output identity")
 		}
 		hash := at.Remote.Result.OutputsSHA256
-		if _, err := content.PutFile(s.images.Blobs, filepath.Join(at.ResultDir, "outputs.tar"), hash); err != nil {
+		// Collection verified the archive against this digest, and nothing rewrites a result directory.
+		if err := content.Link(s.images.Blobs, filepath.Join(at.ResultDir, task.OutputsArchive), hash); err != nil {
 			return err
 		}
 		j.Spec.Inputs[name] = hash
@@ -346,46 +376,36 @@ func (s *Server) requestStop(id string, workflow bool, reason string, mark func(
 		if (!workflow && key != id) || (workflow && j.Workflow != id) {
 			continue
 		}
-		if j.Terminal() {
+		if j.State.Terminal() {
 			continue
 		}
 		mark(&j)
 		j.StopReason = cmp.Or(j.StopReason, reason)
-		if j.State == "queued" && !s.busy[key] {
-			j.State = "cancelled"
+		if j.State == Queued && !s.busy[key] {
+			j.State = Cancelled
 		}
 		changed = append(changed, j)
 	}
-	if len(changed) == 0 {
-		return nil
-	}
-	return s.commitLocked(changed...)
+	return s.commitLocked(nil, changed...)
 }
-func (s *Server) finish(j Job, class string) error {
+func (s *Server) finish(j Job, class Failure) error {
 	s.refresh(&j)
-	at := &j.Attempts[len(j.Attempts)-1]
-	at.Failure = class
-	if j.CancelRequested || class == "cancel" {
-		j.State = "cancelled"
-		return s.save(j)
-	}
-	if class == "" {
-		j.State = "succeeded"
-		return s.save(j)
-	}
+	j.Attempts[len(j.Attempts)-1].Failure = class
 	count := 0
-	for _, attempt := range j.Attempts {
-		if attempt.Failure == class {
+	for _, at := range j.Attempts {
+		if at.Failure == class {
 			count++
 		}
 	}
-	limit := j.Retry.Task
-	if class == "infrastructure" {
-		limit = j.Retry.infra()
-	}
-	j.State = "failed"
-	if count <= limit && !j.StopRequested {
-		j.State = "queued"
+	switch {
+	case j.CancelRequested || class == CancelFailure:
+		j.State = Cancelled
+	case class == "":
+		j.State = Succeeded
+	case j.StopRequested || count > j.Retry.limit(class):
+		j.State = Failed
+	default:
+		j.State = Queued
 	}
 	return s.save(j)
 }

@@ -11,11 +11,16 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"slices"
 
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
 const maxBatch = 10000
+
+// A batch commits in chunks: one transaction per job would fsync per line, and one for the whole
+// batch would report nothing until the last job is prepared.
+const batchChunk = 256
 
 type BatchEntry struct {
 	Line    int
@@ -26,7 +31,7 @@ type BatchEntry struct {
 type BatchResult struct {
 	ID       string `json:"id,omitempty"`
 	Line     int    `json:"line,omitempty"`
-	State    string `json:"state,omitempty"`
+	State    State  `json:"state,omitempty"`
 	Existing bool   `json:"existing,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
@@ -53,7 +58,7 @@ func ParseBatch(r io.Reader) ([]BatchEntry, error) {
 	return entries, scanner.Err()
 }
 
-func (s *Server) SubmitBatch(ctx context.Context, caller Caller, entries []BatchEntry) iter.Seq[BatchResult] {
+func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq[BatchResult] {
 	return func(yield func(BatchResult) bool) {
 		var requests []Request
 		for _, e := range entries {
@@ -61,24 +66,39 @@ func (s *Server) SubmitBatch(ctx context.Context, caller Caller, entries []Batch
 				requests = append(requests, e.Request)
 			}
 		}
-		st := s.stage(ctx, caller, requests...)
-		for _, e := range entries {
-			result := BatchResult{ID: e.Request.ID, Line: e.Line}
-			err := cmp.Or(e.Err, ctx.Err())
-			if err == nil {
+		st := s.stage(ctx, requests...)
+		for chunk := range slices.Chunk(entries, batchChunk) {
+			results := make([]BatchResult, len(chunk))
+			var jobs []Job
+			var secrets []map[string]string
+			var slots []int
+			for i, e := range chunk {
+				results[i] = BatchResult{ID: e.Request.ID, Line: e.Line}
+				err := cmp.Or(e.Err, ctx.Err())
 				var j Job
-				if j, err = s.prepare(ctx, e.Request, st); err == nil {
-					j, result.Existing, err = s.admit(j, e.Request.Secrets)
-				}
 				if err == nil {
-					result.State = j.State
+					j, err = s.prepare(ctx, e.Request, st)
+				}
+				if err != nil {
+					results[i].Error = err.Error()
+					continue
+				}
+				jobs = append(jobs, j)
+				secrets = append(secrets, e.Request.Secrets)
+				slots = append(slots, i)
+			}
+			for k, admitted := range s.admit(jobs, secrets) {
+				result := &results[slots[k]]
+				if admitted.err != nil {
+					result.Error = admitted.err.Error()
+				} else {
+					result.State, result.Existing = admitted.job.State, admitted.existing
 				}
 			}
-			if err != nil {
-				result.Error = err.Error()
-			}
-			if !yield(result) {
-				return
+			for _, result := range results {
+				if !yield(result) {
+					return
+				}
 			}
 		}
 	}
@@ -93,7 +113,7 @@ func (s *Server) serveBatch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	flush := http.NewResponseController(w)
 	encoder := json.NewEncoder(w)
-	for result := range s.SubmitBatch(r.Context(), Local, entries) {
+	for result := range s.SubmitBatch(r.Context(), entries) {
 		if encoder.Encode(result) != nil || flush.Flush() != nil {
 			return
 		}

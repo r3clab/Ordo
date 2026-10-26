@@ -63,7 +63,6 @@ export interface Attempt {
   id: string;
   worker: string;
   agent_id: string;
-  seen: boolean;
   remote?: RemoteAttempt;
   result_dir?: string;
   failure?: string;

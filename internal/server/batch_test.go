@@ -47,7 +47,7 @@ func TestBatchSharesNixImagesAndContinuesPastBadLines(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return slices.Collect(s.SubmitBatch(context.Background(), Local, entries))
+		return slices.Collect(s.SubmitBatch(context.Background(), entries))
 	}
 	results := submit()
 	var lines, failed []int
@@ -75,20 +75,20 @@ func TestBatchSharesNixImagesAndContinuesPastBadLines(t *testing.T) {
 
 func TestUntrustedHandlerRefusesNixBuilds(t *testing.T) {
 	s, fake := nixServer(t)
-	for _, test := range []struct{ method, path, body string }{
-		{http.MethodPost, "/v1/jobs", `{"id":"a","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}`},
-		{http.MethodPost, "/v1/workflows", `{"id":"w","tasks":[{"id":"t","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}]}`},
-		{http.MethodPost, "/v1/batches", `{"id":"a","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}`},
-		{http.MethodGet, "/v1/jobs/a/result", ``},
+	for _, test := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{http.MethodPost, "/v1/jobs", `{"id":"a","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}`, http.StatusForbidden},
+		{http.MethodPost, "/v1/workflows", `{"id":"w","tasks":[{"id":"t","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}]}`, http.StatusForbidden},
+		{http.MethodPost, "/v1/batches", `{"id":"a","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}`, http.StatusNotFound},
+		{http.MethodGet, "/v1/jobs/a/result", ``, http.StatusNotFound},
 	} {
 		w := httptest.NewRecorder()
 		s.handler(Web).ServeHTTP(w, httptest.NewRequest(test.method, test.path, strings.NewReader(test.body)))
-		if w.Code != http.StatusForbidden && w.Code != http.StatusNotFound {
+		if w.Code != test.want {
 			t.Fatalf("%s %s: HTTP %d %s", test.method, test.path, w.Code, w.Body)
 		}
-	}
-	if _, err := s.Submit(context.Background(), Web, Request{ID: "a", Image: image.Source{Nix: "/src#grep"}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}}); !errors.Is(err, ErrNixUntrusted) {
-		t.Fatalf("web caller submitted a nix image: %v", err)
 	}
 	if fake.Builds.Load() != 0 {
 		t.Fatal("untrusted request ran nix")

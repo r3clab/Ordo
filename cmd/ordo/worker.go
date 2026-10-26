@@ -153,9 +153,10 @@ func workerCommand(ctx context.Context, args []string, out io.Writer) error {
 		}
 		result = run
 	case "cancel", "stop":
-		if err := worker.Call(ctx, tunnel.Client, http.MethodPost, attempt+"/"+operation, worker.StopRequest{Reason: reason}, &result); err != nil {
+		if err := worker.StopAttempt(ctx, tunnel.Client, id, worker.StopKind(operation), reason); err != nil {
 			return err
 		}
+		result = map[string]bool{"requested": true}
 	case "get":
 		var run worker.Attempt
 		if err := worker.Call(ctx, tunnel.Client, http.MethodGet, attempt, nil, &run); err != nil {

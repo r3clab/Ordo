@@ -7,7 +7,7 @@
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
     },
     "image": {
-      "description": "A local Podman reference, or {\"nix\": INSTALLABLE} for a nix2container image the server builds.",
+      "description": "A local Podman reference, {\"nix\": INSTALLABLE} for a nix2container image the server builds, or {\"archive\": FILE, \"id\": \"sha256:IMAGE_ID\"} for an OCI archive on the server.",
       "oneOf": [
         {
           "type": "string",
@@ -26,11 +26,26 @@
             "nix"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "archive": {
+              "type": "string",
+              "minLength": 1
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "archive",
+            "id"
+          ],
+          "additionalProperties": false
         }
       ]
-    },
-    "archive": {
-      "type": "string"
     },
     "tasks": {
       "type": "array",
@@ -43,7 +58,7 @@
             "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
           },
           "image": {
-            "description": "A local Podman reference, or {\"nix\": INSTALLABLE} for a nix2container image the server builds.",
+            "description": "A local Podman reference, {\"nix\": INSTALLABLE} for a nix2container image the server builds, or {\"archive\": FILE, \"id\": \"sha256:IMAGE_ID\"} for an OCI archive on the server.",
             "oneOf": [
               {
                 "type": "string",
@@ -62,11 +77,26 @@
                   "nix"
                 ],
                 "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "archive": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "archive",
+                  "id"
+                ],
+                "additionalProperties": false
               }
             ]
-          },
-          "archive": {
-            "type": "string"
           },
           "inputs": {
             "type": "object",

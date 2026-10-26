@@ -57,7 +57,7 @@ func TestSubmitStreamsResultsAndIsIdempotent(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("image"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	job := `"image":"sha256:` + strings.Repeat("a", 64) + `","archive":"` + archive + `","resources":{"cores":1,"memory_mib":128}`
+	job := `"image":{"archive":"` + archive + `","id":"sha256:` + strings.Repeat("a", 64) + `"},"resources":{"cores":1,"memory_mib":128}`
 	jobs := `{"id":"a",` + job + "}\n" + `{"id":"b",` + job + "}\n" + `{"id":"bad id",` + job + "}\n"
 	submit := func() ([]server.BatchResult, error) {
 		stdin = strings.NewReader(jobs)
@@ -89,9 +89,9 @@ func TestFetchWaitsAndSkipsExistingDirectories(t *testing.T) {
 	var polls atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
-		state := "running"
+		state := server.Running
 		if polls.Add(1) > 1 {
-			state = "succeeded"
+			state = server.Succeeded
 		}
 		worker.WriteJSON(w, 200, []server.Job{{ID: "a", State: state}, {ID: "b", State: "succeeded"}, {ID: "c", State: "failed"}})
 	})

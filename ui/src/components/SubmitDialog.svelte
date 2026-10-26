@@ -8,12 +8,11 @@
   let { open = $bindable(false), onsubmitted }: { open: boolean; onsubmitted: (jobs: Job[], workflow: boolean) => void } = $props();
 
   const templates = {
-    jobs: JSON.stringify({ id: "example", image: "sha256:IMAGE_ID", archive: "/absolute/path/image.tar", resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf hello > /outputs/message"] }, null, 2),
+    jobs: JSON.stringify({ id: "example", image: { archive: "/absolute/path/image.tar", id: "sha256:IMAGE_ID" }, resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf hello > /outputs/message"] }, null, 2),
     workflows: JSON.stringify(
       {
         id: "example-flow",
-        image: "sha256:IMAGE_ID",
-        archive: "/absolute/path/image.tar",
+        image: { archive: "/absolute/path/image.tar", id: "sha256:IMAGE_ID" },
         tasks: [
           { id: "prepare", resources: { cores: 1, memory_mib: 128 }, args: ["-c", "echo data > /outputs/data"] },
           { id: "evaluate", depends_on: ["prepare"], from: { data: "prepare" }, matrix: { seed: ["1", "2"] }, resources: { cores: 1, memory_mib: 128 }, args: ["-c", "cat /inputs/data/data; echo seed {{seed}}"] },
@@ -112,7 +111,7 @@
         <textarea id="spec" bind:value={text} spellcheck="false" rows="16" class="input resize-y font-mono text-xs leading-relaxed"></textarea>
       </label>
       <p class="text-xs {problem ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}">{problem || "Valid JSON"}</p>
-      <p class="muted text-xs">Archive and input paths refer to files on the server, not this browser. Without an archive, the image reference is exported from the server's local Podman.</p>
+      <p class="muted text-xs">Archive and input paths refer to files on the server, not this browser. A plain image reference is exported from the server's local Podman.</p>
       {#if error}<p role="alert" class="alert">{error}</p>{/if}
     </div>
     <footer class="flex justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-zinc-800">

@@ -34,7 +34,7 @@ jq -n --arg a "$root_a" --arg b "$root_b" --arg binary "$ORDO_TEST_BINARY" '[{ho
 start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/workers.json" --listen 127.0.0.1:0 >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json" 2>/dev/null; then return; fi; sleep 0.2; done; return 1; }
 start
 for id in first second; do
- jq -nc --arg id "$id" --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:$id,image:$image,archive:$archive,resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
+ jq -nc --arg id "$id" --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:$id,image:{archive:$archive,id:$image},resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
  "$ORDO_TEST_BINARY" submit --state "$work/server" --file "$work/$id.json" > "$work/$id-submitted.json"
 done
 for ((i=0;i<90;i++)); do
@@ -55,7 +55,7 @@ for ((i=0;i<90;i++)); do
 done
 jq -e 'length==2 and all(.state=="succeeded" and (.attempts|length)==1)' "$work/final.json" >/dev/null
 while IFS= read -r result; do test "$(<"$result/outputs/result")" = done; done < <(jq -r '.[].attempts[-1].result_dir' "$work/final.json")
-jq -n --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:"dag",image:$image,archive:$archive,tasks:[
+jq -n --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:"dag",image:{archive:$archive,id:$image},tasks:[
  {id:"produce",resources:{cores:1,memory_mib:128},args:["-c","printf source > /outputs/value"]},
  {id:"consume",resources:{cores:1,memory_mib:128},from:{upstream:"produce"},args:["-c","cp /inputs/upstream/value /outputs/value"]},
  {id:"sweep",resources:{cores:1,memory_mib:128},depends_on:["produce"],matrix:{seed:["3","5"]},args:["-c","printf {{seed}} > /outputs/seed"]},

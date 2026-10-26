@@ -69,7 +69,7 @@ func TestWebAuthenticationSubmissionCancellationAndLogs(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := json.Marshal(Request{ID: "example", Archive: archive, Image: image.Source{Ref: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}})
+	data, _ := json.Marshal(Request{ID: "example", Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}})
 	w := request("POST", "/v1/jobs", token, "", "http://127.0.0.1:7331", data)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
