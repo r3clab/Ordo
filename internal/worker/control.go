@@ -71,13 +71,11 @@ func (a *Agent) enforceStops() {
 			continue
 		}
 		a.stopping[id] = true
-		a.wg.Add(1)
-		go func() {
-			defer a.wg.Done()
+		a.wg.Go(func() {
 			defer func() { a.mu.Lock(); delete(a.stopping, id); a.mu.Unlock() }()
 			ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
 			defer cancel()
 			_ = task.Stop(ctx, a.runDir(id))
-		}()
+		})
 	}
 }

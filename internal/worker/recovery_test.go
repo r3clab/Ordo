@@ -35,9 +35,8 @@ func TestReconcileCompletedExecutionWithoutPodman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := task.Record{Request: task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, OutputDir: a.runDir(run.ID), ReservationID: a.info.ID + "/" + run.ID}, ContainerName: "ordo-completed", ContainerID: strings.Repeat("b", 64), ImageID: run.Spec.Image, State: "finished", ContainerRemoved: true, ExitCode: new(7)}
+	r := task.Record{Request: task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, OutputDir: a.runDir(run.ID), ReservationID: ReservationID(a.info.ID, run.ID)}, ContainerName: "ordo-completed", ContainerID: strings.Repeat("b", 64), ImageID: run.Spec.Image, State: "finished", ContainerRemoved: true, ExitCode: new(7)}
 	savedRun(t, a, run, r)
-	a.wg.Add(1)
 	a.execute(run, false)
 	if got := a.attempts[run.ID]; got.State != "finished" || got.Result == nil || *got.Result.ExitCode != 7 {
 		t.Fatalf("lost completed execution: %+v", got)
@@ -63,7 +62,6 @@ func TestAmbiguousLaunchAndMismatchedRecordKeepReservation(t *testing.T) {
 		if mismatched {
 			savedRun(t, a, run, task.Record{ContainerName: "ordo-other", State: "preparing"})
 		}
-		a.wg.Add(1)
 		a.execute(run, false)
 		if got := a.attempts[run.ID]; got.State != "blocked" {
 			t.Fatalf("ambiguous task released: %+v", got)

@@ -45,7 +45,6 @@ func TestFailedLaunchWithoutSavedIdentityKeepsReservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.wg.Add(1)
 	a.execute(run, true)
 	if got := a.attempts[run.ID]; got.State != "blocked" || got.Result == nil || got.Result.ImageID == "" || got.Result.ContainerID != "" {
 		t.Fatalf("lost ambiguous reservation: %+v", got)

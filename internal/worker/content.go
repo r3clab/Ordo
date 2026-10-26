@@ -3,9 +3,7 @@ package worker
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/task"
 	"io"
@@ -45,7 +43,7 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			return
 		}
 		file := filepath.Join(blobs, hash)
-		tree := filepath.Join(a.cfg.StateDir, "trees", hash)
+		tree := a.treeDir(hash)
 		var err error
 		if _, statErr := os.Lstat(tree); statErr != nil {
 			var actual string
@@ -69,7 +67,7 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			Image   string `json:"image"`
 			Archive string `json:"archive"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || !task.ValidImageID(req.Image) || !content.Valid(req.Archive) {
+		if err := DecodeJSON(http.MaxBytesReader(w, r.Body, 4096), &req); err != nil || !task.ValidImageID(req.Image) || !content.Valid(req.Archive) {
 			http.Error(w, "invalid image/archive identity", 400)
 			return
 		}
@@ -103,12 +101,12 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			return
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
-		for _, name := range []string{"run.json", "stdout.log", "stderr.log", "outputs.tar"} {
-			source := filepath.Join(a.runDir(id), name)
-			if name == "outputs.tar" && run.Result != nil && !run.Result.Request.ExportOutputs {
-				continue
-			}
-			if err := os.Link(source, filepath.Join(dir, name)); err != nil {
+		files := []string{"run.json", "stdout.log", "stderr.log"}
+		if run.Result.Request.ExportOutputs {
+			files = append(files, "outputs.tar")
+		}
+		for _, name := range files {
+			if err := os.Link(filepath.Join(a.runDir(id), name), filepath.Join(dir, name)); err != nil {
 				http.Error(w, err.Error(), 500)
 				return
 			}
@@ -125,25 +123,17 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 	})
 }
 
-// uploadBlob streams a verified content blob; an existing immutable blob avoids retransmission.
 func uploadBlob(ctx context.Context, client *http.Client, file, digest string) error {
 	if !content.Valid(digest) {
 		return errors.New("invalid blob digest")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "http://ordo/v1/blobs/"+digest, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := client.Do(req)
+	endpoint := "/v1/blobs/" + digest
+	resp, err := Send(ctx, client, http.MethodHead, endpoint, "", nil)
 	if err == nil {
-		_ = resp.Body.Close()
-		if resp.StatusCode == 200 {
-			return nil
-		}
-		if resp.StatusCode != 404 {
-			return fmt.Errorf("blob check HTTP %d", resp.StatusCode)
-		}
-	} else {
+		return resp.Body.Close()
+	}
+	var missing *HTTPError
+	if !errors.As(err, &missing) || missing.Status != http.StatusNotFound {
 		return err
 	}
 	f, err := os.Open(file)
@@ -151,18 +141,11 @@ func uploadBlob(ctx context.Context, client *http.Client, file, digest string) e
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	req, err = http.NewRequestWithContext(ctx, http.MethodPut, "http://ordo/v1/blobs/"+digest, f)
-	if err != nil {
-		return err
-	}
-	resp, err = untimed(client).Do(req)
+	resp, err = Send(ctx, untimed(client), http.MethodPut, endpoint, "application/octet-stream", f)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if err := checkResponse(resp); err != nil {
-		return err
-	}
 	_, err = io.Copy(io.Discard, resp.Body)
 	return err
 }

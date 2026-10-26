@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -88,7 +89,7 @@ func (r Remote) validate() error {
 	if !remoteStateDir.MatchString(r.StateDir) || path.Clean(r.StateDir) != r.StateDir || r.StateDir == "/" {
 		return errors.New("remote state must be a clean absolute path without spaces or colons")
 	}
-	if len(path.Join(r.StateDir, "agent.sock")) > maxSocketPath {
+	if len(r.agentSocket()) > maxSocketPath {
 		return errors.New("remote state path is too long for a Unix socket")
 	}
 	if _, err := cpuList(r.CPUs); err != nil {
@@ -105,13 +106,7 @@ func artifact(file string) (string, elf.Machine, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	linux := false
-	for _, setting := range build.Settings {
-		if setting.Key == "GOOS" && setting.Value == "linux" {
-			linux = true
-		}
-	}
-	if !linux {
+	if !slices.Contains(build.Settings, debug.BuildSetting{Key: "GOOS", Value: "linux"}) {
 		return "", 0, errors.New("agent artifact must target Linux; supply --binary with a cross-compiled executable")
 	}
 	f, err := elf.Open(file)
@@ -195,6 +190,8 @@ func Bootstrap(ctx context.Context, r Remote) error {
 	return nil
 }
 
+func (r Remote) agentSocket() string { return path.Join(r.StateDir, "agent.sock") }
+
 func (r Remote) serviceSocket(name string) string {
 	return path.Join(r.StateDir, "services", name, "socket")
 }
@@ -238,33 +235,28 @@ func Connect(ctx context.Context, r Remote, services map[string]string) (*Tunnel
 			return nil, err
 		}
 	}
-	dir, err := os.MkdirTemp("", "ordo-tunnel-")
-	if err != nil {
-		return nil, err
-	}
-	child, cancel := context.WithCancel(ctx)
-	t := &Tunnel{cancel: cancel, done: make(chan error, 1), dir: dir}
-	socket := filepath.Join(dir, "control.sock")
-	t.Client = Client(socket)
-	args := []string{"-S", "none", "-T", "-oBatchMode=yes", "-oExitOnForwardFailure=yes", "-oStreamLocalBindUnlink=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", "-L", socket + ":" + path.Join(r.StateDir, "agent.sock")}
-	args = append(append(args, forwards...), r.Host, "exec cat >/dev/null")
-	cmd := exec.CommandContext(child, "ssh", args...)
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		cancel()
-		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	t.input = writer
-	cmd.Stdin = reader
 	defer func() { _ = reader.Close() }()
+	dir, err := os.MkdirTemp("", "ordo-tunnel-")
+	if err != nil {
+		return nil, errors.Join(err, writer.Close())
+	}
+	child, cancel := context.WithCancel(ctx)
+	socket := filepath.Join(dir, "control.sock")
+	t := &Tunnel{Client: Client(socket), cancel: cancel, done: make(chan error, 1), dir: dir, input: writer}
+	args := []string{"-S", "none", "-T", "-oBatchMode=yes", "-oExitOnForwardFailure=yes", "-oStreamLocalBindUnlink=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", "-L", socket + ":" + r.agentSocket()}
+	args = append(append(args, forwards...), r.Host, "exec cat >/dev/null")
+	cmd := exec.CommandContext(child, "ssh", args...)
+	cmd.Stdin = reader
 	cmd.WaitDelay = 2 * time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		_ = writer.Close()
-		cancel()
-		_ = os.RemoveAll(dir)
+		t.done <- err
+		_ = t.Close()
 		return nil, err
 	}
 	go func() { t.done <- cmd.Wait() }()
@@ -277,35 +269,12 @@ func Connect(ctx context.Context, r Remote, services map[string]string) (*Tunnel
 		err := Call(requestCtx, t.Client, http.MethodGet, "/v1/info", nil, &t.Info)
 		end()
 		if err == nil {
-			if t.Info.Protocol != protocolVersion || t.Info.ID == "" {
-				_ = t.Close()
-				return nil, errors.New("incompatible agent protocol or identity")
-			}
-			requestedGPUs, _ := checkGPUs(r.GPUs)
-			var actualGPUs []string
-			for _, gpu := range t.Info.Hardware.GPUs {
-				actualGPUs = append(actualGPUs, gpu.UUID)
-			}
-			slices.Sort(actualGPUs)
-			if !slices.Equal(requestedGPUs, actualGPUs) {
-				_ = t.Close()
-				return nil, errors.New("live agent GPU pool differs from configuration")
-			}
-			configured, _ := cpuList(r.CPUs)
-			actual := slices.Concat(t.Info.Hardware.Cores...)
-			slices.Sort(actual)
-			if !slices.Equal(configured, actual) || t.Info.Hardware.MemoryMiB != r.MemoryMiB {
-				_ = t.Close()
-				return nil, errors.New("live agent pool differs from configuration; do not change active reservations implicitly")
-			}
-			return t, nil
+			break
 		}
 		select {
 		case err := <-t.done:
-			_ = writer.Close()
-			cancel()
-			t.Client.CloseIdleConnections()
-			_ = os.RemoveAll(dir)
+			t.done <- err
+			_ = t.Close()
 			return nil, fmt.Errorf("SSH tunnel exited: %v: %s", err, stderr.String())
 		case <-ready.Done():
 			_ = t.Close()
@@ -313,6 +282,33 @@ func Connect(ctx context.Context, r Remote, services map[string]string) (*Tunnel
 		case <-ticker.C:
 		}
 	}
+	if err := t.Info.matches(r); err != nil {
+		_ = t.Close()
+		return nil, err
+	}
+	return t, nil
+}
+
+func (info Info) matches(r Remote) error {
+	if info.Protocol != protocolVersion || info.ID == "" {
+		return errors.New("incompatible agent protocol or identity")
+	}
+	requestedGPUs, _ := checkGPUs(r.GPUs)
+	var actualGPUs []string
+	for _, gpu := range info.Hardware.GPUs {
+		actualGPUs = append(actualGPUs, gpu.UUID)
+	}
+	slices.Sort(actualGPUs)
+	if !slices.Equal(requestedGPUs, actualGPUs) {
+		return errors.New("live agent GPU pool differs from configuration")
+	}
+	configured, _ := cpuList(r.CPUs)
+	actual := slices.Concat(info.Hardware.Cores...)
+	slices.Sort(actual)
+	if !slices.Equal(configured, actual) || info.Hardware.MemoryMiB != r.MemoryMiB {
+		return errors.New("live agent pool differs from configuration; do not change active reservations implicitly")
+	}
+	return nil
 }
 
 func (t *Tunnel) Close() error {
@@ -353,11 +349,13 @@ func Call(ctx context.Context, client *http.Client, method, endpoint string, inp
 		return err
 	}
 	defer func() { _ = response.Body.Close() }()
-	if output == nil {
-		_, err = io.Copy(io.Discard, response.Body)
-		return err
+	if output != nil {
+		if err := json.NewDecoder(response.Body).Decode(output); err != nil {
+			return err
+		}
 	}
-	return json.NewDecoder(response.Body).Decode(output)
+	_, err = io.Copy(io.Discard, response.Body)
+	return err
 }
 
 func Send(ctx context.Context, client *http.Client, method, endpoint, contentType string, body io.Reader) (*http.Response, error) {

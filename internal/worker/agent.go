@@ -59,6 +59,47 @@ type Spec struct {
 	Match          *Match   `json:"match,omitempty"`
 }
 
+func (s Spec) Normalize() Spec {
+	if s.Match != nil {
+		match := *s.Match
+		s.Match = &match
+	}
+	s.Args = slices.Clone(s.Args)
+	s.Inputs = maps.Clone(s.Inputs)
+	s.Env = maps.Clone(s.Env)
+	s.CapAdd = slices.Sorted(slices.Values(s.CapAdd))
+	s.Secrets = slices.Sorted(slices.Values(s.Secrets))
+	s.Services = slices.Sorted(slices.Values(s.Services))
+	return s
+}
+
+func (s Spec) Validate(secrets map[string]string) error {
+	if s.Resources.Cores <= 0 || s.Resources.MemoryMiB <= 0 || s.Resources.GPUs < 0 {
+		return errors.New("positive cores/memory and a non-negative GPU count are required")
+	}
+	if s.TimeoutSeconds < 0 || s.TimeoutSeconds > MaxTimeoutSeconds {
+		return fmt.Errorf("timeout must be 0..%d seconds", MaxTimeoutSeconds)
+	}
+	if s.Match != nil {
+		if err := s.Match.Validate(s.Resources); err != nil {
+			return err
+		}
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(s.Secrets)), slices.Sorted(maps.Keys(secrets))) {
+		return errors.New("secret values must match the declared secret names")
+	}
+	if err := s.Sandbox.Validate(secrets); err != nil {
+		return err
+	}
+	services := slices.Sorted(slices.Values(s.Services))
+	for i, name := range services {
+		if !ValidName(name) || (i > 0 && services[i-1] == name) {
+			return errors.New("invalid or duplicate service name")
+		}
+	}
+	return nil
+}
+
 type Submission struct {
 	Spec    Spec              `json:"spec"`
 	Secrets map[string]string `json:"secrets,omitempty"`
@@ -307,47 +348,21 @@ func (a *Agent) Submit(id string, spec Spec, secrets map[string]string) (Attempt
 	if a.info.Error != "" {
 		return Attempt{}, fmt.Errorf("%w: %s", ErrUnavailable, a.info.Error)
 	}
-	if !ValidName(id) || !task.ValidImageID(spec.Image) || spec.Resources.Cores <= 0 || spec.Resources.MemoryMiB <= 0 {
-		return Attempt{}, fmt.Errorf("%w: valid attempt ID, immutable sha256 image ID, positive cores/memory are required", ErrInvalidRequest)
+	if !ValidName(id) || !task.ValidImageID(spec.Image) {
+		return Attempt{}, fmt.Errorf("%w: valid attempt ID and immutable sha256 image ID are required", ErrInvalidRequest)
 	}
-	if spec.Resources.GPUs < 0 {
-		return Attempt{}, fmt.Errorf("%w: GPU count cannot be negative", ErrInvalidRequest)
-	}
-	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > MaxTimeoutSeconds {
-		return Attempt{}, fmt.Errorf("%w: timeout must be 0..%d seconds", ErrInvalidRequest, MaxTimeoutSeconds)
-	}
-	if a.cancelled[id] {
-		return Attempt{}, fmt.Errorf("%w: attempt was cancelled before submission", ErrConflict)
-	}
-	if spec.Match != nil {
-		copy := *spec.Match
-		if err := copy.Validate(spec.Resources); err != nil {
-			return Attempt{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
-		}
-		spec.Match = &copy
-	}
-	spec.Args = slices.Clone(spec.Args)
-	spec.Inputs = maps.Clone(spec.Inputs)
-	spec.Env = maps.Clone(spec.Env)
-	spec.CapAdd = slices.Sorted(slices.Values(spec.CapAdd))
-	spec.Secrets = slices.Sorted(slices.Values(spec.Secrets))
-	spec.Services = slices.Sorted(slices.Values(spec.Services))
-	if !slices.Equal(spec.Secrets, slices.Sorted(maps.Keys(secrets))) {
-		return Attempt{}, fmt.Errorf("%w: secret values must match the declared secret names", ErrInvalidRequest)
-	}
+	spec = spec.Normalize()
 	if err := spec.Validate(secrets); err != nil {
 		return Attempt{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 	}
-	for i, name := range spec.Services {
-		if !ValidName(name) || (i > 0 && spec.Services[i-1] == name) {
-			return Attempt{}, fmt.Errorf("%w: invalid or duplicate service name", ErrInvalidRequest)
-		}
+	if a.cancelled[id] {
+		return Attempt{}, fmt.Errorf("%w: attempt was cancelled before submission", ErrConflict)
 	}
 	for name, digest := range spec.Inputs {
 		if !ValidName(name) || !content.Valid(digest) {
 			return Attempt{}, fmt.Errorf("%w: invalid input name/digest", ErrInvalidRequest)
 		}
-		if info, err := os.Stat(filepath.Join(a.cfg.StateDir, "trees", digest)); err != nil || !info.IsDir() {
+		if info, err := os.Stat(a.treeDir(digest)); err != nil || !info.IsDir() {
 			return Attempt{}, fmt.Errorf("%w: input %s is not cached", ErrInvalidRequest, name)
 		}
 	}
@@ -435,6 +450,10 @@ func (a *Agent) save(run Attempt) error {
 
 func (a *Agent) runDir(id string) string { return filepath.Join(a.cfg.StateDir, "runs", id) }
 
+func (a *Agent) treeDir(digest string) string {
+	return filepath.Join(a.cfg.StateDir, "trees", digest)
+}
+
 func (a *Agent) launchPending() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -453,18 +472,16 @@ func (a *Agent) launchPending() {
 			}
 		}
 		a.busy[id] = true
-		a.wg.Add(1)
-		go a.execute(run, fresh)
+		a.wg.Go(func() { a.execute(run, fresh) })
 	}
 }
 
 func (a *Agent) execute(run Attempt, fresh bool) {
-	defer a.wg.Done()
 	defer func() { a.mu.Lock(); delete(a.busy, run.ID); a.mu.Unlock() }()
 	dir := a.runDir(run.ID)
 	mounts := map[string]string{}
 	for name, digest := range run.Spec.Inputs {
-		mounts[name] = filepath.Join(a.cfg.StateDir, "trees", digest)
+		mounts[name] = a.treeDir(digest)
 	}
 	services := map[string]string{}
 	for _, name := range run.Spec.Services {
@@ -492,9 +509,10 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 			err = task.Recover(a.ctx, dir)
 		}
 	}
+	// Shutdown detaches supervision, not the task or its reservation.
 	if a.ctx.Err() != nil {
 		return
-	} // Shutdown detaches supervision, not the task or its reservation.
+	}
 	var exit *task.ExitError
 	if err == nil || errors.As(err, &exit) {
 		result, readErr := task.ReadResult(dir)

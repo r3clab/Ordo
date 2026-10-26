@@ -3,6 +3,7 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,12 +56,7 @@ func cpuList(text string) ([]int, error) {
 			set[n] = true
 		}
 	}
-	result := make([]int, 0, len(set))
-	for n := range set {
-		result = append(result, n)
-	}
-	slices.Sort(result)
-	return result, nil
+	return slices.Sorted(maps.Keys(set)), nil
 }
 
 func cpuString(cpus []int) string {
