@@ -9,7 +9,7 @@ import (
 
 func TestSavedOutputArchiveRequired(t *testing.T) {
 	dir := t.TempDir()
-	r := record{Request: Request{OutputDir: dir, ExportOutputs: true}, ExitCode: new(0)}
+	r := Record{Request: Request{OutputDir: dir, ExportOutputs: true}, ExitCode: new(0)}
 	for _, name := range []string{"stdout.log", "stderr.log"} {
 		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
 			t.Fatal(err)

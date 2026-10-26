@@ -47,7 +47,7 @@ func (e *ExitError) Error() string {
 	return fmt.Sprintf("task exited with status %d; results: %s", e.Code, e.OutputDir)
 }
 
-type record struct {
+type Record struct {
 	Request          Request   `json:"request"`
 	ContainerName    string    `json:"container_name"`
 	ContainerID      string    `json:"container_id,omitempty"`
@@ -87,7 +87,7 @@ func run(ctx context.Context, req Request, podman command) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	r := record{
+	r := Record{
 		Request:        req,
 		ContainerName:  "ordo-" + strings.ToLower(rand.Text()),
 		State:          "preparing",
@@ -103,7 +103,7 @@ func run(ctx context.Context, req Request, podman command) error {
 	return outcome(&r, execute(ctx, &r, podman))
 }
 
-func outcome(r *record, err error) error {
+func outcome(r *Record, err error) error {
 	if err != nil {
 		// Finished is the durable results marker, even if subsequent cleanup fails.
 		if r.State != "finished" {
@@ -184,7 +184,7 @@ func checkMounts(kind string, mounts map[string]string) error {
 	return nil
 }
 
-func execute(ctx context.Context, r *record, podman command) error {
+func execute(ctx context.Context, r *Record, podman command) error {
 	info, err := podman.output(ctx, "info", "--format=json")
 	if err != nil {
 		return err
@@ -260,7 +260,7 @@ func execute(ctx context.Context, r *record, podman command) error {
 	return complete(ctx, r, podman)
 }
 
-func complete(ctx context.Context, r *record, podman command) error {
+func complete(ctx context.Context, r *Record, podman command) error {
 	if _, err := podman.output(ctx, "wait", "--", r.ContainerID); err != nil {
 		return err
 	}
@@ -297,7 +297,7 @@ func complete(ctx context.Context, r *record, podman command) error {
 	return cleanup(ctx, r, podman)
 }
 
-func cleanup(ctx context.Context, r *record, podman command) error {
+func cleanup(ctx context.Context, r *Record, podman command) error {
 	// Keep the container unless its logs and final metadata have reached disk.
 	if _, err := podman.output(ctx, "rm", "--", r.ContainerID); err != nil {
 		return err
@@ -400,7 +400,7 @@ func (podman command) output(ctx context.Context, args ...string) ([]byte, error
 	return stdout.Bytes(), nil
 }
 
-func collectLogs(ctx context.Context, r *record, podman command) error {
+func collectLogs(ctx context.Context, r *Record, podman command) error {
 	dir := r.Request.OutputDir
 	for _, name := range []string{"stdout.log", "stderr.log"} {
 		info, err := os.Lstat(filepath.Join(dir, name))
@@ -411,27 +411,14 @@ func collectLogs(ctx context.Context, r *record, podman command) error {
 			return fmt.Errorf("refusing to replace non-regular %s", name)
 		}
 	}
-	stdout, err := os.CreateTemp(dir, ".stdout-*")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(stdout.Name()) }()
-	stderr, err := os.CreateTemp(dir, ".stderr-*")
-	if err != nil {
-		return errors.Join(err, stdout.Close())
-	}
-	defer func() { _ = os.Remove(stderr.Name()) }()
-	err = podman(ctx, stdout, stderr, "logs", "--", r.ContainerID)
-	if err := errors.Join(err, stdout.Sync(), stderr.Sync(), stdout.Close(), stderr.Close()); err != nil {
-		return err
-	}
-	if err := os.Rename(stdout.Name(), filepath.Join(dir, "stdout.log")); err != nil {
-		return err
-	}
-	return os.Rename(stderr.Name(), filepath.Join(dir, "stderr.log"))
+	return content.WriteAtomic(filepath.Join(dir, "stdout.log"), func(stdout io.Writer) error {
+		return content.WriteAtomic(filepath.Join(dir, "stderr.log"), func(stderr io.Writer) error {
+			return podman(ctx, stdout, stderr, "logs", "--", r.ContainerID)
+		})
+	})
 }
 
-func saveRecord(r *record) error {
+func saveRecord(r *Record) error {
 	return content.WriteAtomic(filepath.Join(r.Request.OutputDir, "run.json"), func(w io.Writer) error {
 		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")

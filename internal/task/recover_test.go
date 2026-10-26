@@ -216,15 +216,15 @@ func TestRecoverPreservesPartialLogsOnCollectionFailure(t *testing.T) {
 }
 
 func TestRecoverRejectsInvalidMetadataWithoutChangingIt(t *testing.T) {
-	for name, change := range map[string]func(*record){
-		"unresolved image":     func(r *record) { r.ImageID = "" },
-		"invalid container ID": func(r *record) { r.ContainerID = "tag" },
-		"invalid name":         func(r *record) { r.ContainerName = "other-container" },
-		"invalid request":      func(r *record) { r.Request.MemoryMiB = 0 },
-		"unknown state":        func(r *record) { r.State = "unknown" },
-		"invalid exit":         func(r *record) { r.ExitCode = new(256) },
-		"missing exit":         func(r *record) { r.State = "finished"; r.ExitCode = nil },
-		"removed but running":  func(r *record) { r.State = "running"; r.ContainerRemoved = true; r.ExitCode = new(0) },
+	for name, change := range map[string]func(*Record){
+		"unresolved image":     func(r *Record) { r.ImageID = "" },
+		"invalid container ID": func(r *Record) { r.ContainerID = "tag" },
+		"invalid name":         func(r *Record) { r.ContainerName = "other-container" },
+		"invalid request":      func(r *Record) { r.Request.MemoryMiB = 0 },
+		"unknown state":        func(r *Record) { r.State = "unknown" },
+		"invalid exit":         func(r *Record) { r.ExitCode = new(256) },
+		"missing exit":         func(r *Record) { r.State = "finished"; r.ExitCode = nil },
+		"removed but running":  func(r *Record) { r.State = "running"; r.ContainerRemoved = true; r.ExitCode = new(0) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			req, p := retainedRun(t, "wait", 0)

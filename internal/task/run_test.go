@@ -2,7 +2,6 @@ package task
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -102,14 +101,10 @@ func request(t *testing.T) Request {
 	return Request{Image: "evaluation:build-hash", CPUs: "0,2-3", MemoryMiB: 128, OutputDir: filepath.Join(t.TempDir(), "run")}
 }
 
-func readRecord(t *testing.T, dir string) record {
+func readRecord(t *testing.T, dir string) Record {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, "run.json"))
+	r, err := ReadResult(dir)
 	if err != nil {
-		t.Fatal(err)
-	}
-	var r record
-	if err := json.Unmarshal(data, &r); err != nil {
 		t.Fatal(err)
 	}
 	return r

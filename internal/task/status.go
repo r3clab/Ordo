@@ -5,13 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
-
-// Record is the existing, inspectable local result format.
-type Record = record
 
 func CheckHost(ctx context.Context) error {
 	data, err := command(execPodman).output(ctx, "info", "--format=json")
@@ -27,8 +25,10 @@ func ReadResult(dir string) (Record, error) {
 		return Record{}, err
 	}
 	var r Record
-	err = json.Unmarshal(data, &r)
-	return r, err
+	if err := json.Unmarshal(data, &r); err != nil {
+		return Record{}, fmt.Errorf("decode run.json: %w", err)
+	}
+	return r, nil
 }
 
 // Stop targets only a verified existing execution. Absence is not proof of cancellation.
@@ -61,7 +61,7 @@ func Status(ctx context.Context, dir string) (Record, string, error) {
 	if r.ImageID == "" && r.ContainerID == "" && strings.HasPrefix(r.ContainerName, "ordo-") && (r.State == "preparing" || r.State == "error" || r.State == "interrupted") {
 		return r, "unstarted", nil
 	}
-	checked, err := loadRecord(dir)
+	checked, err := checkRecord(dir, r)
 	if err != nil {
 		return r, "", err
 	}

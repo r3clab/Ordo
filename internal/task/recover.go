@@ -44,7 +44,7 @@ func recoverRun(ctx context.Context, outputDir string, podman command) error {
 	return outcome(r, reconcile(ctx, r, podman))
 }
 
-func reconcile(ctx context.Context, r *record, podman command) error {
+func reconcile(ctx context.Context, r *Record, podman command) error {
 	if r.ContainerRemoved {
 		if err := savedResults(r); err != nil {
 			return err
@@ -101,15 +101,15 @@ func reconcile(ctx context.Context, r *record, podman command) error {
 	return complete(ctx, r, podman)
 }
 
-func loadRecord(dir string) (*record, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "run.json"))
+func loadRecord(dir string) (*Record, error) {
+	r, err := ReadResult(dir)
 	if err != nil {
 		return nil, err
 	}
-	var r record
-	if err := json.Unmarshal(data, &r); err != nil {
-		return nil, fmt.Errorf("decode run.json: %w", err)
-	}
+	return checkRecord(dir, r)
+}
+
+func checkRecord(dir string, r Record) (*Record, error) {
 	// The selected directory, not an embedded path, owns recovery's file writes.
 	r.Request.OutputDir = dir
 	if err := r.Request.validate(); err != nil {
@@ -138,7 +138,7 @@ func loadRecord(dir string) (*record, error) {
 	return &r, nil
 }
 
-func savedResults(r *record) error {
+func savedResults(r *Record) error {
 	if r.Request.ExportOutputs {
 		hash, err := content.Hash(filepath.Join(r.Request.OutputDir, "outputs.tar"))
 		if err != nil {
@@ -188,7 +188,7 @@ type containerInspection struct {
 	}
 }
 
-func (podman command) inspectOwned(ctx context.Context, r *record, selector string) (containerInspection, error) {
+func (podman command) inspectOwned(ctx context.Context, r *Record, selector string) (containerInspection, error) {
 	data, err := podman.output(ctx, "container", "inspect", "--format=json", "--", selector)
 	if err != nil {
 		return containerInspection{}, err
