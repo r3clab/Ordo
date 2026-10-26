@@ -616,7 +616,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, host string, info *worker
 		j.StopRequested = true
 		j.StopReason = cmp.Or(j.StopReason, run.StopReason)
 	}
-	if !run.Terminal() {
+	if !run.State.Terminal() {
 		if kind := j.stopKind(); kind != "" && run.StopRequested == "" {
 			if err := stopAttempt(ctx, client, at.ID, kind, j.StopReason); err != nil {
 				return err

@@ -3,6 +3,8 @@ package worker
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/task"
@@ -25,18 +27,15 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 		}
 		http.ServeFile(w, r, filepath.Join(blobs, hash))
 	})
-	mux.HandleFunc("PUT /v1/blobs/{hash}", func(w http.ResponseWriter, r *http.Request) {
-		_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	mux.HandleFunc("PUT /v1/blobs/{hash}", unbounded(func(w http.ResponseWriter, r *http.Request) {
 		hash, err := content.Put(blobs, r.Body, r.PathValue("hash"))
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
 		WriteJSON(w, 200, map[string]string{"sha256": hash})
-	})
-	mux.HandleFunc("POST /v1/inputs/{hash}", func(w http.ResponseWriter, r *http.Request) {
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	}))
+	mux.HandleFunc("POST /v1/inputs/{hash}", unbounded(func(w http.ResponseWriter, r *http.Request) {
 		hash := r.PathValue("hash")
 		if !content.Valid(hash) {
 			http.Error(w, "invalid digest", 400)
@@ -60,9 +59,8 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			return
 		}
 		WriteJSON(w, 200, map[string]string{"sha256": hash})
-	})
-	mux.HandleFunc("POST /v1/images", func(w http.ResponseWriter, r *http.Request) {
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	}))
+	mux.HandleFunc("POST /v1/images", unbounded(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Image   string `json:"image"`
 			Archive string `json:"archive"`
@@ -80,9 +78,8 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			return
 		}
 		WriteJSON(w, 200, req)
-	})
-	mux.HandleFunc("GET /v1/results/{id}", func(w http.ResponseWriter, r *http.Request) {
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	}))
+	mux.HandleFunc("GET /v1/results/{id}", unbounded(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		a.mu.Lock()
 		run, ok := a.attempts[id]
@@ -91,36 +88,53 @@ func (a *Agent) contentRoutes(mux *http.ServeMux) {
 			http.NotFound(w, r)
 			return
 		}
-		if (run.State != "finished" && run.State != "cancelled") || run.Result == nil || run.Result.State != "finished" {
+		if !run.Collectable() {
 			http.Error(w, "results are not ready", http.StatusConflict)
 			return
 		}
-		dir, err := os.MkdirTemp(a.cfg.StateDir, ".result-")
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+		var parts []content.Part
+		for _, name := range run.Result.Results() {
+			parts = append(parts, content.Part{Path: filepath.Join(a.runDir(id), name), Name: name})
 		}
-		defer func() { _ = os.RemoveAll(dir) }()
-		files := []string{"run.json", "stdout.log", "stderr.log"}
-		if run.Result.Request.ExportOutputs {
-			files = append(files, "outputs.tar")
+		ServeTar(w, parts...)
+	}))
+}
+
+// unbounded lifts the server's deadlines from a route that moves or loads whole images and archives.
+func unbounded(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c := http.NewResponseController(w)
+		_ = c.SetReadDeadline(time.Time{})
+		_ = c.SetWriteDeadline(time.Time{})
+		h(w, r)
+	}
+}
+
+// ServeTar streams parts with their digest in a trailer, so the archive needs no staging copy.
+func ServeTar(w http.ResponseWriter, parts ...content.Part) {
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("Trailer", ChecksumHeader)
+	hash := sha256.New()
+	body := &sentWriter{Writer: w}
+	if err := content.Tar(io.MultiWriter(body, hash), parts...); err != nil {
+		if body.sent {
+			panic(http.ErrAbortHandler)
 		}
-		for _, name := range files {
-			if err := os.Link(filepath.Join(a.runDir(id), name), filepath.Join(dir, name)); err != nil {
-				http.Error(w, err.Error(), 500)
-				return
-			}
-		}
-		archive := filepath.Join(a.cfg.StateDir, ".result-"+id+"-"+filepath.Base(dir)+".tar")
-		defer func() { _ = os.Remove(archive) }()
-		hash, err := content.Archive(dir, archive)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		w.Header().Set(ChecksumHeader, hash)
-		http.ServeFile(w, r, archive)
-	})
+		w.Header().Del("Trailer")
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set(ChecksumHeader, hex.EncodeToString(hash.Sum(nil)))
+}
+
+type sentWriter struct {
+	io.Writer
+	sent bool
+}
+
+func (w *sentWriter) Write(p []byte) (int, error) {
+	w.sent = w.sent || len(p) > 0
+	return w.Writer.Write(p)
 }
 
 func uploadBlob(ctx context.Context, client *http.Client, file, digest string) error {
@@ -176,14 +190,17 @@ func verifyResult(tree string) error {
 	if !record.Request.ExportOutputs {
 		return nil
 	}
-	actual, err := content.Hash(filepath.Join(tree, "outputs.tar"))
+	f, err := os.Open(filepath.Join(tree, task.OutputsArchive))
 	if err != nil {
 		return err
 	}
-	if actual != record.OutputsSHA256 {
-		return errors.New("output archive checksum mismatch")
-	}
-	return content.Extract(filepath.Join(tree, "outputs.tar"), filepath.Join(tree, "outputs"))
+	defer func() { _ = f.Close() }()
+	return content.Unpack(f, filepath.Join(tree, task.OutputsDir), func(_, digest string) error {
+		if digest != record.OutputsSHA256 {
+			return errors.New("output archive checksum mismatch")
+		}
+		return nil
+	})
 }
 
 func Download(ctx context.Context, client *http.Client, endpoint, dest string, verify func(tree string) error) error {
@@ -192,39 +209,20 @@ func Download(ctx context.Context, client *http.Client, endpoint, dest string, v
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dest), ".receive-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	hash, err := content.Put(tmp, resp.Body, "")
-	if err != nil {
-		return err
-	}
-	if want := cmp.Or(resp.Header.Get(ChecksumHeader), resp.Trailer.Get(ChecksumHeader)); !content.Valid(want) {
-		return errors.New("result missing checksum")
-	} else if want != hash {
-		return errors.New("content checksum mismatch")
-	}
-	tree := filepath.Join(tmp, "result")
-	if err := content.Extract(filepath.Join(tmp, hash), tree); err != nil {
-		return err
-	}
-	if verify != nil {
-		if err := verify(tree); err != nil {
-			return err
-		}
-	}
-	if _, err := os.Stat(dest); err == nil {
+	if _, err := os.Lstat(dest); err == nil {
 		return errors.New("result destination already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(tree, dest); err != nil {
-		return err
-	}
-	return content.SyncDir(filepath.Dir(dest))
+	return content.Unpack(resp.Body, dest, func(tree, digest string) error {
+		if want := cmp.Or(resp.Header.Get(ChecksumHeader), resp.Trailer.Get(ChecksumHeader)); !content.Valid(want) {
+			return errors.New("result missing checksum")
+		} else if want != digest {
+			return errors.New("content checksum mismatch")
+		}
+		if verify != nil {
+			return verify(tree)
+		}
+		return nil
+	})
 }

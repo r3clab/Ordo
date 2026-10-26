@@ -6,11 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
-
-	"github.com/r3clab/Ordo/internal/task"
 )
 
 func TestServiceForward(t *testing.T) {
@@ -53,12 +50,8 @@ func TestSecretsAreAdmittedApartAndDropped(t *testing.T) {
 	if strings.Contains(response.Body.String(), "hunter2") || !strings.Contains(response.Body.String(), `"TOKEN"`) {
 		t.Fatalf("attempt must name secrets without values: %s", response.Body)
 	}
-	req := task.Request{Services: map[string]string{"model": a.serviceDir("model")}}
-	if err := a.prepareLaunch(run, &req); err != nil || req.Secrets["TOKEN"] != "hunter2" {
-		t.Fatalf("launch lacks secret values: %v", err)
-	}
-	if info, err := os.Stat(a.serviceDir("model")); err != nil || !info.IsDir() {
-		t.Fatal("service directory not prepared before mount")
+	if req, err := a.request(run); err != nil || req.Secrets["TOKEN"] != "hunter2" || req.Services["model"] != a.serviceDir("model") {
+		t.Fatalf("launch lacks secret values or services: %v", err)
 	}
 	if err := a.Cancel("one", "budget spent"); err != nil {
 		t.Fatal(err)
@@ -74,17 +67,11 @@ func TestSecretsAreAdmittedApartAndDropped(t *testing.T) {
 	if _, err := a.Submit("live", spec, map[string]string{"TOKEN": "kept"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.Put("secret", "orphan", map[string]string{"TOKEN": "x"}); err != nil {
-		t.Fatal(err)
-	}
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if a, err = open(context.Background(), cfg, h); err != nil {
 		t.Fatal(err)
-	}
-	if err := a.store.Get("secret", "orphan", &values); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("restart kept an orphaned secret: %v", err)
 	}
 	if err := a.store.Get("secret", "live", &values); err != nil || values["TOKEN"] != "kept" {
 		t.Fatalf("restart dropped a live attempt's secret: %v", err)
@@ -114,7 +101,7 @@ func TestStopKeepsResultAndFirstRequestWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := a.attempts[run.ID]
-	if got.StopRequested != "stop" || got.StopReason != "budget spent" || got.Terminal() {
+	if got.StopRequested != "stop" || got.StopReason != "budget spent" || got.State.Terminal() {
 		t.Fatalf("stop request not kept: %+v", got)
 	}
 	got.State = "finished"

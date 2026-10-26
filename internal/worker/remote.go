@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/task"
 )
 
 var hostAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]*$`)
@@ -80,7 +81,7 @@ func unitName(stateDir string) string {
 }
 
 func (r Remote) validate() error {
-	if _, err := checkGPUs(r.GPUs); err != nil {
+	if _, err := task.CheckGPUs(r.GPUs); err != nil {
 		return err
 	}
 	if !hostAlias.MatchString(r.Host) {
@@ -92,7 +93,7 @@ func (r Remote) validate() error {
 	if len(r.agentSocket()) > maxSocketPath {
 		return errors.New("remote state path is too long for a Unix socket")
 	}
-	if _, err := cpuList(r.CPUs); err != nil {
+	if _, err := task.ParseCPUs(r.CPUs); err != nil {
 		return err
 	}
 	if r.MemoryMiB <= 0 {
@@ -293,7 +294,7 @@ func (info Info) matches(r Remote) error {
 	if info.Protocol != protocolVersion || info.ID == "" {
 		return errors.New("incompatible agent protocol or identity")
 	}
-	requestedGPUs, _ := checkGPUs(r.GPUs)
+	requestedGPUs, _ := task.CheckGPUs(r.GPUs)
 	var actualGPUs []string
 	for _, gpu := range info.Hardware.GPUs {
 		actualGPUs = append(actualGPUs, gpu.UUID)
@@ -302,7 +303,7 @@ func (info Info) matches(r Remote) error {
 	if !slices.Equal(requestedGPUs, actualGPUs) {
 		return errors.New("live agent GPU pool differs from configuration")
 	}
-	configured, _ := cpuList(r.CPUs)
+	configured, _ := task.ParseCPUs(r.CPUs)
 	actual := slices.Concat(info.Hardware.Cores...)
 	slices.Sort(actual)
 	if !slices.Equal(configured, actual) || info.Hardware.MemoryMiB != r.MemoryMiB {

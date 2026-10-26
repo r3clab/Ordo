@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/task"
 )
 
@@ -17,11 +18,22 @@ func savedRun(t *testing.T, a *Agent, run Attempt, r task.Record) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if r.Request.ExportOutputs {
+		outputs := filepath.Join(dir, task.OutputsDir)
+		if err := os.Mkdir(outputs, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		hash, err := content.Archive(outputs, filepath.Join(dir, task.OutputsArchive))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.OutputsSHA256 = hash
+	}
 	data, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string][]byte{"run.json": data, "stdout.log": {}, "stderr.log": {}} {
+	for name, body := range map[string][]byte{task.RecordFile: data, task.StdoutFile: {}, task.StderrFile: {}} {
 		if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -35,7 +47,11 @@ func TestReconcileCompletedExecutionWithoutPodman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := task.Record{Request: task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, OutputDir: a.runDir(run.ID), ReservationID: ReservationID(a.info.ID, run.ID)}, ContainerName: "ordo-completed", ContainerID: strings.Repeat("b", 64), ImageID: run.Spec.Image, State: "finished", ContainerRemoved: true, ExitCode: new(7)}
+	req, err := a.request(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := task.Record{Request: req, ContainerName: "ordo-completed", ContainerID: strings.Repeat("b", 64), ImageID: run.Spec.Image, State: "finished", ContainerRemoved: true, ExitCode: new(7)}
 	savedRun(t, a, run, r)
 	a.execute(run, false)
 	if got := a.attempts[run.ID]; got.State != "finished" || got.Result == nil || *got.Result.ExitCode != 7 {

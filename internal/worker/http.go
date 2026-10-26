@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -63,11 +66,9 @@ func (a *Agent) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/attempts", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
-		runs := make([]Attempt, 0, len(a.attempts))
-		for _, run := range a.attempts {
-			runs = append(runs, run)
-		}
+		runs := slices.AppendSeq(make([]Attempt, 0, len(a.attempts)), maps.Values(a.attempts))
 		a.mu.Unlock()
+		slices.SortFunc(runs, func(x, y Attempt) int { return x.CreatedAt.Compare(y.CreatedAt) })
 		WriteJSON(w, http.StatusOK, runs)
 	})
 	return mux
@@ -102,6 +103,10 @@ func StopHandler(request func(id, reason string) error, failure int) http.Handle
 		}
 		WriteJSON(w, http.StatusOK, map[string]bool{"requested": true})
 	}
+}
+
+func StopAttempt(ctx context.Context, client *http.Client, id string, kind StopKind, reason string) error {
+	return Call(ctx, client, http.MethodPost, "/v1/attempts/"+url.PathEscape(id)+"/"+string(kind), StopRequest{Reason: reason}, nil)
 }
 
 // DecodeReason accepts an empty body, which the web UI sends to cancel without a reason.

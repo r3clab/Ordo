@@ -3,13 +3,13 @@ package worker
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
+
+	"github.com/r3clab/Ordo/internal/task"
 )
 
 type Hardware struct {
@@ -34,44 +34,11 @@ type Allocation struct {
 	GPUs      []string `json:"gpus,omitempty"`
 }
 
-func cpuList(text string) ([]int, error) {
-	set := map[int]bool{}
-	for _, part := range strings.Split(text, ",") {
-		a, b, span := strings.Cut(part, "-")
-		lo, err := strconv.Atoi(a)
-		if err != nil || lo < 0 || lo > 65535 {
-			return nil, fmt.Errorf("invalid CPU set %q", text)
-		}
-		hi := lo
-		if span {
-			hi, err = strconv.Atoi(b)
-			if err != nil || hi < lo || hi > 65535 {
-				return nil, fmt.Errorf("invalid CPU range %q", part)
-			}
-		}
-		for n := lo; n <= hi; n++ {
-			if set[n] {
-				return nil, fmt.Errorf("duplicate CPU %d", n)
-			}
-			set[n] = true
-		}
-	}
-	return slices.Sorted(maps.Keys(set)), nil
-}
-
-func cpuString(cpus []int) string {
-	parts := make([]string, len(cpus))
-	for i, cpu := range cpus {
-		parts[i] = strconv.Itoa(cpu)
-	}
-	return strings.Join(parts, ",")
-}
-
 func discover(cpus string, memoryMiB int64) (Hardware, error) {
 	if runtime.GOOS != "linux" {
 		return Hardware{}, errors.New("worker execution requires Linux")
 	}
-	pool, err := cpuList(cpus)
+	pool, err := task.ParseCPUs(cpus)
 	if err != nil {
 		return Hardware{}, err
 	}
@@ -79,7 +46,7 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 	if err != nil {
 		return Hardware{}, err
 	}
-	online, err := cpuList(strings.TrimSpace(string(onlineData)))
+	online, err := task.ParseCPUs(strings.TrimSpace(string(onlineData)))
 	if err != nil {
 		return Hardware{}, err
 	}
@@ -108,13 +75,13 @@ func discover(cpus string, memoryMiB int64) (Hardware, error) {
 		if err != nil {
 			return h, err
 		}
-		siblings, err := cpuList(strings.TrimSpace(string(data)))
+		siblings, err := task.ParseCPUs(strings.TrimSpace(string(data)))
 		if err != nil {
 			return h, err
 		}
 		for _, n := range siblings {
 			if !slices.Contains(pool, n) || !slices.Contains(online, n) {
-				return h, fmt.Errorf("CPU %d requires all online SMT siblings %s in the pool", cpu, cpuString(siblings))
+				return h, fmt.Errorf("CPU %d requires all online SMT siblings %s in the pool", cpu, task.FormatCPUs(siblings))
 			}
 			seen[n] = true
 		}

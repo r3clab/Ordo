@@ -48,7 +48,31 @@ func TestCancelAndTimeoutBeforeLaunchReleaseOnlyUnstartedWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.enforceStops()
-	if got := a.attempts[run.ID]; !got.Terminal() || got.StopRequested != "timeout" {
+	if got := a.attempts[run.ID]; !got.State.Terminal() || got.StopRequested != "timeout" {
 		t.Fatalf("deadline ignored: %+v", got)
+	}
+}
+
+func TestStopRetriesBackOff(t *testing.T) {
+	a, _, _ := testAgent(t)
+	defer func() { _ = a.Close() }()
+	run, err := a.Submit("run", testSpec(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.busy[run.ID] = true
+	if err := a.Stop(run.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		a.enforceStops()
+		a.wg.Wait()
+		a.enforceStops()
+		retry := a.stops[run.ID]
+		if retry.active || retry.delay != want || !retry.next.After(time.Now()) {
+			t.Fatalf("stop retry %+v, want delay %v", retry, want)
+		}
+		retry.next = time.Time{}
+		a.stops[run.ID] = retry
 	}
 }

@@ -134,16 +134,7 @@ func TestWorkerHTTPValidation(t *testing.T) {
 	}
 }
 
-func TestCPUSetAndMemoryAccounting(t *testing.T) {
-	for _, s := range []string{"", "0,0", "2-1", "-1", "1,", "0-65536"} {
-		if _, err := cpuList(s); err == nil {
-			t.Fatalf("accepted %q", s)
-		}
-	}
-	got, err := cpuList("62-63,126-127")
-	if err != nil || !slices.Equal(got, []int{62, 63, 126, 127}) {
-		t.Fatalf("%v %v", got, err)
-	}
+func TestMemoryAccounting(t *testing.T) {
 	h := Hardware{Cores: [][]int{{0, 64}, {1, 65}}, MemoryMiB: 512}
 	if _, err := allocate(h, Resources{Cores: 1, MemoryMiB: 300}, []Allocation{{CPUs: []int{0, 64}, MemoryMiB: 256}}); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("memory overcommit: %v", err)

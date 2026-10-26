@@ -8,17 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/task"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 )
-
-var gpuUUID = regexp.MustCompile(`^GPU-[a-fA-F0-9-]{36}$`)
 
 type GPU struct {
 	UUID      string `json:"uuid"`
@@ -32,22 +30,13 @@ func GPUList(text string) ([]string, error) {
 	if text == "" {
 		return nil, nil
 	}
-	return checkGPUs(strings.Split(text, ","))
-}
-func checkGPUs(ids []string) ([]string, error) {
-	ids = slices.Sorted(slices.Values(ids))
-	for i, id := range ids {
-		if !gpuUUID.MatchString(id) || (i > 0 && ids[i-1] == id) {
-			return nil, errors.New("GPU pool must contain unique full NVIDIA GPU UUIDs")
-		}
-	}
-	return ids, nil
+	return task.CheckGPUs(strings.Split(text, ","))
 }
 func discoverGPUs(ctx context.Context, ids []string, root string) ([]GPU, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	if _, err := checkGPUs(ids); err != nil {
+	if _, err := task.CheckGPUs(ids); err != nil {
 		return nil, err
 	}
 	data, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,memory.total,driver_version,mig.mode.current", "--format=csv,noheader,nounits").Output()

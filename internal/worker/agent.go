@@ -105,22 +105,44 @@ type Submission struct {
 	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
+type State string
+
+const (
+	Accepted             State = "accepted"
+	Running              State = "running"
+	Blocked              State = "blocked"
+	Finished             State = "finished"
+	InfrastructureFailed State = "infrastructure_failed"
+	Cancelled            State = "cancelled"
+)
+
+func (s State) Terminal() bool { return s == Finished || s == InfrastructureFailed || s == Cancelled }
+
+type StopKind string
+
+const (
+	Cancel  StopKind = "cancel"
+	Stop    StopKind = "stop"
+	Timeout StopKind = "timeout"
+)
+
 type Attempt struct {
 	ID            string       `json:"id"`
 	Spec          Spec         `json:"spec"`
 	Allocation    Allocation   `json:"allocation"`
 	Hardware      Hardware     `json:"hardware"`
-	State         string       `json:"state"`
+	State         State        `json:"state"`
 	Error         string       `json:"error,omitempty"`
 	CreatedAt     time.Time    `json:"created_at"`
 	UpdatedAt     time.Time    `json:"updated_at"`
 	Result        *task.Record `json:"result,omitempty"`
-	StopRequested string       `json:"stop_requested,omitempty"`
+	StopRequested StopKind     `json:"stop_requested,omitempty"`
 	StopReason    string       `json:"stop_reason,omitempty"`
 }
 
-func (a Attempt) Terminal() bool {
-	return a.State == "finished" || a.State == "infrastructure_failed" || a.State == "cancelled"
+// Collectable holds even when supervision failed after the run had durably finished.
+func (a Attempt) Collectable() bool {
+	return a.State.Terminal() && a.Result != nil && a.Result.State == task.Finished
 }
 
 type Info struct {
@@ -144,7 +166,7 @@ type Agent struct {
 	owner     *os.File
 	attempts  map[string]Attempt
 	busy      map[string]bool
-	stopping  map[string]bool
+	stops     map[string]stopRetry
 	cancelled map[string]bool
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -217,7 +239,7 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 		return nil, errors.New("state belongs to a different machine; refusing to adopt its reservations")
 	}
 	child, cancel := context.WithCancel(ctx)
-	a := &Agent{cfg: cfg, info: Info{Protocol: protocolVersion, ID: ident.ID, Hardware: h}, store: store, attempts: map[string]Attempt{}, busy: map[string]bool{}, stopping: map[string]bool{}, cancelled: map[string]bool{}, ctx: child, cancel: cancel}
+	a := &Agent{cfg: cfg, info: Info{Protocol: protocolVersion, ID: ident.ID, Hardware: h}, store: store, attempts: map[string]Attempt{}, busy: map[string]bool{}, stops: map[string]stopRetry{}, cancelled: map[string]bool{}, ctx: child, cancel: cancel}
 	fail := func(err error) (*Agent, error) { _ = a.Close(); return nil, err }
 	tombstones, err := state.List[cancellation](store, "cancel")
 	if err != nil {
@@ -239,28 +261,16 @@ func open(ctx context.Context, cfg Config, h Hardware) (*Agent, error) {
 			return fail(errors.New("invalid saved attempt ID"))
 		}
 		switch run.State {
-		case "accepted", "starting", "running", "blocked", "finished", "infrastructure_failed", "cancelled":
+		case Accepted, Running, Blocked, Finished, InfrastructureFailed, Cancelled:
 		default:
 			return fail(fmt.Errorf("invalid saved attempt state %q", run.State))
 		}
-		if !run.Terminal() {
+		if !run.State.Terminal() {
 			if err := held.add(h, run); err != nil {
 				return fail(err)
 			}
 		}
 		a.attempts[run.ID] = run
-	}
-	// Secrets outlive their attempt when a crash or failed write falls between the two records.
-	secrets, err := store.IDs("secret")
-	if err != nil {
-		return fail(err)
-	}
-	for _, id := range secrets {
-		if run, ok := a.attempts[id]; !ok || run.Terminal() {
-			if err := store.Delete("secret", id); err != nil {
-				return fail(err)
-			}
-		}
 	}
 	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "runs"), 0o700); err != nil {
 		return fail(err)
@@ -332,22 +342,6 @@ func (a *Agent) Close() error {
 }
 
 func (a *Agent) Submit(id string, spec Spec, secrets map[string]string) (Attempt, error) {
-	// nvidia-smi pmon samples for about a second; probing under a.mu would stall the agent.
-	var busy []string
-	var busyErr error
-	if spec.Resources.GPUs > 0 {
-		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
-		busy, busyErr = busyGPUs(ctx, a.info.Hardware.GPUs)
-		cancel()
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.ctx.Err() != nil {
-		return Attempt{}, a.ctx.Err()
-	}
-	if a.info.Error != "" {
-		return Attempt{}, fmt.Errorf("%w: %s", ErrUnavailable, a.info.Error)
-	}
 	if !ValidName(id) || !task.ValidImageID(spec.Image) {
 		return Attempt{}, fmt.Errorf("%w: valid attempt ID and immutable sha256 image ID are required", ErrInvalidRequest)
 	}
@@ -355,73 +349,96 @@ func (a *Agent) Submit(id string, spec Spec, secrets map[string]string) (Attempt
 	if err := spec.Validate(secrets); err != nil {
 		return Attempt{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 	}
+	var busy []string
+	if spec.Resources.GPUs > 0 {
+		// nvidia-smi pmon samples for about a second, so it runs unlocked, and only for a request that
+		// would otherwise be admitted.
+		a.mu.Lock()
+		run, existing, err := a.plan(id, spec, nil)
+		a.mu.Unlock()
+		if err != nil || existing {
+			return run, err
+		}
+		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		busy, err = busyGPUs(ctx, a.info.Hardware.GPUs)
+		cancel()
+		if err != nil {
+			return Attempt{}, err
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	run, existing, err := a.plan(id, spec, busy)
+	if err != nil || existing {
+		return run, err
+	}
+	if err := a.commit(run, secrets); err != nil {
+		return Attempt{}, err
+	}
+	return a.attempts[id], nil
+}
+
+func (a *Agent) plan(id string, spec Spec, busy []string) (run Attempt, existing bool, err error) {
+	if a.ctx.Err() != nil {
+		return Attempt{}, false, a.ctx.Err()
+	}
+	if a.info.Error != "" {
+		return Attempt{}, false, fmt.Errorf("%w: %s", ErrUnavailable, a.info.Error)
+	}
 	if a.cancelled[id] {
-		return Attempt{}, fmt.Errorf("%w: attempt was cancelled before submission", ErrConflict)
+		return Attempt{}, false, fmt.Errorf("%w: attempt was cancelled before submission", ErrConflict)
 	}
 	for name, digest := range spec.Inputs {
 		if !ValidName(name) || !content.Valid(digest) {
-			return Attempt{}, fmt.Errorf("%w: invalid input name/digest", ErrInvalidRequest)
+			return Attempt{}, false, fmt.Errorf("%w: invalid input name/digest", ErrInvalidRequest)
 		}
 		if info, err := os.Stat(a.treeDir(digest)); err != nil || !info.IsDir() {
-			return Attempt{}, fmt.Errorf("%w: input %s is not cached", ErrInvalidRequest, name)
+			return Attempt{}, false, fmt.Errorf("%w: input %s is not cached", ErrInvalidRequest, name)
 		}
 	}
 	if old, ok := a.attempts[id]; ok {
 		left, _ := json.Marshal(old.Spec)
 		right, _ := json.Marshal(spec)
 		if !bytes.Equal(left, right) {
-			return Attempt{}, fmt.Errorf("%w: attempt ID already belongs to a different request", ErrConflict)
+			return Attempt{}, false, fmt.Errorf("%w: attempt ID already belongs to a different request", ErrConflict)
 		}
-		return old, nil
+		return old, true, nil
 	}
 	if _, err := os.Lstat(a.runDir(id)); err == nil {
-		return Attempt{}, fmt.Errorf("%w: unregistered run directory exists; refusing to reuse it", ErrConflict)
+		return Attempt{}, false, fmt.Errorf("%w: unregistered run directory exists; refusing to reuse it", ErrConflict)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return Attempt{}, err
+		return Attempt{}, false, err
+	}
+	if spec.Resources.GPUs > len(a.info.Hardware.GPUs) {
+		return Attempt{}, false, ErrCapacity
 	}
 	held := a.held()
-	if spec.Resources.GPUs > len(a.info.Hardware.GPUs) {
-		return Attempt{}, ErrCapacity
-	}
-	if spec.Resources.GPUs > 0 {
-		if busyErr != nil {
-			return Attempt{}, busyErr
-		}
+	if len(busy) > 0 {
 		held = append(held, Allocation{GPUs: busy})
 	}
 	filtered, ok := matchedHardware(a.info.Hardware, spec.Match)
 	if !ok {
-		return Attempt{}, ErrCapacity
+		return Attempt{}, false, ErrCapacity
 	}
 	allocation, err := allocate(filtered, spec.Resources, held)
 	if err != nil {
-		return Attempt{}, err
+		return Attempt{}, false, err
 	}
 	now := time.Now().UTC()
-	run := Attempt{ID: id, Spec: spec, Allocation: allocation, Hardware: a.info.Hardware, State: "accepted", CreatedAt: now, UpdatedAt: now}
-	if len(secrets) > 0 {
-		if err := a.put("secret", id, secrets); err != nil {
-			return Attempt{}, err
-		}
-	}
-	if err := a.save(run); err != nil {
-		return Attempt{}, err
-	}
-	return run, nil
+	return Attempt{ID: id, Spec: spec, Allocation: allocation, Hardware: a.info.Hardware, State: Accepted, CreatedAt: now}, false, nil
 }
 
 func (a *Agent) held() []Allocation {
 	var held []Allocation
 	for _, run := range a.attempts {
-		if !run.Terminal() {
+		if !run.State.Terminal() {
 			held = append(held, run.Allocation)
 		}
 	}
 	return held
 }
 
-func (a *Agent) put(kind, id string, value any) error { return a.latch(a.store.Put(kind, id, value)) }
-
+// latch closes admission after a failed write until a restart reconciles the database.
 func (a *Agent) latch(err error) error {
 	if err != nil {
 		a.info.Error = err.Error()
@@ -429,22 +446,30 @@ func (a *Agent) latch(err error) error {
 	return err
 }
 
-func (a *Agent) save(run Attempt) error {
-	if old, ok := a.attempts[run.ID]; ok && old.StopRequested != "" {
-		run.StopRequested = old.StopRequested
-		run.StopReason = old.StopReason
-	}
-	if run.State == "finished" && run.StopRequested == "cancel" {
-		run.State = "cancelled"
-	}
+func (a *Agent) save(run Attempt) error { return a.commit(run, nil) }
+
+// commit stores an attempt's secrets in the same transaction as the attempt, so they exist exactly
+// while it is unfinished.
+func (a *Agent) commit(run Attempt, secrets map[string]string) error {
 	run.UpdatedAt = time.Now().UTC()
-	if err := a.put("attempt", run.ID, run); err != nil {
-		return err
+	err := a.store.Update(func(tx *state.Tx) error {
+		if len(secrets) > 0 {
+			if err := tx.Put("secret", run.ID, secrets); err != nil {
+				return err
+			}
+		}
+		if err := tx.Put("attempt", run.ID, run); err != nil {
+			return err
+		}
+		if run.State.Terminal() && len(run.Spec.Secrets) > 0 {
+			return tx.Delete("secret", run.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		return a.latch(err)
 	}
 	a.attempts[run.ID] = run
-	if run.Terminal() && len(run.Spec.Secrets) > 0 {
-		return a.latch(a.store.Delete("secret", run.ID))
-	}
 	return nil
 }
 
@@ -454,6 +479,10 @@ func (a *Agent) treeDir(digest string) string {
 	return filepath.Join(a.cfg.StateDir, "trees", digest)
 }
 
+func (a *Agent) serviceDir(name string) string {
+	return filepath.Join(a.cfg.StateDir, "services", name)
+}
+
 func (a *Agent) launchPending() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -461,12 +490,12 @@ func (a *Agent) launchPending() {
 		return
 	}
 	for id, run := range a.attempts {
-		if run.Terminal() || a.busy[id] {
+		if run.State.Terminal() || a.busy[id] {
 			continue
 		}
-		fresh := run.State == "accepted"
+		fresh := run.State == Accepted
 		if fresh {
-			run.State = "running"
+			run.State = Running
 			if err := a.save(run); err != nil {
 				return
 			}
@@ -478,7 +507,36 @@ func (a *Agent) launchPending() {
 
 func (a *Agent) execute(run Attempt, fresh bool) {
 	defer func() { a.mu.Lock(); delete(a.busy, run.ID); a.mu.Unlock() }()
-	dir := a.runDir(run.ID)
+	req, err := a.request(run)
+	switch {
+	case err != nil:
+	case fresh:
+		err = a.launch(req)
+	default:
+		err = resume(a.ctx, req)
+	}
+	// Shutdown detaches supervision, not the task or its reservation.
+	if a.ctx.Err() != nil {
+		return
+	}
+	state, result, err := a.settle(req, fresh, err)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	run = a.attempts[run.ID]
+	run.State, run.Error = state, ""
+	if err != nil {
+		run.Error = err.Error()
+	}
+	if result != nil {
+		run.Result = result
+	}
+	if run.State == Finished && run.StopRequested == Cancel {
+		run.State = Cancelled
+	}
+	_ = a.save(run)
+}
+
+func (a *Agent) request(run Attempt) (task.Request, error) {
 	mounts := map[string]string{}
 	for name, digest := range run.Spec.Inputs {
 		mounts[name] = a.treeDir(digest)
@@ -487,84 +545,61 @@ func (a *Agent) execute(run Attempt, fresh bool) {
 	for _, name := range run.Spec.Services {
 		services[name] = a.serviceDir(name)
 	}
-	req := task.Request{Image: run.Spec.Image, CPUs: cpuString(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: dir, ReservationID: ReservationID(a.info.ID, run.ID), Inputs: mounts, ExportOutputs: true, GPUs: run.Allocation.GPUs, CDISpecDir: filepath.Join(a.cfg.StateDir, "cdi"), Sandbox: run.Spec.Sandbox, Services: services}
-	matches := func(r task.Record) bool {
-		got := r.Request
-		return got.ReservationID == req.ReservationID && got.Image == req.Image && got.CPUs == req.CPUs && got.MemoryMiB == req.MemoryMiB && slices.Equal(got.Args, req.Args) && maps.Equal(got.Inputs, req.Inputs) && slices.Equal(got.GPUs, req.GPUs) &&
-			maps.Equal(got.Env, req.Env) && got.Network == req.Network && slices.Equal(got.CapAdd, req.CapAdd) && slices.Equal(got.Secrets.Names(), run.Spec.Secrets) && maps.Equal(got.Services, req.Services)
+	req := task.Request{Image: run.Spec.Image, CPUs: task.FormatCPUs(run.Allocation.CPUs), MemoryMiB: run.Allocation.MemoryMiB, Args: run.Spec.Args, OutputDir: a.runDir(run.ID), ReservationID: ReservationID(a.info.ID, run.ID), Inputs: mounts, ExportOutputs: true, GPUs: run.Allocation.GPUs, CDISpecDir: filepath.Join(a.cfg.StateDir, "cdi"), Sandbox: run.Spec.Sandbox, Services: services}
+	if len(run.Spec.Secrets) > 0 {
+		var values map[string]string
+		if err := a.store.Get("secret", run.ID, &values); err != nil {
+			return req, fmt.Errorf("load secrets: %w", err)
+		}
+		req.Secrets = values
 	}
-	var err error
-	if fresh {
-		err = a.prepareLaunch(run, &req)
-		if err == nil {
-			err = task.Run(a.ctx, req)
-		}
-	} else {
-		var r task.Record
-		r, err = task.ReadResult(dir)
-		if err == nil && !matches(r) {
-			err = errors.New("run record does not match its reservation")
-		}
-		if err == nil {
-			err = task.Recover(a.ctx, dir)
-		}
-	}
-	// Shutdown detaches supervision, not the task or its reservation.
-	if a.ctx.Err() != nil {
-		return
-	}
-	var exit *task.ExitError
-	if err == nil || errors.As(err, &exit) {
-		result, readErr := task.ReadResult(dir)
-		if readErr == nil && matches(result) {
-			run.State = "finished"
-			run.Error = ""
-			run.Result = &result
-		} else {
-			run.State = "blocked"
-			run.Error = fmt.Sprintf("cannot verify final record: %v", readErr)
-		}
-	} else {
-		run.State = "blocked"
-		run.Error = err.Error()
-		ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
-		result, status, probeErr := task.Status(ctx, dir)
-		cancel()
-		if probeErr == nil && matches(result) {
-			run.Result = &result
-			// A missing ID after an interrupted launch is not proof that no child can still create it.
-			if status == "unstarted" || status == "removed" || (status == "missing" && result.ContainerID != "") {
-				run.State = "infrastructure_failed"
-			}
-		} else if fresh && errors.Is(probeErr, os.ErrNotExist) {
-			run.State = "infrastructure_failed"
-		}
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	// A failed write latches admission closed until restart reconciles the database.
-	_ = a.save(run)
+	return req, nil
 }
 
-func (a *Agent) serviceDir(name string) string {
-	return filepath.Join(a.cfg.StateDir, "services", name)
-}
-
-func (a *Agent) prepareLaunch(run Attempt, req *task.Request) error {
+func (a *Agent) launch(req task.Request) error {
 	for _, dir := range req.Services {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
-	if len(run.Spec.Secrets) == 0 {
-		return nil
+	return task.Run(a.ctx, req)
+}
+
+func resume(ctx context.Context, req task.Request) error {
+	r, err := task.ReadResult(req.OutputDir)
+	if err != nil {
+		return err
 	}
-	var values map[string]string
-	if err := a.store.Get("secret", run.ID, &values); err != nil {
-		return fmt.Errorf("load secrets: %w", err)
+	if !r.Request.Same(req) {
+		return errors.New("run record does not match its reservation")
 	}
-	req.Secrets = values
-	return nil
+	return task.Recover(ctx, req.OutputDir)
+}
+
+func (a *Agent) settle(req task.Request, fresh bool, err error) (State, *task.Record, error) {
+	var exit *task.ExitError
+	if err == nil || errors.As(err, &exit) {
+		result, err := task.ReadResult(req.OutputDir)
+		if err == nil && !result.Request.Same(req) {
+			err = errors.New("record does not match its reservation")
+		}
+		if err != nil {
+			return Blocked, nil, fmt.Errorf("cannot verify final record: %w", err)
+		}
+		return Finished, &result, nil
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
+	defer cancel()
+	result, status, probeErr := task.Status(ctx, req.OutputDir)
+	switch {
+	case probeErr == nil && result.Request.Same(req) && status.Gone(result):
+		return InfrastructureFailed, &result, err
+	case probeErr == nil && result.Request.Same(req):
+		return Blocked, &result, err
+	case fresh && errors.Is(probeErr, os.ErrNotExist):
+		return InfrastructureFailed, nil, err
+	}
+	return Blocked, nil, err
 }
 
 func (a *Agent) Serve() error {
