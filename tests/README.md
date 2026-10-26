@@ -41,7 +41,7 @@ Evidence is copied into a private local `/tmp/ordo-worker-evidence.*` directory.
 On failure it stops its agent and retains remote state for diagnosis; the bounded task may still be running.
 Do not start another run on the host until those resources are reconciled and cleaned up.
 
-## M2 findings incorporated
+## Runtime findings
 
 The live tests exposed two independent runtime dependencies:
 
@@ -72,18 +72,4 @@ No sustained GPU workload or global CDI registration is used.
 
 Successful tests remove only their own remote resources; failed tests retain state for reconciliation.
 These checks do not prove host-reboot/power-loss recovery, ARM runtime behavior, multi-GPU task execution, or performance under sustained load.
-
-## Completed acceptance checkpoint
-
-The implementation through `cfea375` passed:
-
-- `nix fmt`, `git diff --check`, uncached `go test -race -count=1 ./...`, and `golangci-lint run ./...` (zero issues).
-- Nix package build and `nix flake check`; evaluation of all three configured systems with `nix flake check --all-systems --no-build`.
-- Static Linux ARM64 and Darwin ARM64 cross-compilation; shell and JavaScript syntax checks.
-- Latest CPU/memory lifecycle and transfer regression tests on both vegeta and goku.
-- GPU/hardware-matching tests on both hosts, plus the two-worker queue/workflow test and actual Chromium UI interactions.
-- Post-test checks: no retained Ordo containers or active agent/runtime units, and empty host ownership bindings on both workers.
-
-For the final Nix gate, use the Git-backed `nix flake check` after tracking new files.
-A clean `path:.` snapshot can include `.git`, causing the formatter check's initial commit to fail with “nothing to commit”; this is a source-selection issue, not a formatting failure.
 No test enables services permanently or changes host configuration.

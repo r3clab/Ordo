@@ -3,14 +3,7 @@
 A task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
-**Status:** Local CPU-only execution/recovery and persistent SSH worker agents are implemented.
-Agents provide durable, idempotent attempts, exclusive physical cores, and aggregate memory accounting.
-Immutable image/input transfer and output collection are implemented.
-The durable server queue reconnects and reconciles original attempts after controller failure.
-JSON DAGs, parameter sweeps, bounded retries, timeouts, and cancellation are implemented.
-Exclusive NVIDIA GPU allocation and restart recovery are implemented.
-Hardware-matching policy is enforced by both scheduler and agent.
-A loopback-only authenticated web UI supports submission, status, collected logs, and cancellation.
+**Status:** Ordo runs local and SSH-managed tasks with exclusive CPU/GPU allocations, hardware matching, a durable queue, JSON workflows, and a loopback web UI.
 
 ## Direction
 
@@ -243,6 +236,9 @@ npm run check   # type-check
 npm run build   # regenerate internal/server/web/
 ```
 
+`nix flake check` type-checks the UI and fails if the committed build differs from a fresh one.
+After changing `ui/package-lock.json`, update `npmDepsHash` in `nix/checks/ui.nix`.
+
 `npm run dev` serves the UI with hot reload and proxies `/v1` to a server listening on `127.0.0.1:7331`.
 
 ## GPU workers
@@ -322,21 +318,23 @@ go test -race ./...
 golangci-lint run ./...
 go run ./cmd/ordo --help
 nix build                      # binary at result/bin/ordo
-nix flake check                # formatting, lint, build, and race-enabled tests
+nix flake check                # formatting, lint, build, race-enabled tests, and UI build
 ```
 
 - `nix/devshell.nix`: tools and a fail-fast formatting/lint pre-commit hook, installed on shell entry.
 - `nix/formatter.nix`: treefmt configuration and formatting check.
 - `nix/package.nix`: Go build, tests, and sandboxed lint check.
+- `nix/checks/ui.nix`: UI type check and committed-build freshness check.
+
+CI runs `nix flake check` on every push to `main` and every pull request.
 
 Run commits from Ordo's own dev shell so its hooks apply.
 Nix's Git-based flakes only see tracked files: add new files to Git before checking, or use `path:.` (for example, `nix develop path:.`) while bootstrapping.
+Run `nix flake check` itself Git-backed: a `path:.` snapshot can include `.git`, which makes the formatter check fail with “nothing to commit”.
 
 ## Still open
 
 - Exact upstream components and tests to reuse or port.
-- Hardware-matching fields and enforcement details on rootless workers.
-- Task volumes, durations, data sizes, retry limits, timeouts, and downstream-failure behavior.
 
 ## License
 

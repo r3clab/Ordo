@@ -1,0 +1,18 @@
+name: Check
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+# The runner user's nix.conf may not enable flakes.
+env:
+  NIX_CONFIG: experimental-features = nix-command flakes
+jobs:
+  flake:
+    runs-on:
+      group: cirrus
+    steps:
+      - uses: actions/checkout@v7
+      - run: nix flake check -L
