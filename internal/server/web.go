@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/task"
 	"github.com/r3clab/Ordo/internal/worker"
 	"io"
 	"net"
@@ -20,6 +21,15 @@ import (
 
 //go:embed web/*
 var webFiles embed.FS
+
+// Content types are fixed rather than taken from the host's MIME tables, which could change them.
+var webAssets = map[string]struct{ file, kind string }{
+	"/":          {"index.html", "text/html; charset=utf-8"},
+	"/app.js":    {"app.js", "text/javascript; charset=utf-8"},
+	"/style.css": {"style.css", "text/css; charset=utf-8"},
+}
+
+var logStreams = map[string]string{"stdout": task.StdoutFile, "stderr": task.StderrFile}
 
 type WorkerStatus struct {
 	Host      string       `json:"host"`
@@ -133,37 +143,20 @@ func (s *Server) WebHandler(token string) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		file, kind := "", ""
-		switch r.URL.Path {
-		case "/":
-			file = "index.html"
-			kind = "text/html; charset=utf-8"
-		case "/app.js":
-			file = "app.js"
-			kind = "text/javascript; charset=utf-8"
-		case "/style.css":
-			file = "style.css"
-			kind = "text/css; charset=utf-8"
-		default:
+		asset, ok := webAssets[r.URL.Path]
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-		data, err := webFiles.ReadFile("web/" + file)
-		if err != nil {
-			http.Error(w, "asset unavailable", 500)
-			return
-		}
-		w.Header().Set("Content-Type", kind)
-		if r.Method != http.MethodHead {
-			_, _ = w.Write(data)
-		}
+		w.Header().Set("Content-Type", asset.kind)
+		http.ServeFileFS(w, r, webFiles, "web/"+asset.file)
 	})
 }
 func (s *Server) webRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { worker.WriteJSON(w, http.StatusOK, s.Workers()) })
 	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", func(w http.ResponseWriter, r *http.Request) {
-		stream := r.PathValue("stream")
-		if stream != "stdout" && stream != "stderr" {
+		name, ok := logStreams[r.PathValue("stream")]
+		if !ok {
 			http.Error(w, "unknown log stream", 400)
 			return
 		}
@@ -186,7 +179,7 @@ func (s *Server) webRoutes(mux *http.ServeMux) {
 			http.Error(w, "logs are available after collection", http.StatusConflict)
 			return
 		}
-		file := filepath.Join(dir, stream+".log")
+		file := filepath.Join(dir, name)
 		info, err := os.Lstat(file)
 		if err != nil || !info.Mode().IsRegular() {
 			http.Error(w, "log is unavailable", 500)
