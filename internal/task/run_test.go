@@ -182,9 +182,9 @@ func TestRunRetainsContainerOnInfrastructureFailure(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 			r := readRecord(t, req.OutputDir)
-			wantState := "error"
+			wantState := Errored
 			if stage == "rm" {
-				wantState = "finished"
+				wantState = Finished
 			}
 			if r.State != wantState || r.Error == "" || r.ContainerRemoved {
 				t.Fatalf("invalid failure record: %+v", r)
@@ -267,6 +267,9 @@ func TestRunKeepsContainerWhenMetadataCannotBeSaved(t *testing.T) {
 }
 
 func TestValidateRequest(t *testing.T) {
+	if got, err := ParseCPUs("126-127,62-63"); err != nil || !slices.Equal(got, []int{62, 63, 126, 127}) {
+		t.Fatalf("%v %v", got, err)
+	}
 	for _, cpus := range []string{"0", "0,2-3", "1-128"} {
 		req := request(t)
 		req.CPUs = cpus
@@ -274,7 +277,7 @@ func TestValidateRequest(t *testing.T) {
 			t.Fatalf("valid CPUs %q: %v", cpus, err)
 		}
 	}
-	for _, cpus := range []string{"", "-1", "0,", "3-1", "0-1-2", "all", "0;id", "4294967296"} {
+	for _, cpus := range []string{"", "-1", "0,", "3-1", "0-1-2", "all", "0;id", "4294967296", "0,0", "0-65536"} {
 		req := request(t)
 		req.CPUs = cpus
 		if err := req.validate(); err == nil {

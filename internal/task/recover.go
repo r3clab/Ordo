@@ -49,7 +49,7 @@ func reconcile(ctx context.Context, r *Record, podman command) error {
 		if err := savedResults(r); err != nil {
 			return err
 		}
-		r.State = "finished"
+		r.State = Finished
 		r.Error = ""
 		return saveRecord(r)
 	}
@@ -66,7 +66,7 @@ func reconcile(ctx context.Context, r *Record, podman command) error {
 		return err
 	}
 	if !exists {
-		if r.State != "finished" {
+		if r.State != Finished {
 			return errors.New("container is missing and results were not marked finished; refusing to rerun the task")
 		}
 		if err := savedResults(r); err != nil {
@@ -81,7 +81,7 @@ func reconcile(ctx context.Context, r *Record, podman command) error {
 		return err
 	}
 	r.ContainerID = container.ID
-	if r.State == "finished" {
+	if r.State == Finished {
 		if err := savedResults(r); err != nil {
 			return err
 		}
@@ -93,7 +93,7 @@ func reconcile(ctx context.Context, r *Record, podman command) error {
 	if container.State.Status != "running" && container.State.Status != "exited" {
 		return fmt.Errorf("cannot recover container in state %q; it will not be started or restarted", container.State.Status)
 	}
-	r.State = "running"
+	r.State = Running
 	r.Error = ""
 	if err := saveRecord(r); err != nil {
 		return err
@@ -122,17 +122,17 @@ func checkRecord(dir string, r Record) (*Record, error) {
 		return nil, errors.New("invalid saved container ID")
 	}
 	switch r.State {
-	case "preparing", "running", "interrupted", "error", "finished":
+	case Preparing, Running, Interrupted, Errored, Finished:
 	default:
 		return nil, fmt.Errorf("invalid saved run state %q", r.State)
 	}
 	if r.ExitCode != nil && (*r.ExitCode < 0 || *r.ExitCode > 255) {
 		return nil, errors.New("invalid saved exit code")
 	}
-	if (r.State == "finished" || r.ContainerRemoved) && r.ExitCode == nil {
+	if (r.State == Finished || r.ContainerRemoved) && r.ExitCode == nil {
 		return nil, errors.New("finished run has no saved exit code")
 	}
-	if r.ContainerRemoved && r.State != "finished" && r.State != "error" {
+	if r.ContainerRemoved && r.State != Finished && r.State != Errored {
 		return nil, errors.New("removed container has an inconsistent saved run state")
 	}
 	return &r, nil
@@ -140,7 +140,7 @@ func checkRecord(dir string, r Record) (*Record, error) {
 
 func savedResults(r *Record) error {
 	if r.Request.ExportOutputs {
-		hash, err := content.Hash(filepath.Join(r.Request.OutputDir, "outputs.tar"))
+		hash, err := content.Hash(filepath.Join(r.Request.OutputDir, OutputsArchive))
 		if err != nil {
 			return err
 		}
@@ -151,7 +151,7 @@ func savedResults(r *Record) error {
 	if r.ExitCode == nil {
 		return errors.New("finished run has no saved exit code")
 	}
-	for _, name := range []string{"stdout.log", "stderr.log"} {
+	for _, name := range logFiles {
 		info, err := os.Lstat(filepath.Join(r.Request.OutputDir, name))
 		if err != nil {
 			return fmt.Errorf("check saved %s: %w", name, err)

@@ -5,15 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/r3clab/Ordo/internal/content"
 )
 
-func ValidImageID(id string) bool {
-	digest, ok := strings.CutPrefix(id, "sha256:")
-	return ok && content.Valid(digest)
-}
+const ImageIDPattern = `^sha256:[0-9a-f]{64}$`
+
+var validImageID = regexp.MustCompile(ImageIDPattern)
+
+func ValidImageID(id string) bool { return validImageID.MatchString(id) }
 func ImageID(ctx context.Context, reference string) (string, error) {
 	return command(execPodman).imageID(ctx, reference)
 }
@@ -36,8 +38,11 @@ func ExportImage(ctx context.Context, reference, dest string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, err = command(execPodman).output(ctx, "save", "--format=oci-archive", "--output", dest, "--", id)
-	return id, err
+	return id, SaveImage(ctx, id, dest)
+}
+func SaveImage(ctx context.Context, id, dest string) error {
+	_, err := command(execPodman).output(ctx, "save", "--format=oci-archive", "--output", dest, "--", id)
+	return err
 }
 func LoadImage(ctx context.Context, archive, want string) error {
 	if !ValidImageID(want) {

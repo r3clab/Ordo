@@ -52,7 +52,7 @@ type Record struct {
 	ContainerName    string    `json:"container_name"`
 	ContainerID      string    `json:"container_id,omitempty"`
 	ImageID          string    `json:"image_id,omitempty"`
-	State            string    `json:"state"`
+	State            State     `json:"state"`
 	CreatedAt        time.Time `json:"created_at"`
 	StartedAt        time.Time `json:"started_at"`
 	FinishedAt       time.Time `json:"finished_at"`
@@ -90,7 +90,7 @@ func run(ctx context.Context, req Request, podman command) error {
 	r := Record{
 		Request:        req,
 		ContainerName:  "ordo-" + strings.ToLower(rand.Text()),
-		State:          "preparing",
+		State:          Preparing,
 		CreatedAt:      time.Now().UTC(),
 		AllocationMode: "unmanaged",
 	}
@@ -106,10 +106,10 @@ func run(ctx context.Context, req Request, podman command) error {
 func outcome(r *Record, err error) error {
 	if err != nil {
 		// Finished is the durable results marker, even if subsequent cleanup fails.
-		if r.State != "finished" {
-			r.State = "error"
+		if r.State != Finished {
+			r.State = Errored
 			if errors.Is(err, context.Canceled) {
-				r.State = "interrupted"
+				r.State = Interrupted
 			}
 		}
 		r.Error = err.Error()
@@ -126,12 +126,8 @@ func (r Request) validate() error {
 		if !filepath.IsAbs(r.CDISpecDir) {
 			return errors.New("GPU requests require a private CDI specification directory")
 		}
-		seen := map[string]bool{}
-		for _, id := range r.GPUs {
-			if len(id) != 40 || !strings.HasPrefix(id, "GPU-") || strings.ContainsAny(id, "/,:\n\x00") || seen[id] {
-				return errors.New("invalid GPU identity")
-			}
-			seen[id] = true
+		if _, err := CheckGPUs(r.GPUs); err != nil {
+			return err
 		}
 	}
 	if err := checkMounts("input", r.Inputs); err != nil {
@@ -152,18 +148,8 @@ func (r Request) validate() error {
 	if r.MemoryMiB <= 0 || r.MemoryMiB > math.MaxInt64/(1024*1024) {
 		return errors.New("--memory-mib must be a positive, representable memory budget")
 	}
-	for _, part := range strings.Split(r.CPUs, ",") {
-		first, last, isRange := strings.Cut(part, "-")
-		start, err := strconv.ParseUint(first, 10, 32)
-		if err != nil {
-			return errors.New("--cpus requires CPU IDs or ranges, such as 0,2-3")
-		}
-		if isRange {
-			end, err := strconv.ParseUint(last, 10, 32)
-			if err != nil || start > end {
-				return fmt.Errorf("invalid CPU range %q", part)
-			}
-		}
+	if _, err := ParseCPUs(r.CPUs); err != nil {
+		return fmt.Errorf("--cpus: %w", err)
 	}
 	return nil
 }
@@ -219,7 +205,7 @@ func execute(ctx context.Context, r *Record, podman command) error {
 		args = append(args, "--volume", r.Request.Services[name]+":/services/"+name+":ro")
 	}
 	if r.Request.ExportOutputs {
-		outputs := filepath.Join(r.Request.OutputDir, "outputs")
+		outputs := filepath.Join(r.Request.OutputDir, OutputsDir)
 		if err := os.Mkdir(outputs, 0o700); err != nil {
 			return err
 		}
@@ -252,7 +238,7 @@ func execute(ctx context.Context, r *Record, podman command) error {
 		return errors.New("container creation did not return a valid ID; retain the run directory for recovery")
 	}
 	r.ContainerID = id
-	r.State = "running"
+	r.State = Running
 	if err := saveRecord(r); err != nil {
 		return err
 	}
@@ -283,13 +269,13 @@ func complete(ctx context.Context, r *Record, podman command) error {
 		return err
 	}
 	if r.Request.ExportOutputs {
-		hash, err := content.Archive(filepath.Join(r.Request.OutputDir, "outputs"), filepath.Join(r.Request.OutputDir, "outputs.tar"))
+		hash, err := content.Archive(filepath.Join(r.Request.OutputDir, OutputsDir), filepath.Join(r.Request.OutputDir, OutputsArchive))
 		if err != nil {
 			return fmt.Errorf("collect outputs: %w", err)
 		}
 		r.OutputsSHA256 = hash
 	}
-	r.State = "finished"
+	r.State = Finished
 	r.Error = ""
 	if err := saveRecord(r); err != nil {
 		return err
@@ -402,7 +388,7 @@ func (podman command) output(ctx context.Context, args ...string) ([]byte, error
 
 func collectLogs(ctx context.Context, r *Record, podman command) error {
 	dir := r.Request.OutputDir
-	for _, name := range []string{"stdout.log", "stderr.log"} {
+	for _, name := range logFiles {
 		info, err := os.Lstat(filepath.Join(dir, name))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -411,15 +397,15 @@ func collectLogs(ctx context.Context, r *Record, podman command) error {
 			return fmt.Errorf("refusing to replace non-regular %s", name)
 		}
 	}
-	return content.WriteAtomic(filepath.Join(dir, "stdout.log"), func(stdout io.Writer) error {
-		return content.WriteAtomic(filepath.Join(dir, "stderr.log"), func(stderr io.Writer) error {
+	return content.WriteAtomic(filepath.Join(dir, StdoutFile), func(stdout io.Writer) error {
+		return content.WriteAtomic(filepath.Join(dir, StderrFile), func(stderr io.Writer) error {
 			return podman(ctx, stdout, stderr, "logs", "--", r.ContainerID)
 		})
 	})
 }
 
 func saveRecord(r *Record) error {
-	return content.WriteAtomic(filepath.Join(r.Request.OutputDir, "run.json"), func(w io.Writer) error {
+	return content.WriteAtomic(filepath.Join(r.Request.OutputDir, RecordFile), func(w io.Writer) error {
 		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(r)

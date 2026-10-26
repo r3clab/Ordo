@@ -20,13 +20,13 @@ func CheckHost(ctx context.Context) error {
 }
 
 func ReadResult(dir string) (Record, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "run.json"))
+	data, err := os.ReadFile(filepath.Join(dir, RecordFile))
 	if err != nil {
 		return Record{}, err
 	}
 	var r Record
 	if err := json.Unmarshal(data, &r); err != nil {
-		return Record{}, fmt.Errorf("decode run.json: %w", err)
+		return Record{}, fmt.Errorf("decode %s: %w", RecordFile, err)
 	}
 	return r, nil
 }
@@ -38,7 +38,7 @@ func Stop(ctx context.Context, dir string) error {
 		return err
 	}
 	switch status {
-	case "removed", "exited":
+	case Removed, "exited":
 		return nil
 	case "running", "paused", "created", "configured", "stopping":
 		c, err := command(execPodman).inspectOwned(ctx, &r, cmp.Or(r.ContainerID, r.ContainerName))
@@ -53,13 +53,13 @@ func Stop(ctx context.Context, dir string) error {
 }
 
 // Status inspects an existing execution; it never creates or starts a container.
-func Status(ctx context.Context, dir string) (Record, string, error) {
+func Status(ctx context.Context, dir string) (Record, ContainerStatus, error) {
 	r, err := ReadResult(dir)
 	if err != nil {
 		return r, "", err
 	}
-	if r.ImageID == "" && r.ContainerID == "" && strings.HasPrefix(r.ContainerName, "ordo-") && (r.State == "preparing" || r.State == "error" || r.State == "interrupted") {
-		return r, "unstarted", nil
+	if r.ImageID == "" && r.ContainerID == "" && strings.HasPrefix(r.ContainerName, "ordo-") && (r.State == Preparing || r.State == Errored || r.State == Interrupted) {
+		return r, Unstarted, nil
 	}
 	checked, err := checkRecord(dir, r)
 	if err != nil {
@@ -67,7 +67,7 @@ func Status(ctx context.Context, dir string) (Record, string, error) {
 	}
 	r = *checked
 	if r.ContainerRemoved {
-		return r, "removed", nil
+		return r, Removed, nil
 	}
 	selector := cmp.Or(r.ContainerID, r.ContainerName)
 	p := command(execPodman)
@@ -76,11 +76,11 @@ func Status(ctx context.Context, dir string) (Record, string, error) {
 		return r, "", err
 	}
 	if !exists {
-		return r, "missing", nil
+		return r, Missing, nil
 	}
 	c, err := p.inspectOwned(ctx, &r, selector)
 	if err != nil {
 		return r, "", err
 	}
-	return r, c.State.Status, nil
+	return r, ContainerStatus(c.State.Status), nil
 }
