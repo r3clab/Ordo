@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,17 +94,14 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 	}
 }
 func TestWebListenerIsLoopbackOnly(t *testing.T) {
-	for _, address := range []string{"0.0.0.0:0", "[::]:0", "example.com:0", "localhost:0"} {
-		if l, err := listenWeb(address); err == nil {
-			_ = l.Close()
-			t.Fatal("unsafe bind", address)
-		}
-	}
-	l, err := listenWeb("127.0.0.1:0")
+	l, err := listenWeb(0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = l.Close()
+	defer func() { _ = l.Close() }()
+	if addr := l.Addr().(*net.TCPAddr); !addr.IP.IsLoopback() {
+		t.Fatal("unsafe bind", addr)
+	}
 }
 func TestWebHTTPRoundTrip(t *testing.T) {
 	s, err := Open(Config{Root: filepath.Join(t.TempDir(), "server"), Workers: []worker.Config{testWorker("worker")}})

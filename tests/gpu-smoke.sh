@@ -17,7 +17,7 @@ cleanup(){
 }
 trap cleanup EXIT
 ssh "$host" "if ! podman image exists '$ORDO_TEST_IMAGE'; then touch '$root/image-introduced'; fi"
-jq -n --arg host "$host" --arg root "$root" --arg gpu "$gpu" '{listen:"127.0.0.1:0",workers:[{host:$host,state_dir:$root,cpus:"62,63,126,127",memory_mib:512,gpus:[$gpu],tags:["gpu-smoke"]}]}' > "$work/server.json"
+jq -n --arg host "$host" --arg root "$root" --arg gpu "$gpu" '{port:0,workers:[{host:$host,state_dir:$root,cpus:"62,63,126,127",memory_mib:512,gpus:[$gpu],tags:["gpu-smoke"]}]}' > "$work/server.json"
 start() { "$ORDO_TEST_BINARY" server --state "$work/server" --config "$work/server.json" >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > /dev/null 2>&1; then return; fi; sleep 0.2; done; return 1; }
 submit() { jq -nc --arg installable "$ORDO_TEST_INSTALLABLE" --arg out "$work/out" "$1" | "$ORDO_TEST_BINARY" submit --state "$work/server" >> "$work/submitted.json"; }
 job() { "$ORDO_TEST_BINARY" queue get --state "$work/server" --out "$work/out/$1"; }

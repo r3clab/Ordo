@@ -28,7 +28,7 @@ func TestRunArgv(t *testing.T) {
 	r.Services = map[string]string{"model": "/w/services/model"}
 	r.GPUs = []string{"GPU-11111111-1111-1111-1111-111111111111"}
 	r.CDISpecDir = "/w/cdi"
-	r.EnvFile = "/w/runs/a1/.secrets.env"
+	r.Secrets = []string{"TOKEN"}
 	r.Timeout = 70
 	got := r.Argv()
 	if !slices.Equal(got[:2], []string{"--cdi-spec-dir", "/w/cdi"}) {
@@ -37,7 +37,7 @@ func TestRunArgv(t *testing.T) {
 	for _, want := range [][]string{
 		{"--timeout", "70", "--network=pasta", "--cap-add=NET_ADMIN", "--env", "A=1", "--env", "B=2", "--image-volume=ignore"},
 		{"--volume", "/w/trees/h:/inputs/data:ro", "--volume", "/w/services/model:/services/model:ro", "--volume", "/w/runs/a1/outputs:/outputs:rw"},
-		{"--device", "nvidia.com/gpu=GPU-11111111-1111-1111-1111-111111111111", "--env", "NVIDIA_VISIBLE_DEVICES=void", "--env-file", "/w/runs/a1/.secrets.env", "--"},
+		{"--device", "nvidia.com/gpu=GPU-11111111-1111-1111-1111-111111111111", "--env", "NVIDIA_VISIBLE_DEVICES=void", "--secret", "ordo-a1-TOKEN,type=mount,target=/run/secrets/TOKEN", "--"},
 	} {
 		start := slices.Index(got, want[0])
 		if start < 0 || !slices.Equal(got[start:start+len(want)], want) {

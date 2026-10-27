@@ -182,14 +182,15 @@ type record struct {
 type Server struct {
 	// write serializes changes to jobs, records, attempts and the store, so mu guards only reading and
 	// installing them and is never held across a commit. A holder of write may read them without mu.
-	write    sync.Mutex
-	mu       sync.Mutex
-	Root     string
-	store    *state.Store
-	id       string
-	workers  []worker.Config
-	services map[string]string
-	secrets  map[string]string
+	write      sync.Mutex
+	mu         sync.Mutex
+	Root       string
+	store      *state.Store
+	id         string
+	workers    []worker.Config
+	services   map[string]string
+	secretsDir string
+	sshConfig  string
 	// jobs holds only unfinished jobs, and outs maps their Out to their ID; a finished job is read back
 	// from the store.
 	jobs     map[string]Job
@@ -206,20 +207,17 @@ type Config struct {
 	Root     string
 	Workers  []worker.Config
 	Services map[string]string
-	Secrets  map[string]string
 	Tools    image.Tools
-	// Home finds a worker's home for its default state directory; nil uses ssh.Home.
+	// SecretsDir holds one file per secret, named after it.
+	SecretsDir string
+	SSHConfig  string
+	// Home finds a worker's home for its default state directory; nil uses ssh.Home with SSHConfig.
 	Home func(ctx context.Context, host string) (string, error)
 }
 
 func Open(c Config) (_ *Server, err error) {
 	if len(c.Workers) == 0 {
 		return nil, errors.New("configure at least one worker")
-	}
-	for name, value := range c.Secrets {
-		if err := spec.CheckSecret(name, value); err != nil {
-			return nil, err
-		}
 	}
 	root, err := filepath.Abs(c.Root)
 	if err != nil {
@@ -236,7 +234,7 @@ func Open(c Config) (_ *Server, err error) {
 	}()
 	home := c.Home
 	if home == nil {
-		home = ssh.Home
+		home = func(ctx context.Context, host string) (string, error) { return ssh.Home(ctx, host, c.SSHConfig) }
 	}
 	workers, err := stateDirs(db, c.Workers, home)
 	if err != nil {
@@ -257,7 +255,7 @@ func Open(c Config) (_ *Server, err error) {
 			}
 		}
 	}
-	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(c.Services), secretsDir: c.SecretsDir, sshConfig: c.SSHConfig, jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)
 	if errors.Is(err, state.ErrNotFound) {
@@ -625,6 +623,17 @@ func (s *Server) check(r Request) error {
 	return nil
 }
 
+func (s *Server) secret(name string) (string, error) {
+	if s.secretsDir == "" {
+		return "", fmt.Errorf("secret %s needs a secrets directory", name)
+	}
+	data, err := os.ReadFile(filepath.Join(s.secretsDir, name))
+	if err != nil {
+		return "", fmt.Errorf("secret %s: %w", name, err)
+	}
+	return string(data), spec.CheckSecret(name, string(data))
+}
+
 func (s *Server) checkConfig(t spec.Task) error {
 	for _, name := range t.Services {
 		if _, ok := s.services[name]; !ok {
@@ -632,8 +641,8 @@ func (s *Server) checkConfig(t spec.Task) error {
 		}
 	}
 	for _, name := range t.Secrets {
-		if _, ok := s.secrets[name]; !ok {
-			return fmt.Errorf("secret %q is unknown; add it to \"secrets\" in the server config", name)
+		if _, err := s.secret(name); err != nil {
+			return err
 		}
 	}
 	if !slices.ContainsFunc(s.workers, func(w worker.Config) bool { return w.Carries(t.Tags) }) {
@@ -808,8 +817,8 @@ func (s *Server) nested(out string, pending map[string]record) string {
 	return ""
 }
 
-func (s *Server) Run(ctx context.Context, address string) error {
-	web, err := listenWeb(address)
+func (s *Server) Run(ctx context.Context, port uint16) error {
+	web, err := listenWeb(port)
 	if err != nil {
 		return err
 	}

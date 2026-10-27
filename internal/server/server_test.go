@@ -462,13 +462,12 @@ func TestTagsSelectWorkers(t *testing.T) {
 func TestSecretsServicesAndStop(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	config := Config{Root: filepath.Join(t.TempDir(), "state"), Workers: []worker.Config{testWorker("worker")}, Services: map[string]string{"model": "127.0.0.1:8317"}, Secrets: map[string]string{"TOKEN": "hunter2"}, Tools: testTools()}
-	workers := config.Workers
-	broken := config
-	broken.Secrets = map[string]string{"TOKEN": "a\nb"}
-	if _, err := Open(broken); err == nil {
-		t.Fatal("accepted a secret the env file cannot carry")
+	secrets := t.TempDir()
+	if err := os.WriteFile(filepath.Join(secrets, "TOKEN"), []byte("hunter2\nline 2\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	config := Config{Root: filepath.Join(t.TempDir(), "state"), Workers: []worker.Config{testWorker("worker")}, Services: map[string]string{"model": "127.0.0.1:8317"}, SecretsDir: secrets, Tools: testTools()}
+	workers := config.Workers
 	s, err := Open(config)
 	if err != nil {
 		t.Fatal(err)
@@ -480,7 +479,6 @@ func TestSecretsServicesAndStop(t *testing.T) {
 		"an unconfigured service":                           func(r *Request) { r.Services = []string{"other"} },
 		"an unconfigured secret":                            func(r *Request) { r.Secrets = []string{"OTHER"} },
 		"a repeated secret":                                 func(r *Request) { r.Secrets = []string{"TOKEN", "TOKEN"} },
-		"a secret that is also env":                         func(r *Request) { r.Env = map[string]string{"TOKEN": "x"} },
 		"a launch command beyond the remote argument limit": func(r *Request) { r.Args = []string{strings.Repeat("x", ssh.MaxCommand)} },
 	} {
 		bad := req
@@ -498,14 +496,14 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	h := newFakeHost(s.id)
 	mustTick(t, s, workers[0], h)
 	launched := h.launches[0]
-	if !maps.Equal(launched.Secrets, config.Secrets) || !slices.Equal(launched.Spec.Services, []string{"model"}) || launched.Spec.Network != spec.Egress {
+	if !maps.Equal(launched.Secrets, map[string]string{"TOKEN": "hunter2\nline 2\n"}) || !slices.Equal(launched.Spec.Services, []string{"model"}) || launched.Spec.Network != spec.Egress {
 		t.Fatalf("launch lost the sandbox or configured secret: %+v", launched)
 	}
 
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for name, dropped := range map[string]Config{"service": {Root: config.Root, Workers: workers, Secrets: config.Secrets}, "secret": {Root: config.Root, Workers: workers, Services: config.Services}} {
+	for name, dropped := range map[string]Config{"service": {Root: config.Root, Workers: workers, SecretsDir: secrets}, "secret": {Root: config.Root, Workers: workers, Services: config.Services}} {
 		if other, err := Open(dropped); err == nil {
 			_ = other.Close()
 			t.Fatalf("dropped a %s an unfinished job uses", name)
@@ -754,4 +752,28 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 	}
 	j, _, err := s.job(result.ID)
 	return j, err
+}
+
+func TestSecretMissingAtDispatchAbandonsTheAttempt(t *testing.T) {
+	secrets := t.TempDir()
+	file := filepath.Join(secrets, "TOKEN")
+	if err := os.WriteFile(file, []byte("hunter2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(Config{Root: filepath.Join(t.TempDir(), "state"), Workers: []worker.Config{testWorker("worker")}, SecretsDir: secrets, Tools: testTools()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	req := jobRequest(filepath.Join(t.TempDir(), "agent"))
+	req.Secrets = []string{"TOKEN"}
+	id := submit(t, s, req)
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	h := newFakeHost(s.id)
+	mustTick(t, s, s.workers[0], h)
+	if j := mustJob(t, s, id); len(h.launches) != 0 || !strings.Contains(j.Error, "secret TOKEN") {
+		t.Fatalf("launched without its secret: launches=%d error=%q", len(h.launches), j.Error)
+	}
 }

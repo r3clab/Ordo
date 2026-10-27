@@ -108,15 +108,8 @@ func (s *Server) Token() (string, error) {
 	}
 	return token, nil
 }
-func listenWeb(address string) (net.Listener, error) {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
-	if !loopback(host) {
-		return nil, errors.New("web listen address must be a literal loopback IP")
-	}
-	return net.Listen("tcp", address)
+func listenWeb(port uint16) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
 }
 
 func loopback(host string) bool {

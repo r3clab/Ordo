@@ -111,7 +111,7 @@ func (s *Server) work(ctx context.Context, cfg worker.Config) {
 }
 
 func (s *Server) session(ctx context.Context, cfg worker.Config) error {
-	m, err := worker.Dial(ctx, cfg, s.services)
+	m, err := worker.Dial(ctx, cfg, s.services, s.sshConfig)
 	if err != nil {
 		return err
 	}
@@ -389,6 +389,15 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 	if j.stopKind() != "" {
 		return s.finish(j, CancelFailure)
 	}
+	sp := j.spec()
+	secrets := make(map[string]string, len(sp.Secrets))
+	for _, name := range sp.Secrets {
+		value, err := s.secret(name)
+		if err != nil {
+			return s.abandon(ctx, j, v, err.Error())
+		}
+		secrets[name] = value
+	}
 	if err := s.upload(ctx, j, v); err != nil {
 		if end := fatal(ctx, err); end != nil {
 			return end
@@ -399,11 +408,6 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 		j.State = Queued
 		j.Error = err.Error()
 		return s.save(j)
-	}
-	sp := j.spec()
-	secrets := make(map[string]string, len(sp.Secrets))
-	for _, name := range sp.Secrets {
-		secrets[name] = s.secrets[name]
 	}
 	id, err := v.host.Launch(ctx, worker.Launch{Attempt: at.ID, Spec: sp, Allocation: at.Allocation, Secrets: secrets})
 	if end := fatal(ctx, err); end != nil {

@@ -16,7 +16,6 @@ func TestSandboxValidation(t *testing.T) {
 		"env NUL":         {Sandbox: Sandbox{Env: map[string]string{"X": "\x00"}}},
 		"env size":        {Sandbox: Sandbox{Env: map[string]string{"X": large}}},
 		"reserved env":    {Sandbox: Sandbox{Env: map[string]string{"NVIDIA_VISIBLE_DEVICES": "all"}}},
-		"secret is env":   {Sandbox: Sandbox{Env: map[string]string{"TOKEN": ""}}, Secrets: []string{"TOKEN"}},
 		"reserved secret": {Secrets: []string{"NVIDIA_DRIVER_CAPABILITIES"}},
 		"secret name":     {Secrets: []string{"1X"}},
 		"repeated secret": {Secrets: []string{"TOKEN", "TOKEN"}},
@@ -33,7 +32,7 @@ func TestSandboxValidation(t *testing.T) {
 }
 
 func TestSecretValues(t *testing.T) {
-	for name, value := range map[string]string{"empty": "", "multiline": "a\nb", "carriage-return": "a\rb", "NUL": "a\x00b", "oversize": strings.Repeat("x", MaxValueBytes+1)} {
+	for name, value := range map[string]string{"empty": "", "oversize": strings.Repeat("x", MaxSecretBytes+1)} {
 		if CheckSecret("TOKEN", value) == nil {
 			t.Fatalf("accepted a %s secret", name)
 		}
@@ -41,7 +40,7 @@ func TestSecretValues(t *testing.T) {
 	if CheckSecret("NVIDIA_DRIVER_CAPABILITIES", "x") == nil || CheckSecret("1X", "x") == nil {
 		t.Fatal("accepted an invalid secret name")
 	}
-	for _, value := range []string{"a b=c", "x"} {
+	for _, value := range []string{"a b=c", "x", "a\nb\r", "a\x00b", strings.Repeat("x", MaxSecretBytes)} {
 		if err := CheckSecret("TOKEN", value); err != nil {
 			t.Fatal(err)
 		}

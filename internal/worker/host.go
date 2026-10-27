@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"archive/tar"
 	"bytes"
 	"cmp"
 	"context"
@@ -34,8 +35,6 @@ const (
 	StderrFile = "stderr.log"
 	OutputsDir = "outputs"
 )
-
-const secretsFile = ".secrets.env"
 
 type Runner interface {
 	Run(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) error
@@ -72,8 +71,8 @@ func (h *Host) ensure(key string, put func() error) error {
 	return nil
 }
 
-func Dial(ctx context.Context, c Config, services map[string]string) (*ssh.Master, error) {
-	m, err := ssh.Dial(ctx, c.Host)
+func Dial(ctx context.Context, c Config, services map[string]string, sshConfig string) (*ssh.Master, error) {
+	m, err := ssh.Dial(ctx, c.Host, sshConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +239,8 @@ type Launch struct {
 	Secrets    map[string]string
 }
 
-// The secrets env file exists only while podman run does.
+// Podman copies each secret into the container it creates, so the secret files and Podman secrets
+// exist only while podman run does.
 func launchScript(c Config, l Launch, server string) (string, io.Reader) {
 	run := c.runDir(l.Attempt)
 	r := podman.Run{Attempt: l.Attempt, Server: server, Image: l.Spec.Image, Args: l.Spec.Args, CPUs: l.Allocation.CPUs, MemoryMiB: l.Allocation.MemoryMiB, Sandbox: l.Spec.Sandbox, Outputs: path.Join(run, OutputsDir), GPUs: l.Allocation.GPUs, CDISpecDir: c.cdiDir()}
@@ -259,13 +259,23 @@ func launchScript(c Config, l Launch, server string) (string, io.Reader) {
 	script := prelude() + "mkdir -p -- " + ssh.Quote(r.Outputs) + "; chmod 777 -- " + ssh.Quote(r.Outputs) + "; "
 	var stdin io.Reader
 	if len(l.Secrets) > 0 {
-		r.EnvFile = path.Join(run, secretsFile)
-		script += "f=" + ssh.Quote(r.EnvFile) + "; trap 'rm -f -- \"$f\"' EXIT; trap 'exit 129' HUP INT TERM; cat > \"$f\"; "
-		var text strings.Builder
-		for _, name := range slices.Sorted(maps.Keys(l.Secrets)) {
-			text.WriteString(name + "=" + l.Secrets[name] + "\n")
+		r.Secrets = slices.Sorted(maps.Keys(l.Secrets))
+		var names []string
+		for _, name := range r.Secrets {
+			names = append(names, podman.SecretName(l.Attempt, name))
 		}
-		stdin = strings.NewReader(text.String())
+		script += "d=$(mktemp -d " + ssh.Quote(path.Join(run, ".secrets.XXXXXX")) + "); s=" + ssh.Quote(strings.Join(names, " ")) +
+			"; trap 'rm -rf -- \"$d\"; for x in $s; do podman --remote=false secret rm -- \"$x\" >/dev/null 2>&1 || :; done' EXIT; trap 'exit 129' HUP INT TERM; tar -x -f - -C \"$d\"; "
+		var archive bytes.Buffer
+		w := tar.NewWriter(&archive)
+		for i, name := range r.Secrets {
+			value := l.Secrets[name]
+			_ = w.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(value))})
+			_, _ = io.WriteString(w, value)
+			script += "podman --remote=false secret create -- " + ssh.Quote(names[i]) + " \"$d\"/" + name + " >/dev/null; "
+		}
+		_ = w.Close()
+		stdin = &archive
 	}
 	return script + "pm " + quoteAll(r.Argv()), stdin
 }
@@ -356,6 +366,8 @@ func (h *Host) Release(ctx context.Context, attempt string) error {
 	return h.run.Run(ctx, removeContainer(attempt), nil, nil, nil)
 }
 
+// A launch killed before its EXIT trap ran leaves its Podman secrets behind.
 func removeContainer(attempt string) string {
-	return prelude() + "pm rm --force --ignore --time=0 -- " + ssh.Quote(podman.Name(attempt))
+	return prelude() + "pm rm --force --ignore --time=0 -- " + ssh.Quote(podman.Name(attempt)) +
+		"; for x in $(podman --remote=false secret ls --format '{{.Name}}'); do case $x in " + ssh.Quote(podman.SecretName(attempt, "")) + "*) podman --remote=false secret rm -- \"$x\" >/dev/null ;; esac; done"
 }

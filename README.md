@@ -31,13 +31,14 @@ grep "^$(id -un):" /etc/subuid /etc/subgid
 ## Setting
 
 Ordo uses `--config FILE`, else `$ORDO_CONFIG`, else `$XDG_CONFIG_HOME/ordo/server.json` (if `XDG_CONFIG_HOME` is absolute), else `~/.config/ordo/server.json`.
-The selected file must already exist.
 
-A full config:
+A config example:
 
 ```json
 {
-  "listen": "127.0.0.1:7331",
+  "port": 7331,
+  "services": {"model": "127.0.0.1:8000"},
+  "ssh_config": "/path/to/ssh_config",
   "workers": [
     {
       "host": "cpu1",
@@ -49,40 +50,25 @@ A full config:
       "state_dir": "/srv/ordo/worker",
       "cpus": "0,1,64,65",
       "memory_mib": 65536,
-      "gpus": ["GPU-11111111-1111-1111-1111-111111111111"],
+      "gpus": ["GPU-123456"],
       "tags": ["l40s-class"]
     }
-  ],
-  "services": {"model": "127.0.0.1:8000"},
-  "secrets": {"MODEL_TOKEN": "secrets/model-token"}
+  ]
 }
 ```
 
 Only `workers` is required, and each worker needs `host`, `cpus`, and `memory_mib`; unknown keys are rejected.
 
-- `listen` is the web UI and API address (default `127.0.0.1:7331`); see [Web UI](#web-ui).
-- `host` is an SSH alias from the server's `~/.ssh/config`.
-- `cpus` must include every online SMT sibling of each core; jobs request **physical cores**.
-- `memory_mib` is the budget the worker's jobs share.
-- `state_dir` is worker-local, mode 0700, default `~/.local/state/ordo/worker`; set it for a worker unreachable on the server's first start.
-- `gpus` and `tags`: see [GPUs and tags](#gpus-and-tags).
-- `services` and `secrets`: see [Job environment](#job-environment).
-  A relative secret path resolves from the config file's directory.
-- Server state lives in `--state DIR`, else `$ORDO_STATE`, else `$XDG_STATE_HOME/ordo/server` (default `~/.local/state/ordo/server`); client commands find the server the same way.
-
-Start the server in the foreground:
-
-```sh
-ordo server
-```
-
-Keep it running, then check the queue from another terminal on the server host:
-
-```sh
-ordo queue list
-```
-
-You can now [submit jobs](#jobs) or open the [web UI](#web-ui).
+- [Optional] `port`: web UI port (see [Web UI](#web-ui)), default as 7331.
+- [Optional] `services`: endpoints jobs may reach; see [Job environment](#job-environment).
+- [Optional] `ssh_config`: an OpenSSH client config that Ordo passes as `ssh -F`.
+- `workers`:
+  - `host` is an SSH alias, from `ssh_config` if set, else the server's `~/.ssh/config`.
+  - `cpus` must include every online SMT sibling of each core; jobs request **physical cores**.
+  - `memory_mib` is the budget the worker's jobs share.
+  - `state_dir` is worker-local, mode 0700, default `~/.local/state/ordo/worker`; set it for a worker unreachable on the server's first start.
+  - `gpus` and `tags`: see [GPUs and tags](#gpus-and-tags).
+  - Server state lives in `--state DIR`, else `$ORDO_STATE`, else `$XDG_STATE_HOME/ordo/server` (default `~/.local/state/ordo/server`); client commands find the server the same way.
 
 ## Jobs
 
@@ -181,8 +167,10 @@ When an outcome is unknown, such as a vanished container or a worker whose machi
 ```
 
 - `env` values appear in job records and the web UI; `NVIDIA_*` names are reserved.
-- `secrets` lists names whose values come from files in the server config, `"secrets":{"NAME":"FILE"}`; the task sees each as `$NAME`.
-  Values never enter job records or the API.
+- `secrets` lists files in the `secrets` directory beside the server config, such as `~/.config/ordo/secrets/MODEL_TOKEN`; the task reads each at `/run/secrets/NAME`.
+  The server reads a secret each time it launches a job, so replacing the file needs no restart.
+  A secret holds 1 to 511999 bytes, taken exactly, so write it with `printf %s` rather than `echo` unless the trailing newline belongs to it.
+  Values never enter job records, the API, or `podman inspect`.
   **Anyone who can submit jobs can use every configured secret**, and a task can print one to its logs.
 - `network` is `none` (default) or `egress`.
 - `cap_add` accepts only `NET_ADMIN`.
@@ -190,7 +178,7 @@ When an outcome is unknown, such as a vanished container or a worker whose machi
 
 ## Web UI
 
-The server serves the UI on loopback only, at `http://127.0.0.1:7331` by default (`listen` changes it).
+The server serves the UI on loopback only, at `http://127.0.0.1:7331` by default (`port` changes it).
 Paste the bearer token from `SERVER_DIR/token`.
 For a remote server, forward it with `ssh -L 7331:127.0.0.1:7331 SERVER`; never expose it publicly, since it has no TLS or multi-user authentication.
 

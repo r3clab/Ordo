@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/server"
@@ -28,10 +27,10 @@ func decodeFile(file string, value any) error {
 var defaultSkopeo = "skopeo"
 
 type serverConfig struct {
-	Listen   string            `json:"listen,omitempty"`
-	Workers  []worker.Config   `json:"workers"`
-	Services map[string]string `json:"services,omitempty"`
-	Secrets  map[string]string `json:"secrets,omitempty"`
+	Port      uint16            `json:"port"`
+	Workers   []worker.Config   `json:"workers"`
+	Services  map[string]string `json:"services,omitempty"`
+	SSHConfig string            `json:"ssh_config,omitempty"`
 }
 
 func xdgDir(env, fallback string) string {
@@ -70,19 +69,17 @@ func stateFlag(f *flag.FlagSet, root *string) {
 }
 
 func loadServerConfig(file string) (serverConfig, error) {
-	c := serverConfig{Listen: "127.0.0.1:7331"}
+	c := serverConfig{Port: 7331}
 	if err := decodeFile(file, &c); err != nil {
 		return c, fmt.Errorf("server config: %w", err)
 	}
-	for name, secret := range c.Secrets {
-		if !filepath.IsAbs(secret) {
-			c.Secrets[name] = filepath.Join(filepath.Dir(file), secret)
-		}
+	if c.SSHConfig != "" && !filepath.IsAbs(c.SSHConfig) {
+		c.SSHConfig = filepath.Join(filepath.Dir(file), c.SSHConfig)
 	}
 	return c, nil
 }
 
-const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), listen, services, secrets."
+const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), port, services, ssh_config. Secrets are files in the secrets directory beside it."
 
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("server")
@@ -102,27 +99,10 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	secrets, err := readSecrets(c.Secrets)
+	s, err := server.Open(server.Config{Root: root, Workers: c.Workers, Services: c.Services, SecretsDir: filepath.Join(filepath.Dir(*file), "secrets"), SSHConfig: c.SSHConfig, Tools: image.Tools{Skopeo: defaultSkopeo}})
 	if err != nil {
 		return err
 	}
-	s, err := server.Open(server.Config{Root: root, Workers: c.Workers, Services: c.Services, Secrets: secrets, Tools: image.Tools{Skopeo: defaultSkopeo}})
-	if err != nil {
-		return err
-	}
-	err = s.Run(ctx, c.Listen)
+	err = s.Run(ctx, c.Port)
 	return errors.Join(err, s.Close())
-}
-
-// Editors and echo end a file with a newline that is not part of the secret.
-func readSecrets(files map[string]string) (map[string]string, error) {
-	values := map[string]string{}
-	for name, file := range files {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return nil, fmt.Errorf("secret %s: %w", name, err)
-		}
-		values[name] = strings.TrimSuffix(string(data), "\n")
-	}
-	return values, nil
 }

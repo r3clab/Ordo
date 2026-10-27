@@ -31,6 +31,14 @@ func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + 
 
 func command(script string) string { return "exec sh -c " + Quote(script) }
 
+// config is an ssh_config file that replaces the user's, so workers stay out of everyday SSH aliases.
+func client(ctx context.Context, config string, args ...string) *exec.Cmd {
+	if config != "" {
+		args = append([]string{"-F", config}, args...)
+	}
+	return exec.CommandContext(ctx, "ssh", args...)
+}
+
 func CheckScript(script string) error {
 	if size := len(command(script)); size > MaxCommand {
 		return fmt.Errorf("remote command is %d bytes; the limit is %d", size, MaxCommand)
@@ -53,6 +61,7 @@ func (e *ExitError) Error() string {
 
 type Master struct {
 	host   string
+	config string
 	socket string
 	dir    string
 	input  *os.File
@@ -65,7 +74,7 @@ type Master struct {
 
 // Dial starts a master connection whose remote command ends when this process closes its stdin, so a
 // killed server leaves no SSH session or forward behind.
-func Dial(ctx context.Context, alias string) (*Master, error) {
+func Dial(ctx context.Context, alias, config string) (*Master, error) {
 	if !ValidHost(alias) {
 		return nil, errors.New("invalid SSH host alias")
 	}
@@ -79,9 +88,9 @@ func Dial(ctx context.Context, alias string) (*Master, error) {
 	}
 	defer func() { _ = reader.Close() }()
 	child, cancel := context.WithCancel(ctx)
-	m := &Master{host: alias, socket: filepath.Join(dir, "master"), dir: dir, input: writer, cancel: cancel, done: make(chan struct{})}
+	m := &Master{host: alias, config: config, socket: filepath.Join(dir, "master"), dir: dir, input: writer, cancel: cancel, done: make(chan struct{})}
 	// Forwarded sockets are mode 0600, so only the worker user's containers can connect to a service.
-	cmd := exec.CommandContext(child, "ssh", "-M", "-S", m.socket, "-T", "-oBatchMode=yes", "-oControlPersist=no", "-oExitOnForwardFailure=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", alias, "exec cat >/dev/null")
+	cmd := client(child, config, "-M", "-S", m.socket, "-T", "-oBatchMode=yes", "-oControlPersist=no", "-oExitOnForwardFailure=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", alias, "exec cat >/dev/null")
 	cmd.Stdin = reader
 	cmd.Stderr = &m.stderr
 	cmd.WaitDelay = 2 * time.Second
@@ -96,7 +105,7 @@ func Dial(ctx context.Context, alias string) (*Master, error) {
 	ready, stop := context.WithTimeout(child, 20*time.Second)
 	defer stop()
 	for {
-		check := exec.CommandContext(ready, "ssh", "-S", m.socket, "-O", "check", alias)
+		check := client(ready, config, "-S", m.socket, "-O", "check", alias)
 		if check.Run() == nil {
 			return m, nil
 		}
@@ -124,7 +133,7 @@ func (m *Master) Run(ctx context.Context, script string, stdin io.Reader, stdout
 	default:
 	}
 	tail := &tailBuffer{}
-	cmd := exec.CommandContext(ctx, "ssh", "-S", m.socket, "-oControlMaster=no", "-T", "-oBatchMode=yes", "-oLogLevel=ERROR", m.host, command(script))
+	cmd := client(ctx, m.config, "-S", m.socket, "-oControlMaster=no", "-T", "-oBatchMode=yes", "-oLogLevel=ERROR", m.host, command(script))
 	cmd.Stdin = stdin
 	var local []*sink
 	catch := func(w io.Writer) io.Writer {
@@ -159,12 +168,12 @@ func (m *Master) Run(ctx context.Context, script string, stdin io.Reader, stdout
 	return transport(m.host, "%v: %s", err, strings.TrimSpace(tail.String()))
 }
 
-func Home(ctx context.Context, alias string) (string, error) {
+func Home(ctx context.Context, alias, config string) (string, error) {
 	if !ValidHost(alias) {
 		return "", errors.New("invalid SSH host alias")
 	}
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "ssh", "-T", "-oBatchMode=yes", "-oConnectTimeout=10", "-oLogLevel=ERROR", alias, command(`printf %s "$HOME"`))
+	cmd := client(ctx, config, "-T", "-oBatchMode=yes", "-oConnectTimeout=10", "-oLogLevel=ERROR", alias, command(`printf %s "$HOME"`))
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
@@ -175,7 +184,7 @@ func Home(ctx context.Context, alias string) (string, error) {
 
 // remote is ssh's -R argument, such as SOCKET:HOST:PORT; the forward lives as long as the master.
 func (m *Master) Forward(ctx context.Context, remote string) error {
-	out, err := exec.CommandContext(ctx, "ssh", "-S", m.socket, "-O", "forward", "-R", remote, m.host).CombinedOutput()
+	out, err := client(ctx, m.config, "-S", m.socket, "-O", "forward", "-R", remote, m.host).CombinedOutput()
 	if err != nil {
 		return transport(m.host, "forward %s: %v: %s", remote, err, strings.TrimSpace(string(out)))
 	}

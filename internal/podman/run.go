@@ -17,6 +17,8 @@ const (
 // Name derives the container name from the attempt, so a repeated launch cannot start a second container.
 func Name(attempt string) string { return "ordo-" + attempt }
 
+func SecretName(attempt, name string) string { return Name(attempt) + "-" + name }
+
 type Run struct {
 	Attempt   string
 	Server    string
@@ -30,7 +32,7 @@ type Run struct {
 	Outputs    string
 	GPUs       []string
 	CDISpecDir string
-	EnvFile    string
+	Secrets    []string
 	Timeout    int64
 }
 
@@ -77,8 +79,8 @@ func (r Run) Argv() []string {
 	if len(r.GPUs) > 0 {
 		args = append(args, "--env", "NVIDIA_VISIBLE_DEVICES=void")
 	}
-	if r.EnvFile != "" {
-		args = append(args, "--env-file", r.EnvFile)
+	for _, name := range r.Secrets {
+		args = append(args, "--secret", SecretName(r.Attempt, name)+",type=mount,target=/run/secrets/"+name)
 	}
 	args = append(args, "--", r.Image)
 	return append(args, r.Args...)

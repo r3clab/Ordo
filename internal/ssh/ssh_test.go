@@ -12,10 +12,14 @@ import (
 
 // fakeSSH runs the remote command locally and keeps a master alive until its stdin closes.
 const fakeSSH = `#!/bin/sh
+test -z "$FAKE_SSH_LOG" || echo "$*" >> "$FAKE_SSH_LOG"
 for last; do :; done
+prev=
+for arg; do test "$prev" = -S && socket=$arg; prev=$arg; done
 case " $* " in
-*" -O check "*) test -e "$2" && exit 0; exit 1 ;;
-*" -M "*) socket=$3; : > "$socket"; cat >/dev/null; rm -f "$socket"; exit 0 ;;
+*" -O check "*) test -e "$socket" && exit 0; exit 1 ;;
+*" -O forward "*) exit 0 ;;
+*" -M "*) : > "$socket"; cat >/dev/null; rm -f "$socket"; exit 0 ;;
 esac
 exec /bin/sh -c "$last"
 `
@@ -36,10 +40,10 @@ func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 func TestRunClassifiesRemoteAndTransportFailures(t *testing.T) {
 	installFakeSSH(t)
 	ctx := context.Background()
-	if _, err := Dial(ctx, "-oProxyCommand=x"); err == nil {
+	if _, err := Dial(ctx, "-oProxyCommand=x", ""); err == nil {
 		t.Fatal("allowed SSH option injection")
 	}
-	m, err := Dial(ctx, "worker")
+	m, err := Dial(ctx, "worker", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,5 +74,42 @@ func TestRunClassifiesRemoteAndTransportFailures(t *testing.T) {
 	}
 	if err := m.Run(ctx, "true", nil, nil, nil); !errors.Is(err, ErrTransport) {
 		t.Fatalf("closed master must be a transport failure: %v", err)
+	}
+}
+
+func TestConfigFileReachesEveryCall(t *testing.T) {
+	installFakeSSH(t)
+	dir := t.TempDir()
+	config, log := filepath.Join(dir, "ssh_config"), filepath.Join(dir, "log")
+	t.Setenv("FAKE_SSH_LOG", log)
+	ctx := context.Background()
+	m, err := Dial(ctx, "worker", config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Run(ctx, "true", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Forward(ctx, "/s:127.0.0.1:1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Home(ctx, "worker", config); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, call := range calls {
+		if !strings.HasPrefix(call, "-F "+config+" ") {
+			t.Fatalf("ssh ran without the config file: %q", call)
+		}
+	}
+	if len(calls) < 5 {
+		t.Fatalf("expected master, check, run, forward and home calls: %q", calls)
 	}
 }

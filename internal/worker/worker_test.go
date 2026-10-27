@@ -47,12 +47,12 @@ const fakePodman = `#!/bin/sh
 printf '%s\0' podman "$@" >> "$ORDO_FAKE_LOG"; printf '\036' >> "$ORDO_FAKE_LOG"
 shift
 case "$1" in
-run)
-	for a; do
-		[ "${prev:-}" = --env-file ] && cp "$a" "$ORDO_FAKE_LOG.env" && stat -c %a "$a" > "$ORDO_FAKE_LOG.mode"
-		prev=$a
-	done
-	echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
+secret)
+	case "$2" in
+	create) for a; do :; done; cp "$a" "$ORDO_FAKE_LOG.secret"; stat -c %a "$a" > "$ORDO_FAKE_LOG.mode" ;;
+	ls) printf 'ordo-a1-TOKEN\nordo-a10-TOKEN\nother\n' ;;
+	esac ;;
+run) echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
 logs) echo "task stdout"; echo "task stderr" >&2 ;;
 ps) echo '[{"Id":"x","State":"running","Labels":{"io.r3clab.ordo.attempt":"a1"},"StartedAt":1700000000}]' ;;
 image)
@@ -107,7 +107,7 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 		Attempt:    "a1",
 		Spec:       spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Inputs: map[string]string{"data": strings.Repeat("c", 64)}, Task: spec.Task{Args: []string{"it's $HOME", "$(touch pwned)", "a\nb"}, Services: []string{"model"}, TimeoutSeconds: 10, Sandbox: spec.Sandbox{Env: map[string]string{"MODE": "eval"}}}},
 		Allocation: pool.Allocation{CPUs: []int{0, 64}, MemoryMiB: 128},
-		Secrets:    map[string]string{"TOKEN": "hunter2"},
+		Secrets:    map[string]string{"TOKEN": "hunter2\nline 2\n"},
 	}
 	id, err := h.Launch(context.Background(), l)
 	if err != nil || id != strings.Repeat("b", 64) {
@@ -116,10 +116,13 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 	run := filepath.Join(h.StateDir, "runs", "a1")
 	want := podman.Run{Attempt: "a1", Server: "server1", Image: l.Spec.Image, Args: l.Spec.Args, CPUs: []int{0, 64}, MemoryMiB: 128, Sandbox: l.Spec.Sandbox,
 		Inputs: map[string]string{"data": filepath.Join(h.StateDir, "trees", strings.Repeat("c", 64))}, Services: map[string]string{"model": filepath.Join(h.StateDir, "services", "model")},
-		Outputs: filepath.Join(run, "outputs"), CDISpecDir: filepath.Join(h.StateDir, "cdi"), EnvFile: filepath.Join(run, ".secrets.env"), Timeout: 10 + backstop}
+		Outputs: filepath.Join(run, "outputs"), CDISpecDir: filepath.Join(h.StateDir, "cdi"), Secrets: []string{"TOKEN"}, Timeout: 10 + backstop}
 	podmanCalls := calls(t, log, "podman")
-	if len(podmanCalls) != 1 || !slices.Equal(podmanCalls[0], append([]string{"--remote=false"}, want.Argv()...)) {
+	if len(podmanCalls) != 3 || !slices.Equal(podmanCalls[1], append([]string{"--remote=false"}, want.Argv()...)) {
 		t.Fatalf("podman argv = %q, want %q", podmanCalls, want.Argv())
+	}
+	if created, removed := podmanCalls[0], podmanCalls[2]; !slices.Equal(created[:5], []string{"--remote=false", "secret", "create", "--", "ordo-a1-TOKEN"}) || !slices.Equal(removed, []string{"--remote=false", "secret", "rm", "--", "ordo-a1-TOKEN"}) {
+		t.Fatalf("secret must exist only around podman run: %q", podmanCalls)
 	}
 	if scope := calls(t, log, "systemd-run")[0]; !slices.Contains(scope, "--scope") || !slices.Contains(scope, "--expand-environment=no") {
 		t.Fatalf("podman must run in its own scope without variable expansion: %q", scope)
@@ -127,17 +130,34 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 	if _, err := os.Stat("pwned"); err == nil {
 		t.Fatal("an argument reached a shell")
 	}
-	if env, err := os.ReadFile(log + ".env"); err != nil || string(env) != "TOKEN=hunter2\n" {
-		t.Fatalf("env file = %q, %v", env, err)
+	if secret, err := os.ReadFile(log + ".secret"); err != nil || string(secret) != l.Secrets["TOKEN"] {
+		t.Fatalf("secret = %q, %v", secret, err)
 	}
 	if mode, _ := os.ReadFile(log + ".mode"); strings.TrimSpace(string(mode)) != "600" {
-		t.Fatalf("env file mode %s", mode)
+		t.Fatalf("secret file mode %s", mode)
 	}
-	if _, err := os.Stat(want.EnvFile); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("secrets survived launch")
+	if left, _ := filepath.Glob(filepath.Join(run, ".secrets.*")); len(left) != 0 {
+		t.Fatalf("secret files outlived podman run: %q", left)
 	}
 	if info, err := os.Stat(want.Outputs); err != nil || info.Mode().Perm() != 0o777 {
 		t.Fatalf("outputs directory: %v", err)
+	}
+}
+
+func TestRemoveDropsSecretsALaunchLeftBehind(t *testing.T) {
+	log := fakes(t)
+	h := testHost(t)
+	if err := h.Remove(context.Background(), "a1"); err != nil {
+		t.Fatal(err)
+	}
+	var removed []string
+	for _, call := range calls(t, log, "podman") {
+		if slices.Equal(call[1:3], []string{"secret", "rm"}) {
+			removed = append(removed, call[len(call)-1])
+		}
+	}
+	if !slices.Equal(removed, []string{"ordo-a1-TOKEN"}) {
+		t.Fatalf("removed secrets %q", removed)
 	}
 }
 

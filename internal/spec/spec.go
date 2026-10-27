@@ -95,9 +95,6 @@ func (s Task) Validate() error {
 		if err := checkName(name); err != nil {
 			return err
 		}
-		if _, ok := s.Env[name]; ok {
-			return fmt.Errorf("variable %s is both env and a secret", name)
-		}
 	}
 	if !ValidNameSet(s.Services) {
 		return errors.New("invalid or duplicate service name")

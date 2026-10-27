@@ -60,16 +60,15 @@ func (s Sandbox) Validate() error {
 	return nil
 }
 
+// Podman rejects secrets of 512000 bytes or more.
+const MaxSecretBytes = 512000 - 1
+
 func CheckSecret(name, value string) error {
-	if err := checkVariable(name, value); err != nil {
+	if err := checkName(name); err != nil {
 		return err
 	}
-	if value == "" {
-		return fmt.Errorf("secret %s is empty", name)
-	}
-	// Podman's env-file format has no quoting.
-	if strings.ContainsAny(value, "\r\n") {
-		return fmt.Errorf("secret %s contains a line break", name)
+	if value == "" || len(value) > MaxSecretBytes {
+		return fmt.Errorf("secret %s must be 1..%d bytes", name, MaxSecretBytes)
 	}
 	return nil
 }
