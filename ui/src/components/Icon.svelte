@@ -4,7 +4,6 @@
     server: "M4 3h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm0 10h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1ZM7 7h.01M7 17h.01",
     x: "M18 6 6 18M6 6l12 12",
     refresh: "M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6",
-    logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
     search: "m21 21-4.3-4.3M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z",
   };
   let { name, class: className = "size-4" }: { name: keyof typeof paths; class?: string } = $props();

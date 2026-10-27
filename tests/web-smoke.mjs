@@ -21,16 +21,10 @@ try {
   const evaluate = async (expression) => { const response = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }); if (response.exceptionDetails) throw new Error(JSON.stringify(response.exceptionDetails)); return response.result.value; };
   const wait = async (expression) => { for (let i = 0; i < 180; i++) { if (await evaluate(expression)) return; await delay(500); } throw new Error(`Timed out: ${expression}`); };
   await call("Page.enable"); await call("Page.navigate", { url });
-  await wait('document.title === "Ordo" && !!document.getElementById("token")');
-  assert.equal((await fetch(`${url}/v1/jobs`)).status, 401);
-  const token = (await readFile(`${root}/token`, "utf8")).trim();
-  const input = (selector, value) => `(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event("input",{bubbles:true}))})()`;
+  await wait('document.title === "Ordo" && !!document.querySelector("nav[aria-label=Views]")');
   const click = (selector, text) => `[...document.querySelectorAll(${JSON.stringify(selector)})].find(e=>e.textContent.trim()===${JSON.stringify(text)}).click()`;
   const row = (out) => `document.querySelector('tr[data-job-out=${JSON.stringify(out)}]')`;
   const state = (out, value) => `${row(out)}?.querySelector("[data-state]").dataset.state===${JSON.stringify(value)}`;
-  await evaluate(input("#token", token));
-  await evaluate('document.getElementById("login").requestSubmit()');
-  await wait('!!document.querySelector("nav[aria-label=Views]")');
   assert(await evaluate('localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ""'));
   const image = process.env.ORDO_TEST_INSTALLABLE;
   const printer = `${evidence}/browser/log`, sleeper = `${evidence}/browser/stop`;
@@ -53,8 +47,5 @@ try {
   await wait('document.querySelector("aside [data-log]")?.textContent.includes("<script>")');
   assert(await evaluate('globalThis.injection === undefined && document.querySelector("aside script") === null'));
   const screenshot = await call("Page.captureScreenshot"); await writeFile(`${evidence}/web.png`, Buffer.from(screenshot.data, "base64"));
-  await evaluate(`document.querySelector('[aria-label="Disconnect"]').click()`);
-  await wait('!!document.getElementById("token")');
-  assert(await evaluate('document.getElementById("token").value === "" && document.querySelector("tr[data-job-id]") === null && localStorage.length === 0 && sessionStorage.length === 0'));
-  console.log("PASS: real browser authentication, queued job status, running cancellation, safe logs, disconnect");
+  console.log("PASS: real browser queued job status, running cancellation, safe logs");
 } finally { socket?.close(); browser.kill("SIGTERM"); await new Promise((resolve) => { if (browser.exitCode !== null) resolve(); else browser.once("exit", resolve); }); await log.close(); }

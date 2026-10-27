@@ -1,11 +1,7 @@
 package server
 
 import (
-	"crypto/rand"
-	"crypto/subtle"
 	"embed"
-	"encoding/hex"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/pool"
 	"github.com/r3clab/Ordo/internal/worker"
 )
@@ -74,40 +69,6 @@ func (s *Server) Workers() []WorkerStatus {
 	}
 	return result
 }
-func (s *Server) tokenFile() string { return filepath.Join(s.root, "token") }
-
-func (s *Server) Token() (string, error) {
-	file := s.tokenFile()
-	info, err := os.Lstat(file)
-	if err == nil {
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-			return "", errors.New("token must be a private regular mode-0600 file")
-		}
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return "", err
-		}
-		token := strings.TrimSpace(string(data))
-		if !content.Valid(token) {
-			return "", errors.New("invalid saved token")
-		}
-		return token, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	var secret [32]byte
-	_, _ = rand.Read(secret[:])
-	token := hex.EncodeToString(secret[:])
-	err = content.WriteAtomic(file, func(w io.Writer) error {
-		_, err := io.WriteString(w, token+"\n")
-		return err
-	})
-	if err != nil {
-		return "", err
-	}
-	return token, nil
-}
 func listenWeb(port uint16) (net.Listener, error) {
 	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
 }
@@ -116,7 +77,10 @@ func loopback(host string) bool {
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
-func (s *Server) WebHandler(token string) http.Handler {
+
+// WebHandler has no authentication: the host is meant for one user, whose processes could read any
+// credential the server kept, and the Host and Origin checks turn away other sites in that user's browser.
+func (s *Server) WebHandler() http.Handler {
 	api := s.routes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -137,12 +101,6 @@ func (s *Server) WebHandler(token string) http.Handler {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
-			supplied, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !ok || len(token) != 64 || subtle.ConstantTimeCompare([]byte(supplied), []byte(token)) != 1 {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
 			api.ServeHTTP(w, r)
 			return
 		}

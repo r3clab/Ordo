@@ -118,23 +118,10 @@ export interface WorkerStatus {
   tags?: string[];
 }
 
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-export async function request(token: string, path: string, method = "GET"): Promise<Response> {
-  const response = await fetch(`/v1/${path}`, {
-    method,
-    credentials: "omit",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+export async function request(path: string, method = "GET"): Promise<Response> {
+  const response = await fetch(`/v1/${path}`, { method, credentials: "omit" });
   if (!response.ok) {
-    throw new ApiError(response.status, (await response.text()).trim() || response.statusText);
+    throw new Error((await response.text()).trim() || response.statusText);
   }
   return response;
 }

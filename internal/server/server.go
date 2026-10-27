@@ -829,11 +829,7 @@ func (s *Server) Run(ctx context.Context, port uint16) error {
 		return err
 	}
 	defer func() { _ = web.Close() }()
-	token, err := s.Token()
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Web UI: http://%s (token file: %s)\n", web.Addr().String(), s.tokenFile())
+	fmt.Fprintf(os.Stderr, "Web UI: http://%s\n", web.Addr().String())
 	listener, err := ListenUnix(Socket(s.root))
 	if err != nil {
 		return err
@@ -846,7 +842,7 @@ func (s *Server) Run(ctx context.Context, port uint16) error {
 		wg.Go(func() { s.work(child, remote) })
 	}
 	api := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	public := &http.Server{Handler: s.WebHandler(token), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+	public := &http.Server{Handler: s.WebHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 2)
 	go func() { done <- api.Serve(listener) }()
 	go func() { done <- public.Serve(web) }()

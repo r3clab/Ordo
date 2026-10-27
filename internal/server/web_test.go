@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -15,23 +14,12 @@ import (
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
-func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
+func TestWebCancellationAndLogs(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil)
 	defer func() { _ = s.Close() }()
-	token, err := s.Token()
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := s.Token()
-	if err != nil || again != token {
-		t.Fatal("token not stable", err)
-	}
-	h := s.WebHandler(token)
-	request := func(method, path, auth, host, origin string, body []byte) *httptest.ResponseRecorder {
+	h := s.WebHandler()
+	request := func(method, path, host, origin string, body []byte) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, "http://127.0.0.1:7331"+path, bytes.NewReader(body))
-		if auth != "" {
-			r.Header.Set("Authorization", "Bearer "+auth)
-		}
 		if host != "" {
 			r.Host = host
 		}
@@ -42,22 +30,14 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w
 	}
-	for _, path := range []string{"/v1/jobs", "/v1/workers", "/v1/jobs/example/logs/stdout"} {
-		if w := request("GET", path, "", "", "", nil); w.Code != 401 {
-			t.Fatal("unauthenticated access", path, w.Code)
-		}
-	}
-	if w := request("GET", "/v1/jobs", "wrong", "", "", nil); w.Code != 401 {
-		t.Fatal("bad token accepted")
-	}
-	if w := request("GET", "/v1/jobs", token, "evil.example:7331", "", nil); w.Code != 403 {
+	if w := request("GET", "/v1/jobs", "evil.example:7331", "", nil); w.Code != 403 {
 		t.Fatal("DNS rebinding accepted")
 	}
-	if w := request("POST", "/v1/jobs/example/cancel", token, "", "http://evil.example", nil); w.Code != 403 {
+	if w := request("POST", "/v1/jobs/example/cancel", "", "http://evil.example", nil); w.Code != 403 {
 		t.Fatal("cross-origin write accepted")
 	}
 	for _, path := range []string{"/", "/app.js", "/style.css"} {
-		w := request("GET", path, "", "", "", nil)
+		w := request("GET", path, "", "", nil)
 		if w.Code != 200 || w.Header().Get("Content-Security-Policy") == "" || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal("asset/security headers", path, w.Code)
 		}
@@ -66,7 +46,7 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := request("POST", "/v1/jobs/"+example.ID+"/cancel", token, "", "http://127.0.0.1:7331", nil)
+	w := request("POST", "/v1/jobs/"+example.ID+"/cancel", "", "http://127.0.0.1:7331", nil)
 	if w.Code != 200 || !mustJob(t, s, example.ID).CancelRequested {
 		t.Fatal("cancel failed", w.Body.String())
 	}
@@ -78,19 +58,13 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed(t, s, Job{ID: "logs", State: "succeeded", Attempts: []Attempt{{ResultDir: dir}}})
-	w = request("GET", "/v1/jobs/logs/logs/stdout", token, "", "", nil)
+	w = request("GET", "/v1/jobs/logs/logs/stdout", "", "", nil)
 	if w.Code != 200 || w.Body.Len() != 1<<20 || !strings.HasSuffix(w.Body.String(), "tail") || w.Header().Get("X-Ordo-Truncated") != "true" {
 		t.Fatal("bounded log read failed")
 	}
-	w = request("GET", "/v1/jobs/logs/logs/token", token, "", "", nil)
+	w = request("GET", "/v1/jobs/logs/logs/server.db", "", "", nil)
 	if w.Code != 400 {
 		t.Fatal("arbitrary file access accepted")
-	}
-	if err := os.Chmod(filepath.Join(s.root, "token"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Token(); err == nil {
-		t.Fatal("public token accepted")
 	}
 }
 func TestWebListenerIsLoopbackOnly(t *testing.T) {
@@ -104,20 +78,11 @@ func TestWebListenerIsLoopbackOnly(t *testing.T) {
 	}
 }
 func TestWebHTTPRoundTrip(t *testing.T) {
-	s, err := Open(Config{Root: filepath.Join(t.TempDir(), "server"), Workers: []worker.Config{testWorker("worker")}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := open(t, filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil)
 	defer func() { _ = s.Close() }()
-	token, err := s.Token()
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(s.WebHandler(token))
+	srv := httptest.NewServer(s.WebHandler())
 	defer srv.Close()
-	r, _ := http.NewRequest("GET", srv.URL+"/v1/workers", nil)
-	r.Header.Set("Authorization", "Bearer "+token)
-	response, err := srv.Client().Do(r)
+	response, err := srv.Client().Get(srv.URL + "/v1/workers")
 	if err != nil {
 		t.Fatal(err)
 	}

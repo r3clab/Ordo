@@ -179,8 +179,8 @@ When an outcome is unknown, such as a vanished container or a worker whose machi
 ## Web UI
 
 The server serves the UI on loopback only, at `http://127.0.0.1:7331` by default (`port` changes it).
-Paste the bearer token from `SERVER_DIR/token`.
-For a remote server, forward it with `ssh -L 7331:127.0.0.1:7331 SERVER`; never expose it publicly, since it has no TLS or multi-user authentication.
+For a remote server, forward it with `ssh -L 7331:127.0.0.1:7331 SERVER`; never expose it publicly.
+**It has no TLS or authentication: run it only on a host you alone use.**
 
 The UI source is in `ui/`; its build in `internal/server/web/` is committed, so commit `npm run build` output with UI changes.
 

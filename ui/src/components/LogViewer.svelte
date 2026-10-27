@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { message } from "../lib/api";
-  import { session } from "../lib/session.svelte";
+  import { message, request } from "../lib/api";
   import Segmented from "./Segmented.svelte";
 
   let { jobId, attempt }: { jobId: string; attempt: number } = $props();
@@ -15,8 +14,7 @@
     const path = `jobs/${encodeURIComponent(jobId)}/logs/${stream}?attempt=${attempt}`;
     loading = true;
     error = "";
-    session
-      .call(path)
+    request(path)
       .then(async (response) => {
         const body = await response.text();
         if (stale) return;
