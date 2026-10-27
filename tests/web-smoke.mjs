@@ -26,34 +26,35 @@ try {
   const token = (await readFile(`${root}/token`, "utf8")).trim();
   const input = (selector, value) => `(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event("input",{bubbles:true}))})()`;
   const click = (selector, text) => `[...document.querySelectorAll(${JSON.stringify(selector)})].find(e=>e.textContent.trim()===${JSON.stringify(text)}).click()`;
-  const row = (id) => `document.querySelector('tr[data-job-id=${JSON.stringify(id)}]')`;
-  const state = (id, value) => `${row(id)}?.querySelector("[data-state]").dataset.state===${JSON.stringify(value)}`;
+  const row = (out) => `document.querySelector('tr[data-job-out=${JSON.stringify(out)}]')`;
+  const state = (out, value) => `${row(out)}?.querySelector("[data-state]").dataset.state===${JSON.stringify(value)}`;
   await evaluate(input("#token", token));
   await evaluate('document.getElementById("login").requestSubmit()');
   await wait('!!document.querySelector("nav[aria-label=Views]")');
   assert(await evaluate('localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ""'));
   const image = process.env.ORDO_TEST_INSTALLABLE;
-  const workflow = { id: "browser", tasks: [
-    { id: "log", image, resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf '<script>globalThis.injection=true</script>\\n'"] },
-    { id: "stop", image, resources: { cores: 1, memory_mib: 128 }, timeout_seconds: 60, args: ["-c", "sleep 45"] },
-  ] };
-  const file = `${evidence}/browser-workflow.jsonl`;
-  await writeFile(file, JSON.stringify(workflow), { mode: 0o600 });
+  const printer = `${evidence}/browser/log`, sleeper = `${evidence}/browser/stop`;
+  const jobs = [
+    { out: printer, image, resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf '<script>globalThis.injection=true</script>\\n'"] },
+    { out: sleeper, image, resources: { cores: 1, memory_mib: 128 }, timeout_seconds: 60, args: ["-c", "sleep 45"] },
+  ];
+  const file = `${evidence}/browser-jobs.jsonl`;
+  await writeFile(file, jobs.map((job) => JSON.stringify(job)).join("\n"), { mode: 0o600 });
   execFileSync(process.env.ORDO_TEST_BINARY, ["submit", "--state", root, "--file", file], { stdio: "ignore" });
   await evaluate('document.querySelector(\'a[href="#/jobs"]\').click()');
-  await wait(state("browser--stop", "running"));
-  await evaluate(`${row("browser--stop")}.click()`);
+  await wait(state(sleeper, "running"));
+  await evaluate(`${row(sleeper)}.click()`);
   await evaluate(click("aside button", "Cancel job"));
   await evaluate(click("aside button", "Yes, cancel"));
-  await wait(state("browser--stop", "cancelled"));
+  await wait(state(sleeper, "cancelled"));
   await evaluate(`document.querySelector('[aria-label="Close details"]').click()`);
-  await wait(state("browser--log", "succeeded"));
-  await evaluate(`${row("browser--log")}.click()`);
+  await wait(state(printer, "succeeded"));
+  await evaluate(`${row(printer)}.click()`);
   await wait('document.querySelector("aside [data-log]")?.textContent.includes("<script>")');
   assert(await evaluate('globalThis.injection === undefined && document.querySelector("aside script") === null'));
   const screenshot = await call("Page.captureScreenshot"); await writeFile(`${evidence}/web.png`, Buffer.from(screenshot.data, "base64"));
   await evaluate(`document.querySelector('[aria-label="Disconnect"]').click()`);
   await wait('!!document.getElementById("token")');
   assert(await evaluate('document.getElementById("token").value === "" && document.querySelector("tr[data-job-id]") === null && localStorage.length === 0 && sessionStorage.length === 0'));
-  console.log("PASS: real browser authentication, queued workflow status, running cancellation, safe logs, disconnect");
+  console.log("PASS: real browser authentication, queued job status, running cancellation, safe logs, disconnect");
 } finally { socket?.close(); browser.kill("SIGTERM"); await new Promise((resolve) => { if (browser.exitCode !== null) resolve(); else browser.once("exit", resolve); }); await log.close(); }

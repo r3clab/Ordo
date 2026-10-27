@@ -1,4 +1,4 @@
-export type JobState = "queued" | "dispatching" | "running" | "blocked" | "collecting" | "succeeded" | "failed" | "cancelled" | "skipped";
+export type JobState = "queued" | "dispatching" | "running" | "blocked" | "collecting" | "delivering" | "succeeded" | "failed" | "cancelled" | "skipped";
 
 export interface Resources {
   cores: number;
@@ -33,8 +33,20 @@ export interface Spec {
   args?: string[];
   resources: Resources;
   inputs?: Record<string, string>;
+  env?: Record<string, string>;
+  network?: string;
+  cap_add?: string[];
+  secrets?: string[];
+  services?: string[];
   timeout_seconds?: number;
   tags?: string[];
+}
+
+export interface Stage {
+  name?: string;
+  spec: Spec;
+  archive: string;
+  image_origin?: { installable?: string; output?: string; reference?: string };
 }
 
 export interface Result {
@@ -47,8 +59,10 @@ export interface Result {
 
 export interface Attempt {
   id: string;
+  step: number;
   worker: string;
   machine_id: string;
+  boot_id: string;
   allocation: Allocation;
   created_at: string;
   container_id?: string;
@@ -61,30 +75,38 @@ export interface Attempt {
 
 export interface Job {
   id: string;
-  spec: Spec;
+  out: string;
+  steps: Stage[];
+  step: number;
+  ready_at?: string;
   state: JobState;
   error?: string;
   created_at: string;
   attempts?: Attempt[];
-  workflow?: string;
-  depends_on?: string[];
-  from?: Record<string, string>;
+  submission_key?: string;
   retry?: { task?: number; infrastructure?: number };
   cancel_requested?: boolean;
+  stop_requested?: boolean;
+  stop_reason?: string;
+  inputs?: Record<string, string>;
+  waiting?: string[];
+  after?: string[];
 }
 
 export interface JobSummary {
   id: string;
+  out: string;
   state: JobState;
-  workflow?: string;
+  step: number;
+  steps: number;
   image: string;
   resources: Resources;
   worker?: string;
   attempts?: number;
   created_at: string;
   error?: string;
-  depends_on?: string[];
   cancel_requested?: boolean;
+  after?: string[];
 }
 
 export interface WorkerStatus {

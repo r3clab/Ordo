@@ -57,8 +57,8 @@
 
 #rect(40, 250, 190, 96)
 #number(54, 266, "05")
-#words(88, 269, "Fetch")
-#command(56, 309, "ordo fetch --wait")
+#words(88, 269, "Deliver")
+#command(56, 309, "ordo submit --wait")
 #arrow(270, 230, 300, returning: true)
 
 #rect(654, 70, 266, 276)

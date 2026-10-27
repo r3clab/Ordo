@@ -11,10 +11,10 @@ nix build path:. -o result
 ```
 
 The server builds the test image from `ORDO_TEST_INSTALLABLE`.
-`ORDO_TEST_IMAGE` is that image's immutable configuration ID, which the scripts use to clean up workers; `ordo queue get` shows it as `spec.image` once the server has built it.
+`ORDO_TEST_IMAGE` is that image's immutable configuration ID, which the scripts use to clean up workers; `ordo queue get` shows it as `steps[0].spec.image` once the server has built it.
 The pinned fixture currently has the ID below; rebuilding with changed flake inputs/configuration can change it.
 
-## Server, workflows, and browser
+## Server, jobs, and browser
 
 ```sh
 ORDO_TEST_BINARY="$PWD/result/bin/ordo" \
@@ -24,8 +24,8 @@ bash tests/server-smoke.sh
 ```
 
 It uses the workers `vegeta` and `goku`, each with the verified pool `62,63,126,127` (two physical cores) and a 512 MiB aggregate admission budget.
-It checks server SIGKILL/restart without orphaned SSH processes or duplicate executions, DAG outputs, bounded retries, skipped dependents, timeout, and cancellation.
-Add `ORDO_TEST_CHROMIUM=/path/to/chromium` (and Node.js 22+ on PATH) to drive the real UI: authentication, status of a workflow queued by `ordo submit`, running-task cancellation, safe log rendering, and disconnect.
+It checks server SIGKILL/restart without orphaned SSH processes or duplicate executions, delivery into each job's `out` (including `.ordo/`), a job waiting on an input in another job's `out`, a two-step job with different resources per step, bounded retries, skipped dependents, timeout, cancellation, and `ordo submit --wait`.
+Add `ORDO_TEST_CHROMIUM=/path/to/chromium` (and Node.js 22+ on PATH) to drive the real UI: authentication, status of jobs queued by `ordo submit`, running-job cancellation, safe log rendering, and disconnect.
 Browser logs and a screenshot join the evidence directory.
 The headless browser uses a private profile and disabled sandbox only for this local test; no browser/runtime dependency is added to Ordo.
 Go tests separately cover missing/invalid bearer tokens, cross-origin requests, hostile Host headers, token permissions, and bounded log reads.
@@ -44,7 +44,7 @@ No sustained GPU workload or global CDI registration is used.
 Successful runs remove their remote state directories and any image they introduced, and check that no container of theirs remains.
 Failed runs retain remote state for diagnosis; a bounded task may still be running.
 Do not start another run on the host until those resources are reconciled and cleaned up.
-Evidence, including the server state with every collected result, is kept in a private local `/tmp/ordo-*-evidence.*` directory.
+Evidence, including the server state and every job's delivered `out`, is kept in a private local `/tmp/ordo-*-evidence.*` directory.
 
 These checks do not prove host-reboot/power-loss recovery, ARM runtime behavior, multi-GPU task execution, or performance under sustained load.
 No test enables services permanently or changes host configuration.

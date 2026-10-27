@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Job } from "../lib/api";
-  import { duration, isActive, relative, resources, taskName } from "../lib/format";
+  import { duration, isActive, relative, resources, shortImage, shortOut } from "../lib/format";
   import { session } from "../lib/session.svelte";
   import CancelButton from "./CancelButton.svelte";
   import Icon from "./Icon.svelte";
@@ -10,19 +10,22 @@
   let { job, onclose, onselect }: { job: Job; onclose: () => void; onselect: (id: string) => void } = $props();
 
   const attempts = $derived(job.attempts ?? []);
+  const multistep = $derived(job.steps.length > 1);
+  const spec = $derived(job.steps[Math.min(job.step, job.steps.length - 1)].spec);
   const collected = $derived(attempts.flatMap((a, i) => (a.result_dir ? [i] : [])));
   let chosen = $state<number | null>(null);
   const logAttempt = $derived(chosen !== null && collected.includes(chosen) ? chosen : collected.at(-1));
   const facts = $derived(
     [
-      ["Image", job.spec.image],
-      ["Resources", resources(job.spec.resources)],
-      ["Timeout", job.spec.timeout_seconds ? `${job.spec.timeout_seconds}s` : "None"],
+      ["Image", spec.image],
+      ["Resources", resources(spec.resources)],
+      ["Timeout", spec.timeout_seconds ? `${spec.timeout_seconds}s` : "None"],
       ["Retries", `${job.retry?.task ?? 0} task · ${job.retry?.infrastructure ?? 1} infrastructure`],
       ["Created", new Date(job.created_at).toLocaleString()],
-      ["Worker tags", job.spec.tags?.join(", ") ?? ""],
-      ["Arguments", job.spec.args?.length ? job.spec.args.join(" ") : ""],
-      ["Inputs", Object.keys({ ...job.spec.inputs, ...job.from }).join(", ")],
+      ["Worker tags", spec.tags?.join(", ") ?? ""],
+      ["Arguments", spec.args?.length ? spec.args.join(" ") : ""],
+      ["Environment", Object.keys(spec.env ?? {}).join(", ")],
+      ["Inputs", Object.entries(job.inputs ?? {}).map(([name, source]) => `${name} ← ${source}`).join("\n")],
     ].filter(([, value]) => value),
   );
 </script>
@@ -33,8 +36,8 @@
 <aside class="fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-900" aria-label="Job details">
   <header class="flex items-start justify-between gap-4 border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
     <div class="min-w-0 space-y-1">
-      {#if job.workflow}<p class="label">{job.workflow}</p>{/if}
-      <h2 class="truncate text-lg font-semibold">{taskName(job)}</h2>
+      <h2 class="text-lg font-semibold break-all">{job.out}</h2>
+      <p class="muted truncate font-mono text-xs" title="Job ID">{job.id}</p>
       <div class="flex flex-wrap items-center gap-2">
         <StateBadge state={job.state} />
         {#if job.cancel_requested && isActive(job.state)}<span class="text-xs text-amber-600 dark:text-amber-400">Cancellation requested</span>{/if}
@@ -50,8 +53,7 @@
 
     {#if isActive(job.state)}
       <div class="flex flex-wrap gap-2">
-        <CancelButton label="Cancel job" onconfirm={() => session.cancel("jobs", job.id)} />
-        {#if job.workflow}<CancelButton label="Cancel workflow" onconfirm={() => session.cancel("workflows", job.workflow!)} />{/if}
+        <CancelButton label="Cancel job" onconfirm={() => session.cancel(job.id)} />
       </div>
     {/if}
 
@@ -60,19 +62,35 @@
       <dl class="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 text-sm">
         {#each facts as [term, value] (term)}
           <dt class="muted">{term}</dt>
-          <dd class="font-mono text-xs leading-5 break-all">{value}</dd>
+          <dd class="font-mono text-xs leading-5 break-all whitespace-pre-line">{value}</dd>
         {/each}
       </dl>
     </section>
 
-    {#if job.depends_on?.length}
+    {#if multistep}
       <section>
-        <h3 class="label mb-2">Depends on</h3>
+        <h3 class="label mb-2">Steps</h3>
+        <ol class="space-y-1 text-sm">
+          {#each job.steps as stage, i (i)}
+            <li class="flex flex-wrap items-baseline gap-x-2 rounded-lg px-2 py-1 {i === job.step ? 'bg-zinc-100 dark:bg-zinc-800' : ''}" aria-current={i === job.step ? "step" : undefined}>
+              <span class="font-medium">{stage.name ?? `Step ${i + 1}`}</span>
+              <span class="muted min-w-0 truncate font-mono text-xs" title={stage.spec.image}>{shortImage(stage.spec.image)}</span>
+              <span class="muted ml-auto text-xs">{resources(stage.spec.resources)}</span>
+            </li>
+          {/each}
+        </ol>
+      </section>
+    {/if}
+
+    {#if job.after?.length}
+      <section>
+        <h3 class="label mb-2">Waits for</h3>
+        {#if job.waiting?.length}<p class="muted mb-2 text-xs">Inputs not yet available: {job.waiting.join(", ")}</p>{/if}
         <div class="flex flex-wrap gap-1.5">
-          {#each job.depends_on as id (id)}
+          {#each job.after as id (id)}
             {@const dep = session.jobs.find((j) => j.id === id)}
-            <button class="btn-secondary py-1 text-xs" onclick={() => onselect(id)}>
-              {dep ? taskName(dep) : id}
+            <button class="btn-secondary max-w-full py-1 text-xs" title={dep?.out ?? id} onclick={() => onselect(id)}>
+              <span class="truncate">{dep ? shortOut(dep.out) : id}</span>
               {#if dep}<span class="text-zinc-400">· {dep.state}</span>{/if}
             </button>
           {/each}
@@ -90,7 +108,7 @@
             {@const result = attempt.result}
             <li class="rounded-lg border border-zinc-200 p-3 text-sm dark:border-zinc-800">
               <div class="flex flex-wrap items-center justify-between gap-2">
-                <span class="font-medium">#{i + 1} on {attempt.worker}</span>
+                <span class="font-medium">#{i + 1}{multistep ? ` · step ${attempt.step + 1}` : ""} on {attempt.worker}</span>
               </div>
               <p class="mt-1 text-xs muted">
                 {#if result?.exit_code !== undefined}Exit {result.exit_code}{result.oom_killed ? " (out of memory)" : ""} · {duration(result.started_at, result.finished_at)}{:else}Dispatched {relative(attempt.created_at)}{/if}{#if attempt.failure}
@@ -108,7 +126,7 @@
         <h3 class="label">Logs</h3>
         {#if collected.length > 1}
           <select class="input w-auto py-1 text-xs" value={logAttempt} onchange={(e) => (chosen = Number(e.currentTarget.value))} aria-label="Attempt">
-            {#each collected as i (i)}<option value={i}>Attempt {i + 1}</option>{/each}
+            {#each collected as i (i)}<option value={i}>Attempt {i + 1}{multistep ? ` · step ${attempts[i].step + 1}` : ""}</option>{/each}
           </select>
         {/if}
       </div>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { filters, relative, resources, shortImage, taskName } from "../lib/format";
+  import { filters, relative, resources, shortImage, shortOut } from "../lib/format";
   import { session } from "../lib/session.svelte";
   import Icon from "./Icon.svelte";
   import StateBadge from "./StateBadge.svelte";
@@ -12,7 +12,7 @@
     const needle = query.trim().toLowerCase();
     return session.jobs
       .filter(filter.match)
-      .filter((j) => !needle || [j.id, j.workflow ?? "", j.image, j.worker ?? ""].some((field) => field.toLowerCase().includes(needle)))
+      .filter((j) => !needle || [j.out, j.id, j.image, j.worker ?? ""].some((field) => field.toLowerCase().includes(needle)))
       .toReversed();
   });
 </script>
@@ -30,7 +30,7 @@
     <label class="relative block sm:w-72">
       <span class="sr-only">Search jobs</span>
       <Icon name="search" class="pointer-events-none absolute top-2.5 left-3 size-4 text-zinc-400" />
-      <input class="input pl-9" type="search" bind:value={query} placeholder="Search ID, workflow, image, worker" />
+      <input class="input pl-9" type="search" bind:value={query} placeholder="Search out, ID, image, worker" />
     </label>
   </div>
 
@@ -38,7 +38,7 @@
     {#if visible.length === 0}
       <div class="px-6 py-16 text-center">
         <p class="font-medium">{session.jobs.length === 0 ? "No jobs yet" : "No matching jobs"}</p>
-        <p class="muted mt-1 text-sm">{session.jobs.length === 0 ? "Queue jobs or workflows with ordo submit to get started." : "Try another filter or search."}</p>
+        <p class="muted mt-1 text-sm">{session.jobs.length === 0 ? "Queue jobs with ordo submit to get started." : "Try another filter or search."}</p>
       </div>
     {:else}
       <div class="overflow-x-auto">
@@ -54,11 +54,11 @@
           </thead>
           <tbody class="divide-y divide-zinc-100 dark:divide-zinc-800">
             {#each visible as job (job.id)}
-              <tr data-job-id={job.id} class="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50" onclick={() => onselect(job.id)}>
+              <tr data-job-id={job.id} data-job-out={job.out} class="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50" onclick={() => onselect(job.id)}>
                 <td class="max-w-80 px-4 py-3">
-                  <button class="block max-w-full truncate text-left font-medium hover:underline">{taskName(job)}</button>
+                  <button class="block max-w-full truncate text-left font-medium hover:underline" title={job.out}>{shortOut(job.out)}</button>
                   <div class="muted truncate text-xs">
-                    {#if job.workflow}<span class="font-medium text-zinc-600 dark:text-zinc-300">{job.workflow}</span> · {/if}<span class="font-mono">{shortImage(job.image)}</span>
+                    {#if job.steps > 1}<span class="font-medium text-zinc-600 dark:text-zinc-300">step {job.step + 1}/{job.steps}</span> · {/if}<span class="font-mono">{shortImage(job.image)}</span>
                   </div>
                 </td>
                 <td class="px-4 py-3">

@@ -21,6 +21,7 @@ export const palette: Record<string, { badge: string; dot: string }> = {
   queued: neutral,
   dispatching: transfer,
   collecting: transfer,
+  delivering: transfer,
   running: { badge: "bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-950 dark:text-blue-300 dark:ring-blue-900", dot: "fill-blue-500" },
   blocked: { badge: "bg-amber-50 text-amber-800 ring-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-900", dot: "fill-amber-500" },
   succeeded: good,
@@ -33,8 +34,9 @@ export const palette: Record<string, { badge: string; dot: string }> = {
 
 export const colors = (state: string) => palette[state] ?? neutral;
 
-export function taskName(job: { id: string; workflow?: string }): string {
-  return job.workflow && job.id.startsWith(`${job.workflow}--`) ? job.id.slice(job.workflow.length + 2) : job.id;
+export function shortOut(out: string): string {
+  const parts = out.split("/").filter(Boolean);
+  return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : out;
 }
 
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;

@@ -1,4 +1,4 @@
-# Ordo workflow figure
+# Ordo overview figure
 
 [Light](overview-light.svg) and [dark](overview-dark.svg) versions of the compact controller-to-worker flow.
 `overview.typ` is the editable source; the SVGs contain outlined text and need no fonts or scripts to view.
@@ -9,11 +9,11 @@ The detailed [command reference](https://github.com/r3clab/Ordo/wiki/Command-map
 Start `ordo server` first; it reaches each configured worker over SSH and installs nothing there.
 Command labels identify actions, not complete invocations: required flags are omitted.
 
-1. **Submit:** on the controller, `ordo submit` sends JSONL jobs and dependency graphs through the server's private Unix socket.
-2. **Schedule:** the server owns a durable queue, prepares pinned images and inputs, and dispatches eligible work over SSH when dependencies and resource requirements are satisfied.
+1. **Submit:** on the controller, `ordo submit` sends JSONL jobs, each naming the `out` directory its results belong in, through the server's private Unix socket.
+2. **Schedule:** the server owns a durable queue, prepares pinned images and inputs, and dispatches eligible work over SSH when the jobs it takes inputs from have finished and resource requirements are satisfied.
 3. **Execute:** the server reserves the requested cores, GPUs, and memory budget on a worker, then starts the task there with `podman run` in rootless Podman.
 4. **Collect and verify:** after the container exits, the server streams its logs and outputs back over SSH and records them before marking success.
-5. **Fetch:** `ordo fetch --wait` waits for selected jobs and copies succeeded jobs into the chosen results directory.
+5. **Deliver:** the server moves each finished job's outputs into its `out`, with Ordo's record and logs under `out/.ordo/`; `ordo submit --wait` waits for that and reports how each job ended.
 
 Solid arrows show requests and dispatch; dashed gold arrows show returned results.
 

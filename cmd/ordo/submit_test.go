@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/image/imagetest"
@@ -116,5 +118,39 @@ func TestSubmitResolvesPathsAndSkipsDeliveredJobs(t *testing.T) {
 	listed, err := runWith(t, "", "queue", "list", "--state", root, "--under", filepath.Join(dir, "results", "b"))
 	if jobs := decodeLines[[]server.Summary](t, listed); err != nil || len(jobs) != 1 || len(jobs[0]) != 1 || jobs[0][0].State != server.Cancelled {
 		t.Fatalf("list under: %s %v", listed, err)
+	}
+}
+
+func TestSubmitWaitReportsHowJobsEnded(t *testing.T) {
+	root, _ := testServer(t)
+	pollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { pollInterval = 2 * time.Second })
+	out := filepath.Join(t.TempDir(), "a")
+	file := filepath.Join(t.TempDir(), "jobs.jsonl")
+	if err := os.WriteFile(file, []byte(`{"out":"`+out+`","image":"/src#image","resources":{"cores":1,"memory_mib":128}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		results []server.BatchResult
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var buf bytes.Buffer
+		err := submitCommand(context.Background(), []string{"--state", root, "--file", file, "--wait"}, &buf)
+		done <- outcome{decodeLines[server.BatchResult](t, buf.Bytes()), err}
+	}()
+	for {
+		if err := queueCommand(context.Background(), []string{"cancel", "--state", root, "--out", out}, io.Discard); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := <-done
+	if got.err == nil || got.err.Error() != "1 of 1 jobs did not succeed" || len(got.results) != 2 {
+		t.Fatalf("wait: %+v %v", got.results, got.err)
+	}
+	if first, last := got.results[0], got.results[1]; first.State != server.Queued || last.ID != first.ID || last.State != server.Cancelled {
+		t.Fatalf("wait did not report the job's end: %+v", got.results)
 	}
 }

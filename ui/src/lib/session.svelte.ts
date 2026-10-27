@@ -99,9 +99,10 @@ class Session {
     this.#noticeTimer = setTimeout(() => (this.notice = ""), 4000);
   }
 
-  async cancel(kind: "jobs" | "workflows", id: string) {
-    await this.call(`${kind}/${encodeURIComponent(id)}/cancel`, "POST");
-    this.flash(`Cancellation requested for ${id}.`);
+  async cancel(id: string) {
+    await this.call(`jobs/${encodeURIComponent(id)}/cancel`, "POST");
+    const out = this.jobs.find((j) => j.id === id)?.out ?? (this.detail?.id === id ? this.detail.out : undefined);
+    this.flash(`Cancellation requested for ${out ?? id}.`);
     await this.refresh();
   }
 }

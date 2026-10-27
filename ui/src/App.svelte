@@ -7,11 +7,9 @@
   import JobsView from "./components/JobsView.svelte";
   import Login from "./components/Login.svelte";
   import WorkersView from "./components/WorkersView.svelte";
-  import WorkflowsView from "./components/WorkflowsView.svelte";
 
   const views = [
     { id: "jobs", label: "Jobs", icon: "list" },
-    { id: "workflows", label: "Workflows", icon: "layers" },
     { id: "workers", label: "Workers", icon: "server" },
   ] as const;
   type View = (typeof views)[number]["id"];
@@ -74,8 +72,6 @@
       {/if}
       {#if view === "jobs"}
         <JobsView onselect={select} />
-      {:else if view === "workflows"}
-        <WorkflowsView onselect={select} />
       {:else}
         <WorkersView />
       {/if}
