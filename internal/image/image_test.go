@@ -61,6 +61,9 @@ func TestSourceValidate(t *testing.T) {
 		{Source("--option"), false},
 		{Source("a\nb"), false},
 		{Source(strings.Repeat("x", MaxInstallableBytes+1)), false},
+		{Source("docker://ghcr.io/org/eval@sha256:" + strings.Repeat("0", 64)), true},
+		{Source("docker://ghcr.io/org/eval:latest"), false},
+		{Source("docker://ghcr.io/org/eval@sha256:" + strings.Repeat("0", 63)), false},
 	} {
 		if err := test.src.Validate(); (err == nil) != test.ok {
 			t.Fatalf("%+v: %v", test.src, err)
@@ -126,6 +129,21 @@ func TestResolverCachesNixExportsByStorePath(t *testing.T) {
 	}
 	if _, err := r.Resolve(ctx, src); err != nil || fake.Exports.Load() != 2 {
 		t.Fatalf("a lost blob must be exported again: %v exports=%d", err, fake.Exports.Load())
+	}
+}
+
+func TestResolverPullsRegistryImagesOnceByReference(t *testing.T) {
+	fake := fakeNix()
+	r := newResolver(t, fake)
+	src := Source("docker://ghcr.io/org/eval@sha256:" + strings.Repeat("0", 64))
+	for range 2 {
+		resolved, err := r.Resolve(context.Background(), src)
+		if err != nil || resolved.ID != config || resolved.Origin == nil || resolved.Origin.Reference != string(src) {
+			t.Fatalf("resolved %+v: %v", resolved, err)
+		}
+	}
+	if pull := fake.Argv("skopeo"); fake.Pulls.Load() != 1 || fake.Builds.Load() != 0 || !slices.Equal(pull[:3], []string{"--insecure-policy", "copy", string(src)}) {
+		t.Fatalf("pulls=%d builds=%d argv %q", fake.Pulls.Load(), fake.Builds.Load(), pull)
 	}
 }
 

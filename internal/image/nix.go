@@ -59,3 +59,12 @@ func (t Tools) run(ctx context.Context, name string, args ...string) ([]byte, er
 	}
 	return out, nil
 }
+
+// Pull needs no signature policy: the reference's digest already pins what it fetches.
+func (t Tools) Pull(ctx context.Context, reference, dest string) error {
+	if strings.Contains(dest, ":") {
+		return fmt.Errorf("image export path %s must not contain ':'", dest)
+	}
+	_, err := t.run(ctx, cmp.Or(t.Skopeo, "skopeo"), "--insecure-policy", "copy", reference, "oci-archive:"+dest)
+	return err
+}

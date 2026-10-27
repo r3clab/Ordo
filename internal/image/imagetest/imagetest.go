@@ -47,7 +47,7 @@ type Nix struct {
 	Config  string
 	Release chan struct{}
 
-	Builds, Exports atomic.Int32
+	Builds, Exports, Pulls atomic.Int32
 
 	mu   sync.Mutex
 	argv map[string][]string
@@ -78,7 +78,11 @@ func (n *Nix) Exec(ctx context.Context, name string, args ...string) ([]byte, er
 		}
 		return []byte(n.Output + "\n"), nil
 	case "skopeo":
-		n.Exports.Add(1)
+		if strings.HasPrefix(args[len(args)-2], "docker://") {
+			n.Pulls.Add(1)
+		} else {
+			n.Exports.Add(1)
+		}
 		dest, ok := strings.CutPrefix(args[len(args)-1], "oci-archive:")
 		if !ok {
 			return nil, errors.New("skopeo must copy to an oci-archive")
