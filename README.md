@@ -1,6 +1,12 @@
-# Ordo
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/folio-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/brand/folio-light.svg">
+    <img src="assets/brand/folio-light.svg" alt="Ordo" width="360">
+  </picture>
+</h1>
 
-A task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
+Ordo is a task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
 **Status:** Ordo runs local and SSH-managed tasks with exclusive CPU/GPU allocations, hardware matching, a durable queue, JSON workflows, and a loopback web UI.
