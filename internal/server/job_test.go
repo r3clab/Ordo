@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/podman"
 	"github.com/r3clab/Ordo/internal/spec"
 	"github.com/r3clab/Ordo/internal/worker"
@@ -217,6 +218,51 @@ func TestDeliveryInterruptedAfterRenameCompletes(t *testing.T) {
 	f.tick(t)
 	if j = f.job(t, id); j.State != Succeeded {
 		t.Fatalf("a published job.json must settle delivery: %+v", j)
+	}
+}
+
+func TestInputsInAnotherJobsOutWaitForIt(t *testing.T) {
+	f := newFixture(t)
+	up := f.submit(t, jobRequest(f.out("up")))
+	down := jobRequest(f.out("down"))
+	down.Inputs = map[string]string{"up": f.out("up")}
+	downID := f.submit(t, down)
+	if j := f.job(t, downID); !slices.Equal(j.Waiting, []string{"up"}) || !slices.Equal(j.After, []string{up}) {
+		t.Fatalf("an input in an unfinished job's out must wait for it: %+v", j)
+	}
+	f.tick(t)
+	if len(f.h.launches) != 1 {
+		t.Fatal("a job ran before the job it takes inputs from")
+	}
+	f.h.exit(last(f.job(t, up)).ID, 0)
+	for range 3 {
+		f.tick(t)
+	}
+	if again := f.submit(t, down); again != downID {
+		t.Fatal("a resubmission did not match once the input was snapshotted")
+	}
+	f.tick(t)
+	if len(f.h.launches) != 2 || !content.Valid(f.h.launches[1].Spec.Inputs["up"]) || len(f.job(t, downID).Waiting) != 0 {
+		t.Fatalf("the waiting input was not snapshotted from the delivered out: %+v", f.h.launches)
+	}
+
+	cancelled := f.submit(t, jobRequest(f.out("cancelled")))
+	skipped := jobRequest(f.out("skipped"))
+	skipped.Inputs = map[string]string{"x": f.out("cancelled")}
+	skippedID := f.submit(t, skipped)
+	if err := f.s.Cancel(cancelled, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.tick(t)
+	if j := f.job(t, skippedID); j.State != Skipped {
+		t.Fatalf("a job whose input's job was cancelled must be skipped: %+v", j)
+	}
+
+	first, second := jobRequest(f.out("first")), jobRequest(f.out("second"))
+	second.Inputs = map[string]string{"first": filepath.Join(f.out("first"), "sub")}
+	results := slices.Collect(f.s.SubmitBatch(context.Background(), []BatchEntry{{Line: 1, Request: second}, {Line: 2, Request: first}, {Line: 3, Request: func() Request { r := second; r.Out = f.out("third"); return r }()}}))
+	if results[0].Error == "" || results[1].Error != "" || results[2].Error != "" {
+		t.Fatalf("an input may wait only for an earlier line: %+v", results)
 	}
 }
 

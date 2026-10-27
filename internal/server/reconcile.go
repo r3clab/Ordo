@@ -279,6 +279,9 @@ func (s *Server) reconcile(ctx context.Context, j Job, v *view) error {
 			j.State = Cancelled
 			return s.save(j)
 		}
+		if len(j.Waiting) > 0 {
+			return s.await(j, v)
+		}
 		if dispatched, err := s.dispatch(ctx, &j, v); err != nil || !dispatched {
 			return err
 		}

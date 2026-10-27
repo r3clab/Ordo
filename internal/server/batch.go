@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"net/http"
 	"slices"
 )
@@ -24,6 +25,7 @@ type BatchEntry struct {
 	Request Request
 	Err     error
 	done    bool
+	waiting map[string]string
 }
 
 // BatchResult reports one line: the job it queued or found, or Done when Out already holds results.
@@ -56,10 +58,12 @@ func ParseBatch(r io.Reader) ([]BatchEntry, error) {
 	return entries, scanner.Err()
 }
 
-// SubmitBatch builds no image for a line whose Out already holds results.
+// SubmitBatch builds no image for a line whose Out already holds results. An input may lie in the Out
+// of an unfinished job or an earlier line's, and then waits for that job.
 func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq[BatchResult] {
 	return func(yield func(BatchResult) bool) {
 		var requests []Request
+		var outs []string
 		for i := range entries {
 			e := &entries[i]
 			if e.Err == nil {
@@ -69,7 +73,14 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 				e.done, e.Err = s.delivered(e.Request.Out)
 			}
 			if e.Err == nil && !e.done {
-				requests = append(requests, e.Request)
+				e.waiting = s.waiting(e.Request, outs)
+				staged := e.Request
+				staged.Inputs = maps.Clone(staged.Inputs)
+				for name := range e.waiting {
+					delete(staged.Inputs, name)
+				}
+				requests = append(requests, staged)
+				outs = append(outs, e.Request.Out)
 			}
 		}
 		st := s.stage(ctx, requests...)
@@ -85,7 +96,7 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 				err := cmp.Or(e.Err, ctx.Err())
 				var j Job
 				if err == nil {
-					j, err = s.prepare(e.Request, st)
+					j, err = s.prepare(e.Request, e.waiting, st)
 				}
 				if err != nil {
 					results[i].Error = err.Error()

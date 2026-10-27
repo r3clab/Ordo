@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
+	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/spec"
 )
 
@@ -48,13 +51,16 @@ func jobKey(j Job) string {
 	}
 	steps := make([]step, len(j.Steps))
 	for i, stage := range j.Steps {
+		// Inputs count by source, so a resubmission matches once a waiting input has been snapshotted.
+		stage.Spec.Inputs = nil
 		steps[i] = step{stage.Name, stage.Spec}
 	}
 	data, _ := json.Marshal(struct {
-		Out   string
-		Steps []step
-		Retry RetryPolicy
-	}{j.Out, steps, j.Retry})
+		Out    string
+		Steps  []step
+		Inputs map[string]string
+		Retry  RetryPolicy
+	}{j.Out, steps, j.Inputs, j.Retry})
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
@@ -155,4 +161,47 @@ func (j Job) kept() string {
 		return prev.ID
 	}
 	return ""
+}
+
+// await holds a job until the jobs it takes inputs from have finished: it is skipped when one of them
+// did not succeed, and its waiting inputs are snapshotted from their Out once all did.
+func (s *Server) await(j Job, v *view) error {
+	s.mu.Lock()
+	var states []State
+	for _, id := range j.After {
+		states = append(states, s.records[id].State)
+	}
+	s.mu.Unlock()
+	for _, state := range states {
+		if state.Terminal() && state != Succeeded {
+			j.State, j.Error = Skipped, "a job it takes inputs from did not succeed"
+			return s.save(j)
+		}
+	}
+	if slices.ContainsFunc(states, func(state State) bool { return state != Succeeded }) {
+		return nil
+	}
+	return v.later(func() error { return s.snapshot(j) })
+}
+
+func (s *Server) snapshot(j Job) error {
+	inputs := map[string]string{}
+	for _, name := range j.Waiting {
+		digest, err := content.PutTree(s.images.Blobs, j.Inputs[name])
+		if err != nil {
+			j.State, j.Error = Failed, fmt.Sprintf("input %s: %v", name, err)
+			return s.save(j)
+		}
+		inputs[name] = digest
+	}
+	j.Steps = slices.Clone(j.Steps)
+	for i := range j.Steps {
+		j.Steps[i].Spec.Inputs = maps.Clone(j.Steps[i].Spec.Inputs)
+		if j.Steps[i].Spec.Inputs == nil {
+			j.Steps[i].Spec.Inputs = map[string]string{}
+		}
+		maps.Copy(j.Steps[i].Spec.Inputs, inputs)
+	}
+	j.Waiting = nil
+	return s.save(j)
 }

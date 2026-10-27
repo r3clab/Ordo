@@ -136,6 +136,11 @@ type Job struct {
 	CancelRequested bool        `json:"cancel_requested,omitempty"`
 	StopRequested   bool        `json:"stop_requested,omitempty"`
 	StopReason      string      `json:"stop_reason,omitempty"`
+	// Inputs keeps each input's source. Waiting names those that lie in the Out of the jobs in After:
+	// they are snapshotted once those jobs succeed, and the job runs only then.
+	Inputs  map[string]string `json:"inputs,omitempty"`
+	Waiting []string          `json:"waiting,omitempty"`
+	After   []string          `json:"after,omitempty"`
 }
 
 func (j Job) spec() spec.Spec { return j.Steps[j.Step].Spec }
@@ -154,10 +159,11 @@ type Summary struct {
 	CreatedAt       time.Time      `json:"created_at"`
 	Error           string         `json:"error,omitempty"`
 	CancelRequested bool           `json:"cancel_requested,omitempty"`
+	After           []string       `json:"after,omitempty"`
 }
 
 func (j Job) summary() Summary {
-	s := Summary{ID: j.ID, Out: j.Out, State: j.State, Step: j.Step, Steps: len(j.Steps), Attempts: len(j.Attempts), CreatedAt: j.CreatedAt, Error: j.Error, CancelRequested: j.CancelRequested}
+	s := Summary{ID: j.ID, Out: j.Out, State: j.State, Step: j.Step, Steps: len(j.Steps), Attempts: len(j.Attempts), CreatedAt: j.CreatedAt, Error: j.Error, CancelRequested: j.CancelRequested, After: j.After}
 	if j.Step < len(j.Steps) {
 		s.Image, s.Resources = j.spec().Image, j.spec().Resources
 	}
@@ -659,12 +665,34 @@ func (s *Server) delivered(out string) (bool, error) {
 	return len(names) > 0, err
 }
 
-// prepare takes a request that passed check and was staged.
-func (s *Server) prepare(r Request, st *staging) (Job, error) {
+// waiting finds the inputs that lie in an unfinished job's Out or in one of outs, the earlier lines of
+// a batch: they are snapshotted once that job delivers, not now.
+func (s *Server) waiting(r Request, outs []string) map[string]string {
+	s.mu.Lock()
+	outs = slices.Concat(outs, slices.Collect(maps.Keys(s.outs)))
+	s.mu.Unlock()
+	var waiting map[string]string
+	for name, source := range r.Inputs {
+		if slices.ContainsFunc(outs, func(out string) bool { return within(source, out) }) {
+			if waiting == nil {
+				waiting = map[string]string{}
+			}
+			waiting[name] = source
+		}
+	}
+	return waiting
+}
+
+// prepare takes a request that passed check and was staged without the inputs that wait for other
+// jobs.
+func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job, error) {
 	var inputs map[string]string
-	if len(r.Inputs) > 0 {
+	if len(r.Inputs) > len(waiting) {
 		inputs = map[string]string{}
 		for name, source := range r.Inputs {
+			if _, ok := waiting[name]; ok {
+				continue
+			}
 			input := st.inputs[source]
 			if input.err != nil {
 				return Job{}, input.err
@@ -672,7 +700,7 @@ func (s *Server) prepare(r Request, st *staging) (Job, error) {
 			inputs[name] = input.value
 		}
 	}
-	j := Job{ID: newID(), Out: r.Out, State: Queued, CreatedAt: time.Now().UTC(), Retry: r.Retry}
+	j := Job{ID: newID(), Out: r.Out, State: Queued, CreatedAt: time.Now().UTC(), Retry: r.Retry, Inputs: maps.Clone(r.Inputs), Waiting: slices.Sorted(maps.Keys(waiting))}
 	for _, step := range r.steps() {
 		img := st.images[step.Image]
 		if img.err != nil {
@@ -681,7 +709,7 @@ func (s *Server) prepare(r Request, st *staging) (Job, error) {
 		sp := spec.Spec{Image: img.value.ID, Inputs: inputs, Task: step.Task}.Normalize()
 		for _, w := range s.workers {
 			if w.Carries(sp.Tags) {
-				if err := w.CheckLaunch(sp, nil); err != nil {
+				if err := w.CheckLaunch(sp, slices.Collect(maps.Keys(waiting))); err != nil {
 					return Job{}, err
 				}
 			}
@@ -735,6 +763,11 @@ func (s *Server) admit(jobs []Job) []admission {
 				out[i].err = fmt.Errorf("out nests with %s, which an unfinished job writes", other)
 				continue
 			}
+			var err error
+			if j.After, err = s.upstream(j, pending); err != nil {
+				out[i].err = err
+				continue
+			}
 			pending[j.Out] = record{Summary: j.summary(), key: j.Key}
 			fresh = append(fresh, j)
 			out[i] = admission{id: j.ID, state: j.State}
@@ -746,6 +779,32 @@ func (s *Server) admit(jobs []Job) []admission {
 		}
 	}
 	return out
+}
+
+// upstream finds the unfinished jobs whose Out holds each of j's waiting inputs; the caller holds
+// s.write.
+func (s *Server) upstream(j Job, pending map[string]record) ([]string, error) {
+	var ids []string
+	for _, name := range j.Waiting {
+		source := j.Inputs[name]
+		id := ""
+		for out, other := range s.outs {
+			if within(source, out) {
+				id = other
+			}
+		}
+		for out, other := range pending {
+			if within(source, out) {
+				id = other.ID
+			}
+		}
+		if id == "" {
+			return nil, fmt.Errorf("input %s lies in an out that no unfinished job writes any more; submit again", name)
+		}
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
 }
 
 // nested finds an unfinished job's Out that contains out or lies inside it; the caller holds s.write.
