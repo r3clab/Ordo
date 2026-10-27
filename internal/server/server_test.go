@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
-	"net"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -39,16 +37,6 @@ func testNix() *imagetest.Nix {
 
 func testTools() image.Tools { return image.Tools{Exec: testNix().Exec} }
 
-func handlerClient(t *testing.T, handler http.Handler) *http.Client {
-	remote := httptest.NewServer(handler)
-	t.Cleanup(remote.Close)
-	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "tcp", remote.Listener.Addr().String())
-	}}}
-	t.Cleanup(client.CloseIdleConnections)
-	return client
-}
-
 type fakeContainer struct {
 	podman.Container
 	exit     int
@@ -69,6 +57,7 @@ type fakeHost struct {
 	stops      []string
 	collects   int
 	removed    []string
+	seeds      [][2]string
 	// lose is returned by the next launch after it creates the container; refuse, before.
 	lose, refuse error
 	broken       error
@@ -113,6 +102,16 @@ func (f *fakeHost) EnsureImage(context.Context, string, string) error {
 }
 
 func (f *fakeHost) EnsureInput(context.Context, string, string) error { return nil }
+
+func (f *fakeHost) Seed(_ context.Context, attempt, prev, archive string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := os.Stat(archive); err != nil {
+		return err
+	}
+	f.seeds = append(f.seeds, [2]string{attempt, prev})
+	return nil
+}
 
 func (f *fakeHost) GPUBusy(context.Context, []pool.GPU) ([]string, error) { return nil, nil }
 
@@ -198,15 +197,17 @@ func open(t *testing.T, state string, workers []worker.Config, services map[stri
 	return s
 }
 
-func request(id string) Request {
-	return Request{ID: id, Image: image.Source("/src#image"), Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}
+func jobRequest(out string) Request {
+	return Request{Out: out, Step: Step{Image: image.Source("/src#image"), Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}}
 }
 
-func submit(t *testing.T, s *Server, r Request) {
+func submit(t *testing.T, s *Server, r Request) string {
 	t.Helper()
-	if _, err := s.Submit(context.Background(), r); err != nil {
+	j, err := s.Submit(context.Background(), r)
+	if err != nil {
 		t.Fatal(err)
 	}
+	return j.ID
 }
 
 // tick waits for the pass's background steps, as the next pass would find them still busy.
@@ -254,13 +255,14 @@ type fixture struct {
 	s   *Server
 	cfg worker.Config
 	h   *fakeHost
+	dir string
 }
 
 func newFixture(t *testing.T) fixture {
 	cfg := testWorker("worker")
 	s := open(t, filepath.Join(t.TempDir(), "state"), []worker.Config{cfg}, nil)
 	t.Cleanup(func() { _ = s.Close() })
-	return fixture{s: s, cfg: cfg, h: newFakeHost(s.id)}
+	return fixture{s: s, cfg: cfg, h: newFakeHost(s.id), dir: t.TempDir()}
 }
 
 func (f fixture) tick(t *testing.T) {
@@ -268,11 +270,33 @@ func (f fixture) tick(t *testing.T) {
 	mustTick(t, f.s, f.cfg, f.h)
 }
 
+func (f fixture) out(name string) string { return filepath.Join(f.dir, name) }
+
+func (f fixture) submit(t *testing.T, r Request) string {
+	t.Helper()
+	return submit(t, f.s, r)
+}
+
+func (f fixture) job(t *testing.T, id string) Job {
+	t.Helper()
+	return mustJob(t, f.s, id)
+}
+
+func readOut(t *testing.T, out, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(out, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func TestLostLaunchResponseAndRestartDoNotDuplicate(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
+	out := filepath.Join(t.TempDir(), "results", "one")
 	workers := []worker.Config{testWorker("worker")}
 	s := open(t, state, workers, nil)
-	submit(t, s, request("one"))
+	id := submit(t, s, jobRequest(out))
 	h := newFakeHost(s.id)
 	h.lose = ssh.ErrTransport
 	if err := tick(s, workers[0], h); !errors.Is(err, ssh.ErrTransport) {
@@ -283,11 +307,11 @@ func TestLostLaunchResponseAndRestartDoNotDuplicate(t *testing.T) {
 	}
 	s = open(t, state, workers, nil)
 	defer func() { _ = s.Close() }()
-	if j := mustJob(t, s, "one"); len(j.Attempts) != 1 || j.State != Dispatching {
+	if j := mustJob(t, s, id); len(j.Attempts) != 1 || j.State != Dispatching {
 		t.Fatalf("dispatch not durable: %+v", j)
 	}
 	mustTick(t, s, workers[0], h)
-	j := mustJob(t, s, "one")
+	j := mustJob(t, s, id)
 	at := j.Attempts[0]
 	if len(h.launches) != 1 || j.State != Running || at.ContainerID != h.containers[at.ID].ID {
 		t.Fatalf("restart did not adopt the launched container: %d launches, %+v", len(h.launches), j)
@@ -295,31 +319,42 @@ func TestLostLaunchResponseAndRestartDoNotDuplicate(t *testing.T) {
 
 	h.exit(at.ID, 0)
 	mustTick(t, s, workers[0], h)
-	j = mustJob(t, s, "one")
+	j = mustJob(t, s, id)
 	at = j.Attempts[0]
-	if j.State != Succeeded || at.Result == nil || at.Result.ExitCode != 0 || len(at.Result.OutputsSHA256) != 64 || len(h.containers) != 0 {
+	if j.State != Delivering || at.Result == nil || at.Result.ExitCode != 0 || len(at.Result.OutputsSHA256) != 64 || len(h.containers) != 0 {
 		t.Fatalf("collection: %+v, containers %v", j, h.containers)
 	}
 	record, err := readRecord(at.ResultDir)
-	if err != nil || record.Attempt != at.ID || record.Spec.Image != j.Spec.Image || record.OutputsSHA256 != at.Result.OutputsSHA256 {
+	if err != nil || record.Attempt != at.ID || record.Out != out || record.Spec.Image != j.spec().Image || record.OutputsSHA256 != at.Result.OutputsSHA256 {
 		t.Fatalf("run.json %+v: %v", record, err)
 	}
-	if _, err := os.Stat(filepath.Join(at.ResultDir, OutputsArchive)); err != nil {
-		t.Fatal(err)
+	mustTick(t, s, workers[0], h)
+	if j = mustJob(t, s, id); j.State != Succeeded {
+		t.Fatalf("delivery: %+v", j)
+	}
+	if readOut(t, out, "score") != at.ID || readOut(t, out, ".ordo/1.stdout") != "out" || readOut(t, out, ".ordo/1.stderr") != "err" {
+		t.Fatal("out lacks the outputs or logs")
+	}
+	var published Job
+	if err := json.Unmarshal([]byte(readOut(t, out, ".ordo/job.json")), &published); err != nil || published.ID != id || published.State != Succeeded {
+		t.Fatalf("job.json %+v: %v", published, err)
+	}
+	if _, err := os.Stat(filepath.Join(at.ResultDir, OutputsArchive)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("delivered outputs stayed on the server: %v", err)
 	}
 }
 
 func TestRefusedLaunchRetriesAndChangedWorkerBlocks(t *testing.T) {
 	f := newFixture(t)
-	submit(t, f.s, request("job"))
+	id := f.submit(t, jobRequest(f.out("job")))
 	f.h.refuse = &ssh.ExitError{Code: 125, Stderr: "image not known"}
 	f.tick(t)
-	j := mustJob(t, f.s, "job")
+	j := f.job(t, id)
 	if j.State != Queued || j.Attempts[0].Failure != InfrastructureFailure || !slices.Contains(f.h.removed, j.Attempts[0].ID) {
 		t.Fatalf("refused launch must requeue as an infrastructure failure: %+v", j)
 	}
 	f.tick(t)
-	if j = mustJob(t, f.s, "job"); j.State != Running || len(j.Attempts) != 2 {
+	if j = f.job(t, id); j.State != Running || len(j.Attempts) != 2 {
 		t.Fatalf("retry not launched: %+v", j)
 	}
 
@@ -327,53 +362,56 @@ func TestRefusedLaunchRetriesAndChangedWorkerBlocks(t *testing.T) {
 	f.tick(t)
 	f.h.machine = "machine-1"
 	f.tick(t)
-	if j = mustJob(t, f.s, "job"); j.State != Blocked || len(f.h.launches) != 1 {
+	if j = f.job(t, id); j.State != Blocked || len(f.h.launches) != 1 {
 		t.Fatalf("a changed worker must block the job until it is cancelled: %+v", j)
 	}
-	if err := f.s.Cancel("job", false, ""); err != nil {
+	if err := f.s.Cancel(id, ""); err != nil {
 		t.Fatal(err)
 	}
 	f.tick(t)
-	if j = mustJob(t, f.s, "job"); j.State != Cancelled || len(f.h.containers) != 0 {
+	if j = f.job(t, id); j.State != Cancelled || len(f.h.containers) != 0 {
 		t.Fatalf("cancel must release a blocked job and sweep its container: %+v, %v", j, f.h.containers)
+	}
+	if _, err := os.Stat(f.out("job")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a cancelled job delivered results")
 	}
 }
 
 func TestRetryReleasesTheFinishedAttempt(t *testing.T) {
 	f := newFixture(t)
-	req := request("whole")
+	req := jobRequest(f.out("whole"))
 	req.Resources.Cores, req.Retry.Task = 4, 1
-	submit(t, f.s, req)
+	id := f.submit(t, req)
 	f.tick(t)
-	first := mustJob(t, f.s, "whole").Attempts[0]
+	first := f.job(t, id).Attempts[0]
 	f.h.exit(first.ID, 1)
 	f.tick(t)
-	if j := mustJob(t, f.s, "whole"); j.State != Queued || j.Attempts[0].Failure != TaskFailure {
+	if j := f.job(t, id); j.State != Queued || j.Attempts[0].Failure != TaskFailure {
 		t.Fatalf("failed task not requeued: %+v", j)
 	}
 	f.tick(t)
-	if j := mustJob(t, f.s, "whole"); j.State != Running || len(j.Attempts) != 2 {
+	if j := f.job(t, id); j.State != Running || len(j.Attempts) != 2 {
 		t.Fatalf("the finished attempt still holds the worker: %+v", j)
 	}
 }
 
 func TestFailedCollectionBlocksOnce(t *testing.T) {
 	f := newFixture(t)
-	submit(t, f.s, request("job"))
+	id := f.submit(t, jobRequest(f.out("job")))
 	f.tick(t)
-	at := mustJob(t, f.s, "job").Attempts[0]
+	at := f.job(t, id).Attempts[0]
 	f.h.exit(at.ID, 0)
 	f.h.broken = errors.New("archive links and special files are unsupported")
 	f.tick(t)
 	f.tick(t)
-	if j := mustJob(t, f.s, "job"); j.State != Blocked || f.h.collects != 1 || !strings.Contains(j.Error, "special files") {
+	if j := f.job(t, id); j.State != Blocked || f.h.collects != 1 || !strings.Contains(j.Error, "special files") {
 		t.Fatalf("collection retried or not blocked: %d collects, %+v", f.h.collects, j)
 	}
-	if err := f.s.Cancel("job", false, "bad outputs"); err != nil {
+	if err := f.s.Cancel(id, "bad outputs"); err != nil {
 		t.Fatal(err)
 	}
 	f.tick(t)
-	if j := mustJob(t, f.s, "job"); j.State != Cancelled || len(f.h.containers) != 0 {
+	if j := f.job(t, id); j.State != Cancelled || len(f.h.containers) != 0 {
 		t.Fatalf("cancel must release the job and remove its container: %+v", j)
 	}
 }
@@ -387,7 +425,7 @@ func TestTagsSelectWorkers(t *testing.T) {
 	state := filepath.Join(root, "state")
 	s := open(t, state, workers, nil)
 	defer func() { _ = s.Close() }()
-	req := request("tagged")
+	req := jobRequest(filepath.Join(root, "tagged"))
 	req.Tags = []string{"l40s", "fast"}
 	if _, err := s.Submit(context.Background(), req); err == nil {
 		t.Fatal("accepted tags that no single worker has")
@@ -418,6 +456,7 @@ func TestTagsSelectWorkers(t *testing.T) {
 
 func TestSecretsServicesAndStop(t *testing.T) {
 	ctx := context.Background()
+	dir := t.TempDir()
 	config := Config{Root: filepath.Join(t.TempDir(), "state"), Workers: []worker.Config{testWorker("worker")}, Services: map[string]string{"model": "127.0.0.1:8317"}, Secrets: map[string]string{"TOKEN": "hunter2"}, Tools: testTools()}
 	workers := config.Workers
 	broken := config
@@ -429,7 +468,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := request("agent")
+	req := jobRequest(filepath.Join(dir, "agent"))
 	req.Sandbox = spec.Sandbox{Env: map[string]string{"MODE": "eval"}, Network: spec.Egress, CapAdd: []string{"NET_ADMIN"}}
 	req.Secrets, req.Services, req.Retry = []string{"TOKEN"}, []string{"model"}, RetryPolicy{Task: 2}
 	for name, change := range map[string]func(*Request){
@@ -445,9 +484,9 @@ func TestSecretsServicesAndStop(t *testing.T) {
 			t.Fatal("accepted", name)
 		}
 	}
-	submit(t, s, req)
-	listed, _ := json.Marshal(mustJob(t, s, "agent"))
-	if strings.Contains(string(listed), "hunter2") || !slices.Equal(mustJob(t, s, "agent").Spec.Secrets, []string{"TOKEN"}) {
+	id := submit(t, s, req)
+	listed, _ := json.Marshal(mustJob(t, s, id))
+	if strings.Contains(string(listed), "hunter2") || !slices.Equal(mustJob(t, s, id).spec().Secrets, []string{"TOKEN"}) {
 		t.Fatalf("jobs must name secrets without values: %s", listed)
 	}
 
@@ -471,14 +510,14 @@ func TestSecretsServicesAndStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	stale := mustJob(t, s, "agent")
-	if err := s.Stop("agent", "budget spent"); err != nil {
+	stale := mustJob(t, s, id)
+	if err := s.Stop(id, "budget spent"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.save(stale); err != nil {
 		t.Fatal(err)
 	}
-	if !mustJob(t, s, "agent").StopRequested {
+	if !mustJob(t, s, id).StopRequested {
 		t.Fatal("a stale copy dropped the stop")
 	}
 	mustTick(t, s, workers[0], h)
@@ -486,17 +525,21 @@ func TestSecretsServicesAndStop(t *testing.T) {
 		t.Fatalf("stop not delivered: %q", h.stops)
 	}
 	mustTick(t, s, workers[0], h)
-	j := mustJob(t, s, "agent")
-	if at := j.Attempts[0]; j.State != Failed || j.StopReason != "budget spent" || at.StopRequested != Stop || at.Result == nil || at.Result.ExitCode != 137 {
+	mustTick(t, s, workers[0], h)
+	j := mustJob(t, s, id)
+	if at := j.Attempts[0]; j.State != Failed || len(j.Attempts) != 1 || at.StopRequested != Stop || at.StopReason != "budget spent" || at.Result == nil || at.Result.ExitCode != 137 {
 		t.Fatalf("stopped job retried or lost its reason: %+v", j)
 	}
+	if readOut(t, filepath.Join(dir, "agent"), "score") != launched.Attempt {
+		t.Fatal("a stopped job's result was not delivered")
+	}
 	queued := req
-	queued.ID = "queued"
-	submit(t, s, queued)
-	if err := s.Stop("queued", ""); err != nil {
+	queued.Out = filepath.Join(dir, "queued")
+	queuedID := submit(t, s, queued)
+	if err := s.Stop(queuedID, ""); err != nil {
 		t.Fatal(err)
 	}
-	if j := mustJob(t, s, "queued"); j.State != Cancelled {
+	if j := mustJob(t, s, queuedID); j.State != Cancelled {
 		t.Fatalf("stopping an unstarted job must cancel it: %s", j.State)
 	}
 }
@@ -504,10 +547,11 @@ func TestSecretsServicesAndStop(t *testing.T) {
 func TestTimeoutsCountAgainstTheTask(t *testing.T) {
 	f := newFixture(t)
 	f.h.skew = -time.Hour
-	for _, id := range []string{"stopped", "backstop"} {
-		req := request(id)
+	ids := map[string]string{}
+	for _, name := range []string{"stopped", "backstop"} {
+		req := jobRequest(f.out(name))
 		req.TimeoutSeconds = 60
-		submit(t, f.s, req)
+		ids[name] = f.submit(t, req)
 	}
 	f.tick(t)
 	f.tick(t)
@@ -517,19 +561,20 @@ func TestTimeoutsCountAgainstTheTask(t *testing.T) {
 	for _, c := range f.h.containers {
 		c.StartedAt.Time = c.StartedAt.Add(-61 * time.Second)
 	}
-	backstop := mustJob(t, f.s, "backstop").Attempts[0].ID
+	backstop := f.job(t, ids["backstop"]).Attempts[0].ID
 	f.h.exit(backstop, 137)
 	f.h.containers[backstop].finished = f.h.now()
 	f.tick(t)
-	stopped := mustJob(t, f.s, "stopped").Attempts[0]
+	stopped := f.job(t, ids["stopped"]).Attempts[0]
 	if !slices.Equal(f.h.stops, []string{stopped.ID}) || stopped.StopRequested != Timeout {
 		t.Fatalf("expired task not stopped: %q %+v", f.h.stops, stopped)
 	}
 	f.tick(t)
-	for _, id := range []string{"stopped", "backstop"} {
-		j := mustJob(t, f.s, id)
+	f.tick(t)
+	for name, id := range ids {
+		j := f.job(t, id)
 		if at := j.Attempts[0]; j.State != Failed || at.StopRequested != Timeout || at.Failure != TaskFailure {
-			t.Fatalf("%s: timeout not charged to the task: %+v", id, j)
+			t.Fatalf("%s: timeout not charged to the task: %+v", name, j)
 		}
 	}
 }
@@ -537,7 +582,7 @@ func TestTimeoutsCountAgainstTheTask(t *testing.T) {
 func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
 	f := newFixture(t)
 	f.h.add("foreign", "other", podman.Running)
-	submit(t, f.s, request("job"))
+	id := f.submit(t, jobRequest(f.out("job")))
 	f.tick(t)
 	if info := f.s.Workers()[0].Info; len(f.h.launches) != 0 || info == nil || !strings.Contains(info.Error, "another server") {
 		t.Fatalf("dispatched beside another server's containers: %+v", info)
@@ -545,25 +590,25 @@ func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
 	delete(f.h.containers, "foreign")
 
 	f.tick(t)
-	first := mustJob(t, f.s, "job").Attempts[0]
+	first := f.job(t, id).Attempts[0]
 	f.h.boot = "boot-2"
 	f.tick(t)
-	j := mustJob(t, f.s, "job")
+	j := f.job(t, id)
 	if j.State != Queued || j.Attempts[0].Failure != InfrastructureFailure || !slices.Contains(f.h.removed, first.ID) {
 		t.Fatalf("reboot must fail the attempt as infrastructure: %+v", j)
 	}
 
 	f.tick(t)
-	delete(f.h.containers, mustJob(t, f.s, "job").Attempts[1].ID)
+	delete(f.h.containers, f.job(t, id).Attempts[1].ID)
 	f.tick(t)
-	if j = mustJob(t, f.s, "job"); j.State != Blocked {
+	if j = f.job(t, id); j.State != Blocked {
 		t.Fatalf("lost container must block the job: %+v", j)
 	}
-	if err := f.s.Cancel("job", false, ""); err != nil {
+	if err := f.s.Cancel(id, ""); err != nil {
 		t.Fatal(err)
 	}
 	f.tick(t)
-	if j = mustJob(t, f.s, "job"); j.State != Cancelled {
+	if j = f.job(t, id); j.State != Cancelled {
 		t.Fatalf("cancel must release a blocked job: %+v", j)
 	}
 
@@ -576,42 +621,49 @@ func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
 
 func TestFinishedJobsLeaveMemoryAndListAsSummaries(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
+	dir := t.TempDir()
 	cfg := testWorker("worker")
 	s := open(t, state, []worker.Config{cfg}, nil)
 	h := newFakeHost(s.id)
-	submit(t, s, request("done"))
-	submit(t, s, request("cancelled"))
-	stale := mustJob(t, s, "cancelled")
-	if err := s.Cancel("cancelled", false, ""); err != nil {
+	done := submit(t, s, jobRequest(filepath.Join(dir, "done")))
+	cancelled := submit(t, s, jobRequest(filepath.Join(dir, "cancelled")))
+	stale := mustJob(t, s, cancelled)
+	if err := s.Cancel(cancelled, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.save(stale); err != nil {
 		t.Fatal(err)
 	}
-	if mustJob(t, s, "cancelled").State != Cancelled {
+	if mustJob(t, s, cancelled).State != Cancelled {
 		t.Fatal("a stale copy revived a cancelled job")
 	}
 	mustTick(t, s, cfg, h)
-	done := mustJob(t, s, "done")
-	h.exit(done.current().ID, 0)
+	h.exit(last(mustJob(t, s, done)).ID, 0)
 	mustTick(t, s, cfg, h)
-	if len(s.jobs) != 0 {
+	mustTick(t, s, cfg, h)
+	if len(s.jobs) != 0 || len(s.outs) != 0 {
 		t.Fatalf("finished jobs stayed in memory: %v", slices.Collect(maps.Keys(s.jobs)))
 	}
-	if done = mustJob(t, s, "done"); done.State != Succeeded || done.current().Result == nil {
-		t.Fatalf("finished job did not load from the store: %+v", done)
+	if j := mustJob(t, s, done); j.State != Succeeded || j.current().Result == nil {
+		t.Fatalf("finished job did not load from the store: %+v", j)
 	}
 	succeeded := s.List(Filter{States: []State{Succeeded}})
-	if len(succeeded) != 1 || succeeded[0].ID != "done" || succeeded[0].Worker != "worker" || succeeded[0].Attempts != 1 {
+	if len(succeeded) != 1 || succeeded[0].ID != done || succeeded[0].Out != filepath.Join(dir, "done") || succeeded[0].Worker != "worker" || succeeded[0].Attempts != 1 {
 		t.Fatalf("state filter: %+v", succeeded)
 	}
-	if listed := s.List(Filter{IDs: []string{"cancelled", "missing"}}); len(listed) != 1 || listed[0].State != Cancelled {
+	if listed := s.List(Filter{IDs: []string{cancelled, "missing"}}); len(listed) != 1 || listed[0].State != Cancelled {
 		t.Fatalf("ID filter: %+v", listed)
+	}
+	if listed := s.List(Filter{Under: []string{dir}}); len(listed) != 2 {
+		t.Fatalf("under filter: %+v", listed)
+	}
+	if listed := s.List(Filter{Under: []string{filepath.Join(dir, "do")}}); len(listed) != 0 {
+		t.Fatalf("under matched a sibling's prefix: %+v", listed)
 	}
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/jobs?state=succeeded&state=cancelled", nil))
 	var listed []map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil || len(listed) != 2 || listed[0]["spec"] != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil || len(listed) != 2 || listed[0]["steps"] != 1.0 {
 		t.Fatalf("GET /v1/jobs must list summaries: %s", w.Body.String())
 	}
 	if err := s.Close(); err != nil {
@@ -619,21 +671,21 @@ func TestFinishedJobsLeaveMemoryAndListAsSummaries(t *testing.T) {
 	}
 	s = open(t, state, []worker.Config{cfg}, nil)
 	defer func() { _ = s.Close() }()
-	if len(s.jobs) != 0 || len(s.List(Filter{})) != 2 || mustJob(t, s, "done").State != Succeeded {
+	if len(s.jobs) != 0 || len(s.List(Filter{})) != 2 || mustJob(t, s, done).State != Succeeded {
 		t.Fatal("a restart lost finished jobs or kept them in memory")
 	}
 }
 
 func TestFailedUploadRequeuesWithoutAnAttempt(t *testing.T) {
 	f := newFixture(t)
-	submit(t, f.s, request("job"))
+	id := f.submit(t, jobRequest(f.out("job")))
 	f.h.upload = errors.New("disk full")
 	f.tick(t)
-	if j := mustJob(t, f.s, "job"); j.State != Queued || len(j.Attempts) != 0 || j.Error != "disk full" {
+	if j := f.job(t, id); j.State != Queued || len(j.Attempts) != 0 || j.Error != "disk full" {
 		t.Fatalf("failed upload must requeue without an attempt: %+v", j)
 	}
 	f.tick(t)
-	if j := mustJob(t, f.s, "job"); j.State != Running || len(j.Attempts) != 1 {
+	if j := f.job(t, id); j.State != Running || len(j.Attempts) != 1 {
 		t.Fatalf("requeued job did not launch: %+v", j)
 	}
 }

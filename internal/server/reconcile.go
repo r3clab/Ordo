@@ -21,6 +21,7 @@ type host interface {
 	Poll(ctx context.Context) (worker.Snapshot, error)
 	EnsureImage(ctx context.Context, archive, id string) error
 	EnsureInput(ctx context.Context, blob, digest string) error
+	Seed(ctx context.Context, attempt, prev, archive string) error
 	GPUBusy(ctx context.Context, gpus []pool.GPU) ([]string, error)
 	Launch(ctx context.Context, l worker.Launch) (string, error)
 	Stop(ctx context.Context, attempt string) error
@@ -275,15 +276,13 @@ func (s *Server) reconcile(ctx context.Context, j Job, v *view) error {
 			j.State = Cancelled
 			return s.save(j)
 		}
-		ready, err := s.dependencies(&j)
-		if err != nil || !ready {
-			return err
-		}
 		if dispatched, err := s.dispatch(ctx, &j, v); err != nil || !dispatched {
 			return err
 		}
 	case Blocked:
 		return s.block(j, j.Error)
+	case Delivering:
+		return v.later(func() error { return s.deliver(j) })
 	}
 	at := j.current()
 	if at.Worker != v.cfg.Host {
@@ -333,25 +332,26 @@ func (j Job) stop(started, now time.Time) (StopKind, string) {
 	if kind := j.stopKind(); kind != "" {
 		return kind, j.StopReason
 	}
-	if !started.IsZero() && j.Spec.TimedOut(started, now) {
+	if !started.IsZero() && j.spec().TimedOut(started, now) {
 		return Timeout, ""
 	}
 	return "", ""
 }
 
 func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
-	if v.fault != "" || !v.cfg.Carries(j.Spec.Tags) {
+	resources := j.spec().Resources
+	if v.fault != "" || !v.cfg.Carries(j.spec().Tags) {
 		return false, nil
 	}
 	hw := v.probe.Hardware
-	allocation, err := pool.Plan(hw, j.Spec.Resources, v.held)
-	if err == nil && j.Spec.Resources.GPUs > 0 {
+	allocation, err := pool.Plan(hw, resources, v.held)
+	if err == nil && resources.GPUs > 0 {
 		// A device busy outside Ordo would break the exclusive allocation the job asks for.
 		var busy []string
 		if busy, err = v.busyGPUs(ctx); err != nil {
 			return false, err
 		}
-		allocation, err = pool.Plan(hw, j.Spec.Resources, append(slices.Clone(v.held), pool.Allocation{GPUs: busy}))
+		allocation, err = pool.Plan(hw, resources, append(slices.Clone(v.held), pool.Allocation{GPUs: busy}))
 	}
 	if errors.Is(err, pool.ErrCapacity) {
 		return false, nil
@@ -359,10 +359,7 @@ func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := s.importOutputs(j); err != nil {
-		return false, err
-	}
-	j.Attempts = append(j.Attempts, Attempt{ID: newID(), Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
+	j.Attempts = append(j.Attempts, Attempt{ID: newID(), Step: j.Step, Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
 	j.State = Dispatching
 	if err := s.save(*j); err != nil {
 		return false, err
@@ -383,16 +380,18 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 			return end
 		}
 		// Nothing ran yet, so the job goes back to the queue, where another worker may take it.
+		_ = v.host.Remove(ctx, at.ID)
 		j.Attempts = j.Attempts[:len(j.Attempts)-1]
 		j.State = Queued
 		j.Error = err.Error()
 		return s.save(j)
 	}
-	secrets := make(map[string]string, len(j.Spec.Secrets))
-	for _, name := range j.Spec.Secrets {
+	sp := j.spec()
+	secrets := make(map[string]string, len(sp.Secrets))
+	for _, name := range sp.Secrets {
 		secrets[name] = s.secrets[name]
 	}
-	id, err := v.host.Launch(ctx, worker.Launch{Attempt: at.ID, Spec: j.Spec, Allocation: at.Allocation, Secrets: secrets})
+	id, err := v.host.Launch(ctx, worker.Launch{Attempt: at.ID, Spec: sp, Allocation: at.Allocation, Secrets: secrets})
 	if end := fatal(ctx, err); end != nil {
 		return end
 	}
@@ -414,13 +413,17 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 }
 
 func (s *Server) upload(ctx context.Context, j Job, v *view) error {
-	if err := v.host.EnsureImage(ctx, filepath.Join(s.images.Blobs, j.Archive), j.Spec.Image); err != nil {
+	stage := j.Steps[j.Step]
+	if err := v.host.EnsureImage(ctx, filepath.Join(s.images.Blobs, stage.Archive), stage.Spec.Image); err != nil {
 		return err
 	}
-	for _, digest := range j.Spec.Inputs {
+	for _, digest := range stage.Spec.Inputs {
 		if err := v.host.EnsureInput(ctx, filepath.Join(s.images.Blobs, digest), digest); err != nil {
 			return err
 		}
+	}
+	if prev := j.checkpoint(); prev != nil {
+		return v.host.Seed(ctx, j.current().ID, prev.ID, filepath.Join(prev.ResultDir, OutputsArchive))
 	}
 	return nil
 }

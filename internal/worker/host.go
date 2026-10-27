@@ -206,6 +206,30 @@ func (h *Host) unpackInput(ctx context.Context, blob, digest string) error {
 	return h.run.Run(ctx, script, f, nil, nil)
 }
 
+// Seed gives an attempt the outputs of its job's earlier steps before it launches: it moves them out of
+// prev's run directory when prev ran here and left them, or unpacks archive otherwise. A repeated seed
+// of one attempt finds its outputs in place.
+func (h *Host) Seed(ctx context.Context, attempt, prev, archive string) error {
+	run := h.runDir(attempt)
+	outputs := ssh.Quote(path.Join(run, OutputsDir))
+	kept := ssh.Quote(path.Join(h.runDir(prev), OutputsDir))
+	script := "set -eu; umask 077; test -d " + outputs + " && exit 0; mkdir -p -- " + ssh.Quote(run) + "; " +
+		"if test -d " + kept + "; then mv -T -- " + kept + " " + outputs + "; exit 0; fi; exit 3"
+	err := h.run.Run(ctx, script, nil, nil, nil)
+	if exit := (*ssh.ExitError)(nil); !errors.As(err, &exit) || exit.Code != 3 {
+		return err
+	}
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	// -p keeps the modes the earlier step gave its files, which umask would otherwise narrow.
+	script = "set -eu; d=$(mktemp -d " + ssh.Quote(path.Join(run, ".seed.XXXXXX")) + "); trap 'rm -rf -- \"$d\"' EXIT; " +
+		"tar -x -p -f - -C \"$d\"; mv -T -- \"$d\" " + outputs
+	return h.run.Run(ctx, script, f, nil, nil)
+}
+
 type Launch struct {
 	Attempt    string
 	Spec       spec.Spec

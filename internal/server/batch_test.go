@@ -2,10 +2,8 @@ package server
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -29,16 +27,19 @@ func nixServer(t *testing.T) (*Server, *imagetest.Nix) {
 
 func TestBatchSharesNixImagesAndContinuesPastBadLines(t *testing.T) {
 	s, fake := nixServer(t)
+	dir := t.TempDir()
 	resources := `"resources":{"cores":1,"memory_mib":128}`
+	out := func(name string) string { return `"out":"` + filepath.Join(dir, name) + `",` }
 	batch := strings.Join([]string{
-		`{"id":"a","image":"/src#grep",` + resources + `}`,
+		`{` + out("a") + `"image":"/src#grep",` + resources + `}`,
 		``,
-		`{"id":"b","image":"/src#grep","args":["x"],` + resources + `}`,
+		`{` + out("b") + `"steps":[{"image":"/src#grep",` + resources + `},{"name":"report","image":"/src#grep","args":["x"],` + resources + `}]}`,
 		`not json`,
-		`{"image":"/src#grep",` + resources + `}`,
-		`{"id":"c","image":"/src#grep","color":"red",` + resources + `}`,
-		`{"id":"a","image":"/src#grep","args":["changed"],` + resources + `}`,
-		`{"id":"d","image":"/src#never","resources":{"cores":0,"memory_mib":128}}`,
+		`{"out":"relative","image":"/src#grep",` + resources + `}`,
+		`{` + out("c") + `"image":"/src#grep","color":"red",` + resources + `}`,
+		`{` + out("a") + `"image":"/src#grep","args":["changed"],` + resources + `}`,
+		`{` + out("d") + `"image":"/src#never","resources":{"cores":0,"memory_mib":128}}`,
+		`{` + out("e") + `"image":"/src#grep",` + resources + `,"steps":[{"image":"/src#grep",` + resources + `}]}`,
 	}, "\n")
 	submit := func() []BatchResult {
 		entries, err := ParseBatch(strings.NewReader(batch))
@@ -55,18 +56,18 @@ func TestBatchSharesNixImagesAndContinuesPastBadLines(t *testing.T) {
 			failed = append(failed, result.Line)
 		}
 	}
-	if !slices.Equal(lines, []int{1, 3, 4, 5, 6, 7, 8}) || !slices.Equal(failed, []int{4, 5, 6, 7, 8}) || results[0].State != "queued" || results[0].Existing {
+	if !slices.Equal(lines, []int{1, 3, 4, 5, 6, 7, 8, 9}) || !slices.Equal(failed, []int{4, 5, 6, 7, 8, 9}) || results[0].State != Queued || results[0].Existing {
 		t.Fatalf("results %+v", results)
 	}
 	if fake.Builds.Load() != 1 || fake.Exports.Load() != 1 {
 		t.Fatalf("batch built %d and exported %d times", fake.Builds.Load(), fake.Exports.Load())
 	}
-	j := mustJob(t, s, "a")
-	if j.Spec.Image != testImageID || j.ImageOrigin == nil || j.ImageOrigin.Installable != "/src#grep" || j.ImageOrigin.Output != "/nix/store/aaaa-image.json" {
-		t.Fatalf("job image %+v %+v", j.Spec.Image, j.ImageOrigin)
+	j := mustJob(t, s, results[1].ID)
+	if len(j.Steps) != 2 || j.Steps[1].Name != "report" || j.Steps[0].Spec.Image != testImageID || j.Steps[0].ImageOrigin == nil || j.Steps[0].ImageOrigin.Installable != "/src#grep" || j.Steps[0].ImageOrigin.Output != "/nix/store/aaaa-image.json" {
+		t.Fatalf("job steps %+v", j.Steps)
 	}
 	again := submit()
-	if !again[0].Existing || !again[1].Existing || fake.Exports.Load() != 1 {
+	if !again[0].Existing || !again[1].Existing || again[1].ID != results[1].ID || fake.Exports.Load() != 1 {
 		t.Fatalf("resubmission must reuse jobs and the exported image: %+v exports=%d", again, fake.Exports.Load())
 	}
 }
@@ -77,9 +78,8 @@ func TestBrowserRoutesCannotSubmit(t *testing.T) {
 		method, path, body string
 		want               int
 	}{
-		{http.MethodPost, "/v1/jobs", `{"id":"a","image":"/src#grep","resources":{"cores":1,"memory_mib":128}}`, http.StatusMethodNotAllowed},
-		{http.MethodPost, "/v1/batches", `{"id":"a","image":"/src#grep","resources":{"cores":1,"memory_mib":128}}`, http.StatusNotFound},
-		{http.MethodGet, "/v1/jobs/a/result", ``, http.StatusNotFound},
+		{http.MethodPost, "/v1/jobs", `{"out":"/tmp/a","image":"/src#grep","resources":{"cores":1,"memory_mib":128}}`, http.StatusMethodNotAllowed},
+		{http.MethodPost, "/v1/batches", `{"out":"/tmp/a","image":"/src#grep","resources":{"cores":1,"memory_mib":128}}`, http.StatusNotFound},
 	} {
 		w := httptest.NewRecorder()
 		s.routes().ServeHTTP(w, httptest.NewRequest(test.method, test.path, strings.NewReader(test.body)))
@@ -89,56 +89,5 @@ func TestBrowserRoutesCannotSubmit(t *testing.T) {
 	}
 	if fake.Builds.Load() != 0 {
 		t.Fatal("a browser request ran nix")
-	}
-}
-
-func TestResultIsOutputsBesideLogs(t *testing.T) {
-	s, _ := nixServer(t)
-	dir := filepath.Join(s.Root, "results", "done", "attempt")
-	for name, data := range map[string]string{"run.json": "{}", "stdout.log": "out", "stderr.log": "err", "outputs.tar": "tar", "outputs/klee/info": "stats"} {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	seed(t, s, Job{ID: "done", State: "succeeded", Attempts: []Attempt{{ID: "attempt", ResultDir: dir}}}, Job{ID: "running", State: "running", Attempts: []Attempt{{ID: "attempt"}}})
-	client := handlerClient(t, s.Handler())
-	into := t.TempDir()
-	if err := Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "done")); err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	if err := filepath.WalkDir(filepath.Join(into, "done"), func(path string, entry os.DirEntry, err error) error {
-		if err == nil && !entry.IsDir() {
-			rel, _ := filepath.Rel(filepath.Join(into, "done"), path)
-			got = append(got, rel)
-		}
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(got, []string{"klee/info", "run.json", "stderr.log", "stdout.log"}) {
-		t.Fatalf("fetched %q", got)
-	}
-	var api *HTTPError
-	if err := Download(context.Background(), client, "/v1/jobs/running/result", filepath.Join(into, "running")); !errors.As(err, &api) || api.Status != http.StatusConflict {
-		t.Fatalf("unfinished job: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "outputs", "stdout.log"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "again")); !errors.As(err, &api) || api.Status != http.StatusConflict {
-		t.Fatalf("colliding output: %v", err)
-	}
-	if err := os.Remove(filepath.Join(dir, "outputs", "stdout.log")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "outputs", "a")); err != nil {
-		t.Fatal(err)
-	}
-	if err := Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "linked")); !errors.As(err, &api) || api.Status != http.StatusInternalServerError {
-		t.Fatalf("an output the archive refuses must fail with an error response: %v", err)
 	}
 }

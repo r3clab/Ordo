@@ -1,4 +1,4 @@
-// Package schema derives the JSON Schemas of job requests and workflows from the server's types.
+// Package schema derives the JSON Schema of job requests from the server's types.
 package schema
 
 import (
@@ -15,31 +15,21 @@ import (
 
 const draft = "https://json-schema.org/draft/2020-12/schema"
 
-func Names() []string { return []string{"request", "workflow"} }
+func Names() []string { return []string{"request"} }
 
 func file(name string) string { return name + ".schema.json" }
 
 func build(name string) (*jsonschema.Schema, error) {
-	var s *jsonschema.Schema
-	var err error
-	switch name {
-	case "request":
-		if s, err = jsonschema.For[server.Request](nil); err == nil {
-			refineRequest(s)
-			s.Title = "Ordo job request"
-			s.Description = "One job; each line ordo submit reads is a job request, which needs an id, or a workflow."
-		}
-	case "workflow":
-		if s, err = jsonschema.For[server.Workflow](nil); err == nil {
-			refineWorkflow(s)
-			s.Title = "Ordo workflow"
-		}
-	default:
+	if name != "request" {
 		return nil, fmt.Errorf("unknown schema %q; choose one of %v", name, Names())
 	}
+	s, err := jsonschema.For[server.Request](nil)
 	if err != nil {
 		return nil, err
 	}
+	refineRequest(s)
+	s.Title = "Ordo job request"
+	s.Description = "One job, a line of ordo submit, which writes its results into out. A job of one step may give that step's fields at the top level instead of in steps."
 	s.Schema = draft
 	return s, nil
 }
@@ -102,11 +92,30 @@ func enum(values []string) []any {
 	return out
 }
 
+// The server resolves relative paths against nothing, so ordo submit makes them absolute first.
+const absolute = "^/"
+
 func refineRequest(s *jsonschema.Schema) {
-	at(s, "id").Pattern = spec.NamePattern
+	at(s, "out").Pattern = absolute
+	at(s, "inputs").PropertyNames = names()
+	at(s, "inputs", "{}").Pattern = absolute
+	steps := at(s, "steps")
+	steps.Type, steps.Types = "array", nil
+	steps.MinItems, steps.MaxItems = jsonschema.Ptr(1), jsonschema.Ptr(server.MaxSteps)
+	refineStep(at(steps, "[]"))
+	refineStep(s)
+	s.Required = []string{"out"}
+	s.OneOf = []*jsonschema.Schema{{Required: []string{"steps"}}, {Required: []string{"image", "resources"}}}
+	for _, field := range []string{"task", "infrastructure"} {
+		at(s, "retry", field).Minimum = jsonschema.Ptr(0.0)
+		at(s, "retry", field).Maximum = jsonschema.Ptr(float64(server.MaxRetry))
+	}
+}
+
+func refineStep(s *jsonschema.Schema) {
+	at(s, "name").Pattern = spec.NamePattern
 	at(s, "image").MaxLength = jsonschema.Ptr(image.MaxInstallableBytes)
 	at(s, "image").Pattern = image.InstallablePattern
-	at(s, "inputs").PropertyNames = names()
 	resources := at(s, "resources")
 	at(resources, "cores").Minimum = jsonschema.Ptr(1.0)
 	at(resources, "memory_mib").Minimum = jsonschema.Ptr(1.0)
@@ -125,21 +134,4 @@ func refineRequest(s *jsonschema.Schema) {
 	}
 	at(s, "timeout_seconds").Minimum = jsonschema.Ptr(0.0)
 	at(s, "timeout_seconds").Maximum = jsonschema.Ptr(float64(spec.MaxTimeoutSeconds))
-	for _, field := range []string{"task", "infrastructure"} {
-		at(s, "retry", field).Minimum = jsonschema.Ptr(0.0)
-		at(s, "retry", field).Maximum = jsonschema.Ptr(float64(server.MaxRetry))
-	}
-}
-
-func refineWorkflow(s *jsonschema.Schema) {
-	at(s, "id").Pattern = spec.NamePattern
-	at(s, "id").MaxLength = jsonschema.Ptr(server.MaxWorkflowID)
-	tasks := at(s, "tasks")
-	tasks.Type, tasks.Types = "array", nil
-	tasks.MinItems, tasks.MaxItems = jsonschema.Ptr(1), jsonschema.Ptr(server.MaxWorkflowTasks)
-	step := at(tasks, "[]")
-	refineRequest(step)
-	at(step, "id").MaxLength = jsonschema.Ptr(server.MaxStepID)
-	step.Required = append(step.Required, "id")
-	at(step, "from").PropertyNames = names()
 }

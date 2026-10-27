@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/r3clab/Ordo/internal/image"
-	"github.com/r3clab/Ordo/internal/spec"
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
@@ -63,11 +61,12 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 			t.Fatal("asset/security headers", path, w.Code)
 		}
 	}
-	if _, err := s.Submit(context.Background(), Request{ID: "example", Image: image.Source("/src#image"), Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}); err != nil {
+	example, err := s.Submit(context.Background(), jobRequest(filepath.Join(t.TempDir(), "example")))
+	if err != nil {
 		t.Fatal(err)
 	}
-	w := request("POST", "/v1/jobs/example/cancel", token, "", "http://127.0.0.1:7331", nil)
-	if w.Code != 200 || !mustJob(t, s, "example").CancelRequested {
+	w := request("POST", "/v1/jobs/"+example.ID+"/cancel", token, "", "http://127.0.0.1:7331", nil)
+	if w.Code != 200 || !mustJob(t, s, example.ID).CancelRequested {
 		t.Fatal("cancel failed", w.Body.String())
 	}
 	dir := filepath.Join(s.Root, "result")

@@ -212,6 +212,45 @@ func TestEnsureInputUnpacksOnce(t *testing.T) {
 	}
 }
 
+func TestSeedMovesKeptOutputsOrUnpacksTheArchive(t *testing.T) {
+	h := testHost(t)
+	kept := filepath.Join(h.StateDir, "runs", "a", OutputsDir)
+	if err := os.MkdirAll(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(kept, "klee.log"), []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := h.Seed(context.Background(), "b", "a", "/missing.tar"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(h.StateDir, "runs", "b", OutputsDir, "klee.log")); err != nil || string(data) != "kept" {
+		t.Fatalf("kept outputs not moved: %q %v", data, err)
+	}
+	src := t.TempDir()
+	file := filepath.Join(src, "test000001.ktest")
+	if err := os.WriteFile(file, []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Unix(1700000000, 250000000)
+	if err := os.Chtimes(file, when, when); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "outputs.tar")
+	if _, err := content.Archive(src, archive); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Seed(context.Background(), "c", "a", archive); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(h.StateDir, "runs", "c", OutputsDir, "test000001.ktest"))
+	if err != nil || !info.ModTime().Equal(when) || info.Mode().Perm() != 0o644 {
+		t.Fatalf("unpacked outputs lost their time or mode: %v %v", info, err)
+	}
+}
+
 func TestEnsureImageLoadsOnlyWhenMissing(t *testing.T) {
 	log := fakes(t)
 	h := testHost(t)

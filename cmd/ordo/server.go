@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,48 +111,6 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	}
 	err = s.Run(ctx, c.Listen)
 	return errors.Join(err, s.Close())
-}
-
-const queueUsage = "Usage: ordo queue <list|get|cancel|cancel-workflow|stop> [--state DIR] [--id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents."
-
-func queueCommand(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) == 0 || args[0] == "--help" {
-		_, err := fmt.Fprintln(out, queueUsage)
-		return err
-	}
-	operation := args[0]
-	f := newFlags("queue")
-	var root, id, reason string
-	stateFlag(f, &root)
-	f.StringVar(&id, "id", "", "job ID")
-	f.StringVar(&reason, "reason", "", "why a job is stopped or cancelled")
-	if err := parse(f, args[1:], out, queueUsage); err != nil {
-		return err
-	}
-	if root == "" || f.NArg() != 0 {
-		return errors.New("--state is required")
-	}
-	method, endpoint := http.MethodPost, "/v1/jobs/"+id+"/"+operation
-	var body any
-	switch operation {
-	case "cancel", "stop":
-		body = server.StopRequest{Reason: reason}
-	case "cancel-workflow":
-		endpoint, body = "/v1/workflows/"+id+"/cancel", server.StopRequest{Reason: reason}
-	case "list":
-		method, endpoint = http.MethodGet, "/v1/jobs"
-	case "get":
-		method, endpoint = http.MethodGet, "/v1/jobs/"+id
-	default:
-		return errors.New("unknown queue command")
-	}
-	client := server.Client(server.Socket(root))
-	defer client.CloseIdleConnections()
-	var result any
-	if err := server.Call(ctx, client, method, endpoint, body, &result); err != nil {
-		return err
-	}
-	return printJSON(out, result)
 }
 
 // Editors and echo end a file with a newline that is not part of the secret.

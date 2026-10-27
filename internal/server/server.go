@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -25,12 +27,29 @@ import (
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
-type Request struct {
-	ID     string            `json:"id,omitempty"`
-	Image  image.Source      `json:"image"`
-	Inputs map[string]string `json:"inputs,omitempty"`
+// Step is one container of a job. A job's steps run in order, and each starts with what the earlier
+// ones left in /outputs.
+type Step struct {
+	Name  string       `json:"name,omitempty"`
+	Image image.Source `json:"image"`
 	spec.Task
+}
+
+// Request is a job that writes its results into Out. A job of one step may give that step's fields at
+// the top level instead of in Steps.
+type Request struct {
+	Out    string            `json:"out"`
+	Inputs map[string]string `json:"inputs,omitempty"`
+	Steps  []Step            `json:"steps,omitempty"`
+	Step
 	Retry RetryPolicy `json:"retry,omitempty"`
+}
+
+func (r Request) steps() []Step {
+	if len(r.Steps) == 0 {
+		return []Step{r.Step}
+	}
+	return r.Steps
 }
 
 type Failure string
@@ -61,6 +80,7 @@ type Result struct {
 // its ID instead of launching a second one.
 type Attempt struct {
 	ID            string          `json:"id"`
+	Step          int             `json:"step"`
 	Worker        string          `json:"worker"`
 	MachineID     string          `json:"machine_id"`
 	BootID        string          `json:"boot_id"`
@@ -82,6 +102,7 @@ const (
 	Running     State = "running"
 	Blocked     State = "blocked"
 	Collecting  State = "collecting"
+	Delivering  State = "delivering"
 	Succeeded   State = "succeeded"
 	Failed      State = "failed"
 	Cancelled   State = "cancelled"
@@ -92,42 +113,53 @@ func (s State) Terminal() bool {
 	return s == Succeeded || s == Failed || s == Cancelled || s == Skipped
 }
 
-type Job struct {
-	ID              string            `json:"id"`
-	Spec            spec.Spec         `json:"spec"`
-	Archive         string            `json:"archive"`
-	State           State             `json:"state"`
-	Error           string            `json:"error,omitempty"`
-	CreatedAt       time.Time         `json:"created_at"`
-	Attempts        []Attempt         `json:"attempts,omitempty"`
-	Key             string            `json:"submission_key,omitempty"`
-	Workflow        string            `json:"workflow,omitempty"`
-	Depends         []string          `json:"depends_on,omitempty"`
-	From            map[string]string `json:"from,omitempty"`
-	Retry           RetryPolicy       `json:"retry,omitempty"`
-	CancelRequested bool              `json:"cancel_requested,omitempty"`
-	StopRequested   bool              `json:"stop_requested,omitempty"`
-	StopReason      string            `json:"stop_reason,omitempty"`
-	ImageOrigin     *image.Origin     `json:"image_origin,omitempty"`
+// Stage is a step as its job runs it, with the image and inputs resolved to content.
+type Stage struct {
+	Name        string        `json:"name,omitempty"`
+	Spec        spec.Spec     `json:"spec"`
+	Archive     string        `json:"archive"`
+	ImageOrigin *image.Origin `json:"image_origin,omitempty"`
 }
+
+type Job struct {
+	ID              string      `json:"id"`
+	Out             string      `json:"out"`
+	Steps           []Stage     `json:"steps"`
+	Step            int         `json:"step"`
+	State           State       `json:"state"`
+	Error           string      `json:"error,omitempty"`
+	CreatedAt       time.Time   `json:"created_at"`
+	Attempts        []Attempt   `json:"attempts,omitempty"`
+	Key             string      `json:"submission_key,omitempty"`
+	Retry           RetryPolicy `json:"retry,omitempty"`
+	CancelRequested bool        `json:"cancel_requested,omitempty"`
+	StopRequested   bool        `json:"stop_requested,omitempty"`
+	StopReason      string      `json:"stop_reason,omitempty"`
+}
+
+func (j Job) spec() spec.Spec { return j.Steps[j.Step].Spec }
 
 // Summary is how GET /v1/jobs lists a job; GET /v1/jobs/{id} returns all of it.
 type Summary struct {
 	ID              string         `json:"id"`
+	Out             string         `json:"out"`
 	State           State          `json:"state"`
-	Workflow        string         `json:"workflow,omitempty"`
+	Step            int            `json:"step"`
+	Steps           int            `json:"steps"`
 	Image           string         `json:"image"`
 	Resources       spec.Resources `json:"resources"`
 	Worker          string         `json:"worker,omitempty"`
 	Attempts        int            `json:"attempts,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
 	Error           string         `json:"error,omitempty"`
-	Depends         []string       `json:"depends_on,omitempty"`
 	CancelRequested bool           `json:"cancel_requested,omitempty"`
 }
 
 func (j Job) summary() Summary {
-	s := Summary{ID: j.ID, State: j.State, Workflow: j.Workflow, Image: j.Spec.Image, Resources: j.Spec.Resources, Attempts: len(j.Attempts), CreatedAt: j.CreatedAt, Error: j.Error, Depends: j.Depends, CancelRequested: j.CancelRequested}
+	s := Summary{ID: j.ID, Out: j.Out, State: j.State, Step: j.Step, Steps: len(j.Steps), Attempts: len(j.Attempts), CreatedAt: j.CreatedAt, Error: j.Error, CancelRequested: j.CancelRequested}
+	if j.Step < len(j.Steps) {
+		s.Image, s.Resources = j.spec().Image, j.spec().Resources
+	}
 	if len(j.Attempts) > 0 {
 		s.Worker = j.current().Worker
 	}
@@ -151,8 +183,10 @@ type Server struct {
 	workers  []worker.Config
 	services map[string]string
 	secrets  map[string]string
-	// jobs holds only unfinished jobs; a finished one is read back from the store.
+	// jobs holds only unfinished jobs, and outs maps their Out to their ID; a finished job is read back
+	// from the store.
 	jobs     map[string]Job
+	outs     map[string]string
 	records  map[string]record
 	attempts map[string]string
 	busy     map[string]bool
@@ -216,7 +250,7 @@ func Open(c Config) (_ *Server, err error) {
 			}
 		}
 	}
-	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)
 	if errors.Is(err, state.ErrNotFound) {
@@ -238,8 +272,10 @@ func Open(c Config) (_ *Server, err error) {
 			if n := len(j.Attempts); n > 0 && j.live(n-1) && !seen[j.current().Worker] {
 				return nil, errors.New("configuration removes a worker with unfinished attempts")
 			}
-			if err := s.checkConfig(j.Spec); err != nil {
-				return nil, fmt.Errorf("unfinished job %s: %w", j.ID, err)
+			for _, step := range j.Steps {
+				if err := s.checkConfig(step.Spec.Task); err != nil {
+					return nil, fmt.Errorf("unfinished job %s: %w", j.Out, err)
+				}
 			}
 		}
 		s.installLocked(j)
@@ -297,9 +333,9 @@ func (j *Job) current() *Attempt                          { return &j.Attempts[l
 func newID() string                                       { return strings.ToLower(rand.Text()) }
 
 // live reports whether attempt i may still run. A requeued job's last attempt is over: dispatch
-// replaces it in the same write that leaves the queued state.
+// replaces it in the same write that leaves the queued state. A delivering job's has been collected.
 func (j Job) live(i int) bool {
-	return i == len(j.Attempts)-1 && !j.State.Terminal() && j.State != Queued
+	return i == len(j.Attempts)-1 && !j.State.Terminal() && j.State != Queued && j.State != Delivering
 }
 
 func (j Job) clone() Job {
@@ -322,15 +358,23 @@ func (s *Server) job(id string) (Job, bool, error) {
 	return j, err == nil, err
 }
 
+// within reports whether file is dir or lies under it; both are clean absolute paths.
+func within(file, dir string) bool {
+	return file == dir || strings.HasPrefix(file, strings.TrimSuffix(dir, "/")+"/")
+}
+
 // Filter keeps the jobs that match every field it sets, and any value within one.
 type Filter struct {
-	IDs       []string
-	States    []State
-	Workflows []string
+	IDs    []string
+	States []State
+	Outs   []string
+	// Under keeps the jobs whose Out is under any of these directories.
+	Under []string
 }
 
 func (f Filter) keeps(r Summary) bool {
-	return (len(f.States) == 0 || slices.Contains(f.States, r.State)) && (len(f.Workflows) == 0 || slices.Contains(f.Workflows, r.Workflow))
+	return (len(f.States) == 0 || slices.Contains(f.States, r.State)) && (len(f.Outs) == 0 || slices.Contains(f.Outs, r.Out)) &&
+		(len(f.Under) == 0 || slices.ContainsFunc(f.Under, func(dir string) bool { return within(r.Out, dir) }))
 }
 
 func (s *Server) List(f Filter) []Summary {
@@ -390,8 +434,11 @@ func (s *Server) refreshLocked(j *Job) {
 		return
 	}
 	j.CancelRequested = j.CancelRequested || old.CancelRequested
-	j.StopRequested = j.StopRequested || old.StopRequested
-	j.StopReason = cmp.Or(old.StopReason, j.StopReason)
+	// A stop ends one step, so it does not follow the job to the next.
+	if old.Step == j.Step || j.CancelRequested {
+		j.StopRequested = j.StopRequested || old.StopRequested
+		j.StopReason = cmp.Or(old.StopReason, j.StopReason)
+	}
 	if j.CancelRequested && j.State.Terminal() {
 		j.State = Cancelled
 	}
@@ -440,8 +487,12 @@ func (s *Server) installLocked(j Job) {
 	}
 	if j.State.Terminal() {
 		delete(s.jobs, j.ID)
+		if s.outs[j.Out] == j.ID {
+			delete(s.outs, j.Out)
+		}
 	} else {
 		s.jobs[j.ID] = j.clone()
+		s.outs[j.Out] = j.ID
 	}
 }
 
@@ -463,7 +514,9 @@ func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
 	var images []image.Source
 	var inputs []string
 	for _, r := range requests {
-		images = append(images, r.Image)
+		for _, step := range r.steps() {
+			images = append(images, step.Image)
+		}
 		for _, source := range r.Inputs {
 			inputs = append(inputs, source)
 		}
@@ -507,104 +560,158 @@ func each[K comparable, V any](keys []K, limit int, do func(K) (V, error)) map[K
 	return out
 }
 
+func absolute(file string) bool {
+	return filepath.IsAbs(file) && filepath.Clean(file) == file && file != "/"
+}
+
 func (r Request) Validate() error {
-	if err := r.Image.Validate(); err != nil {
-		return err
+	if !absolute(r.Out) {
+		return errors.New("out must be a clean absolute path other than /")
+	}
+	if len(r.Steps) > 0 && !reflect.ValueOf(r.Step).IsZero() {
+		return errors.New("give either steps or one step's fields at the top level")
+	}
+	if len(r.Steps) > MaxSteps {
+		return fmt.Errorf("a job has at most %d steps", MaxSteps)
+	}
+	var names []string
+	for _, step := range r.steps() {
+		if err := step.Image.Validate(); err != nil {
+			return err
+		}
+		if err := step.Validate(); err != nil {
+			return err
+		}
+		if step.Name != "" {
+			names = append(names, step.Name)
+		}
+	}
+	if !spec.ValidNameSet(names) {
+		return errors.New("step names must be unique and valid")
 	}
 	if err := r.Retry.validate(); err != nil {
 		return err
 	}
-	if r.ID != "" && !spec.ValidName(r.ID) {
-		return errors.New("invalid job ID")
-	}
-	for name := range r.Inputs {
+	for name, source := range r.Inputs {
 		if !spec.ValidName(name) {
 			return errors.New("invalid input name")
 		}
+		if !absolute(source) {
+			return fmt.Errorf("input %s must be a clean absolute path other than /", name)
+		}
+		if within(source, r.Out) {
+			return fmt.Errorf("input %s lies in the job's own out", name)
+		}
 	}
-	return r.Task.Validate()
+	return nil
 }
 
 func (s *Server) check(r Request) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
-	return s.checkConfig(r.spec())
-}
-
-func (s *Server) checkConfig(sp spec.Spec) error {
-	for _, name := range sp.Services {
-		if _, ok := s.services[name]; !ok {
-			return fmt.Errorf("service %q is unknown; add it to \"services\" in the server config", name)
+	for _, step := range r.steps() {
+		if err := s.checkConfig(step.Task); err != nil {
+			return err
 		}
-	}
-	for _, name := range sp.Secrets {
-		if _, ok := s.secrets[name]; !ok {
-			return fmt.Errorf("secret %q is unknown; add it to \"secrets\" in the server config", name)
-		}
-	}
-	if !slices.ContainsFunc(s.workers, func(w worker.Config) bool { return w.Carries(sp.Tags) }) {
-		return fmt.Errorf("no configured worker has all tags %q; add them to a worker's \"tags\" in the server config", sp.Tags)
 	}
 	return nil
 }
 
-func (r Request) spec() spec.Spec {
-	return spec.Spec{Task: r.Task}.Normalize()
+func (s *Server) checkConfig(t spec.Task) error {
+	for _, name := range t.Services {
+		if _, ok := s.services[name]; !ok {
+			return fmt.Errorf("service %q is unknown; add it to \"services\" in the server config", name)
+		}
+	}
+	for _, name := range t.Secrets {
+		if _, ok := s.secrets[name]; !ok {
+			return fmt.Errorf("secret %q is unknown; add it to \"secrets\" in the server config", name)
+		}
+	}
+	if !slices.ContainsFunc(s.workers, func(w worker.Config) bool { return w.Carries(t.Tags) }) {
+		return fmt.Errorf("no configured worker has all tags %q; add them to a worker's \"tags\" in the server config", t.Tags)
+	}
+	return nil
+}
+
+// delivered reports whether out already holds results that no unfinished job is writing.
+func (s *Server) delivered(out string) (bool, error) {
+	s.mu.Lock()
+	_, unfinished := s.outs[out]
+	s.mu.Unlock()
+	if unfinished {
+		return false, nil
+	}
+	f, err := os.Open(out)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	names, err := f.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	return len(names) > 0, err
 }
 
 // prepare takes a request that passed check and was staged.
-func (s *Server) prepare(r Request, from map[string]string, st *staging) (Job, error) {
-	if r.ID == "" {
-		r.ID = newID()
-	}
-	img := st.images[r.Image]
-	if img.err != nil {
-		return Job{}, img.err
-	}
-	j := Job{ID: r.ID, Spec: r.spec(), Archive: img.value.Blob, ImageOrigin: img.value.Origin, State: Queued, CreatedAt: time.Now().UTC(), From: from, Retry: r.Retry}
-	j.Spec.Image = img.value.ID
+func (s *Server) prepare(r Request, st *staging) (Job, error) {
+	var inputs map[string]string
 	if len(r.Inputs) > 0 {
-		j.Spec.Inputs = map[string]string{}
+		inputs = map[string]string{}
 		for name, source := range r.Inputs {
 			input := st.inputs[source]
 			if input.err != nil {
 				return Job{}, input.err
 			}
-			j.Spec.Inputs[name] = input.value
+			inputs[name] = input.value
 		}
 	}
-	imported := slices.Collect(maps.Keys(from))
-	for _, w := range s.workers {
-		if w.Carries(j.Spec.Tags) {
-			if err := w.CheckLaunch(j.Spec, imported); err != nil {
-				return Job{}, err
+	j := Job{ID: newID(), Out: r.Out, State: Queued, CreatedAt: time.Now().UTC(), Retry: r.Retry}
+	for _, step := range r.steps() {
+		img := st.images[step.Image]
+		if img.err != nil {
+			return Job{}, img.err
+		}
+		sp := spec.Spec{Image: img.value.ID, Inputs: inputs, Task: step.Task}.Normalize()
+		for _, w := range s.workers {
+			if w.Carries(sp.Tags) {
+				if err := w.CheckLaunch(sp, nil); err != nil {
+					return Job{}, err
+				}
 			}
 		}
+		j.Steps = append(j.Steps, Stage{Name: step.Name, Spec: sp, Archive: img.value.Blob, ImageOrigin: img.value.Origin})
 	}
 	return j, nil
 }
+
+// Submit queues one request as a batch of one would.
 func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
-	if err := s.check(r); err != nil {
-		return Job{}, err
+	result := slices.Collect(s.SubmitBatch(ctx, []BatchEntry{{Line: 1, Request: r}}))[0]
+	switch {
+	case result.Error != "":
+		return Job{}, errors.New(result.Error)
+	case result.Done:
+		return Job{}, fmt.Errorf("%s already holds results", r.Out)
 	}
-	j, err := s.prepare(r, nil, s.stage(ctx, r))
-	if err != nil {
-		return Job{}, err
-	}
-	if err := s.admit([]Job{j})[0].err; err != nil {
-		return Job{}, err
-	}
-	j, _, err = s.job(j.ID)
+	j, _, err := s.job(result.ID)
 	return j, err
 }
 
 type admission struct {
+	id       string
 	state    State
 	existing bool
 	err      error
 }
 
+// admit keys jobs by Out: an unfinished job there with the same request is returned, and a different
+// one, or one whose Out nests with this one's, refuses it.
 func (s *Server) admit(jobs []Job) []admission {
 	out := make([]admission, len(jobs))
 	s.write.Lock()
@@ -613,19 +720,23 @@ func (s *Server) admit(jobs []Job) []admission {
 	fresh := []Job{}
 	for i, j := range jobs {
 		j.Key = jobKey(j)
-		old, ok := s.records[j.ID]
-		if !ok {
-			old, ok = pending[j.ID]
+		old, ok := pending[j.Out]
+		if id, unfinished := s.outs[j.Out]; unfinished {
+			old, ok = s.records[id], true
 		}
 		switch {
-		case !ok:
-			pending[j.ID] = record{Summary: j.summary(), key: j.Key}
-			fresh = append(fresh, j)
-			out[i].state = j.State
-		case old.key != j.Key:
-			out[i].err = errors.New("job ID already has a different immutable specification")
+		case ok && old.key == j.Key:
+			out[i] = admission{id: old.ID, state: old.State, existing: true}
+		case ok:
+			out[i].err = errors.New("out already has an unfinished job with a different request")
 		default:
-			out[i] = admission{state: old.State, existing: true}
+			if other := s.nested(j.Out, pending); other != "" {
+				out[i].err = fmt.Errorf("out nests with %s, which an unfinished job writes", other)
+				continue
+			}
+			pending[j.Out] = record{Summary: j.summary(), key: j.Key}
+			fresh = append(fresh, j)
+			out[i] = admission{id: j.ID, state: j.State}
 		}
 	}
 	if err := s.commit(fresh...); err != nil {
@@ -634,6 +745,17 @@ func (s *Server) admit(jobs []Job) []admission {
 		}
 	}
 	return out
+}
+
+// nested finds an unfinished job's Out that contains out or lies inside it; the caller holds s.write.
+func (s *Server) nested(out string, pending map[string]record) string {
+	others := slices.Concat(slices.Collect(maps.Keys(s.outs)), slices.Collect(maps.Keys(pending)))
+	for _, other := range others {
+		if within(out, other) || within(other, out) {
+			return other
+		}
+	}
+	return ""
 }
 
 func (s *Server) Run(ctx context.Context, address string) error {
@@ -680,7 +802,6 @@ func (s *Server) Run(ctx context.Context, address string) error {
 func (s *Server) Handler() http.Handler {
 	mux := s.routes()
 	mux.HandleFunc("POST /v1/batches", s.serveBatch)
-	mux.HandleFunc("GET /v1/jobs/{id}/result", s.serveResult)
 	return mux
 }
 
@@ -690,15 +811,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { WriteJSON(w, http.StatusOK, s.Workers()) })
 	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", s.serveLogs)
-	cancel := func(workflow bool) http.HandlerFunc {
-		return StopHandler(func(id, reason string) error { return s.Cancel(id, workflow, reason) })
-	}
-	mux.HandleFunc("POST /v1/jobs/{id}/cancel", cancel(false))
-	mux.HandleFunc("POST /v1/workflows/{id}/cancel", cancel(true))
+	mux.HandleFunc("POST /v1/jobs/{id}/cancel", StopHandler(s.Cancel))
 	mux.HandleFunc("POST /v1/jobs/{id}/stop", StopHandler(s.Stop))
 	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		f := Filter{IDs: query["id"], Workflows: query["workflow"]}
+		f := Filter{IDs: query["id"], Outs: query["out"], Under: query["under"]}
 		for _, state := range query["state"] {
 			f.States = append(f.States, State(state))
 		}

@@ -6,10 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
+	"syscall"
 
 	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/podman"
@@ -21,13 +20,16 @@ import (
 const (
 	RecordFile     = "run.json"
 	OutputsArchive = "outputs.tar"
+	// MetaDir is where Out keeps the job's record and each step's logs, beside the outputs.
+	MetaDir = ".ordo"
+	JobFile = "job.json"
 )
-
-var resultFiles = []string{RecordFile, worker.StdoutFile, worker.StderrFile}
 
 // Record is run.json. It holds no secret values: Spec lists only their names.
 type Record struct {
 	Job           string          `json:"job"`
+	Out           string          `json:"out"`
+	Step          int             `json:"step"`
 	Attempt       string          `json:"attempt"`
 	Worker        string          `json:"worker"`
 	MachineID     string          `json:"machine_id"`
@@ -65,12 +67,12 @@ func (s *Server) collect(ctx context.Context, j Job, v *view) error {
 		return s.abandon(ctx, j, v, "container ended without a recorded finish time")
 	}
 	result := Result{ExitCode: *state.ExitCode, StartedAt: state.StartedAt, FinishedAt: state.FinishedAt, OOMKilled: state.OOMKilled}
-	if at.StopRequested == "" && j.Spec.TimedOut(result.StartedAt, result.FinishedAt) {
+	if at.StopRequested == "" && j.spec().TimedOut(result.StartedAt, result.FinishedAt) {
 		at.StopRequested = Timeout
 	}
 	dest := filepath.Join(s.Root, "results", j.ID, at.ID)
 	if _, err := os.Stat(dest); errors.Is(err, os.ErrNotExist) {
-		record := Record{Job: j.ID, Attempt: at.ID, Worker: at.Worker, MachineID: at.MachineID, ContainerID: at.ContainerID, Spec: j.Spec, Allocation: at.Allocation, StopRequested: at.StopRequested, StopReason: at.StopReason, Result: result}
+		record := Record{Job: j.ID, Out: j.Out, Step: j.Step, Attempt: at.ID, Worker: at.Worker, MachineID: at.MachineID, ContainerID: at.ContainerID, Spec: j.spec(), Allocation: at.Allocation, StopRequested: at.StopRequested, StopReason: at.StopReason, Result: result}
 		err := s.receive(ctx, v.host, &record, dest)
 		if end := fatal(ctx, err); end != nil {
 			return end
@@ -100,9 +102,10 @@ func (s *Server) collect(ctx context.Context, j Job, v *view) error {
 func (s *Server) owns(j Job, c podman.Inspection) bool {
 	at := j.current()
 	labels := c.Config.Labels
-	return c.ID == at.ContainerID && c.Name == podman.Name(at.ID) && c.Image == j.Spec.Image && labels[podman.AttemptLabel] == at.ID && labels[podman.ServerLabel] == s.id
+	return c.ID == at.ContainerID && c.Name == podman.Name(at.ID) && c.Image == j.spec().Image && labels[podman.AttemptLabel] == at.ID && labels[podman.ServerLabel] == s.id
 }
 
+// receive keeps the outputs only as an archive, which seeds the next step and is delivered to Out.
 func (s *Server) receive(ctx context.Context, h host, record *Record, dest string) error {
 	parent := filepath.Dir(dest)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -116,23 +119,29 @@ func (s *Server) receive(ctx context.Context, h host, record *Record, dest strin
 	if err := h.Collect(ctx, record.Attempt, stage); err != nil {
 		return err
 	}
-	// Workflow inputs reuse this archive by digest, so it is rebuilt deterministically on the server.
-	record.OutputsSHA256, err = content.Archive(filepath.Join(stage, worker.OutputsDir), filepath.Join(stage, OutputsArchive))
+	outputs := filepath.Join(stage, worker.OutputsDir)
+	record.OutputsSHA256, err = content.Archive(outputs, filepath.Join(stage, OutputsArchive))
 	if err != nil {
 		return err
 	}
-	err = content.WriteAtomic(filepath.Join(stage, RecordFile), func(w io.Writer) error {
-		encoder := json.NewEncoder(w)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(record)
-	})
-	if err != nil {
+	if err := os.RemoveAll(outputs); err != nil {
+		return err
+	}
+	if err := writeJSON(filepath.Join(stage, RecordFile), record); err != nil {
 		return err
 	}
 	if err := os.Rename(stage, dest); err != nil {
 		return err
 	}
 	return content.SyncDir(parent)
+}
+
+func writeJSON(file string, value any) error {
+	return content.WriteAtomic(file, func(w io.Writer) error {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(value)
+	})
 }
 
 func readRecord(dir string) (Record, error) {
@@ -166,31 +175,90 @@ func (j Job) resultDir(index int) (string, error) {
 	return j.Attempts[index].ResultDir, nil
 }
 
-func (s *Server) serveResult(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.lookup(w, r)
-	if !ok {
-		return
+// deliver publishes the last attempt's outputs, with the job's record and each step's logs in MetaDir,
+// into Out by one rename. A rename that a crash interrupted before the job was saved left a job.json
+// naming this job, which counts as delivered.
+func (s *Server) deliver(j Job) error {
+	outcome := Succeeded
+	if j.current().Failure != "" {
+		outcome = Failed
 	}
-	dir, err := j.resultDir(len(j.Attempts) - 1)
-	if j.State != Succeeded || err != nil {
-		http.Error(w, "job has not succeeded", http.StatusConflict)
-		return
+	var published Job
+	if data, err := os.ReadFile(filepath.Join(j.Out, MetaDir, JobFile)); err == nil && json.Unmarshal(data, &published) == nil && published.ID == j.ID {
+		return s.settle(j, outcome, "")
 	}
-	outputs := filepath.Join(dir, worker.OutputsDir)
-	entries, err := os.ReadDir(outputs)
+	parent := filepath.Dir(j.Out)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	stage, err := os.MkdirTemp(parent, ".ordo-")
 	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
+		return err
 	}
-	for _, entry := range entries {
-		if slices.Contains(resultFiles, entry.Name()) {
-			http.Error(w, fmt.Sprintf("output %s collides with a result file", entry.Name()), http.StatusConflict)
-			return
+	defer func() { _ = os.RemoveAll(stage) }()
+	tree := filepath.Join(stage, "out")
+	if err := unpackFile(filepath.Join(j.current().ResultDir, OutputsArchive), tree); err != nil {
+		return err
+	}
+	meta := filepath.Join(tree, MetaDir)
+	if err := os.Mkdir(meta, 0o755); errors.Is(err, os.ErrExist) {
+		return s.settle(j, Failed, "outputs hold "+MetaDir+", where Ordo writes the job's record")
+	} else if err != nil {
+		return err
+	}
+	for i, at := range j.Attempts {
+		if at.ResultDir == "" || (i+1 < len(j.Attempts) && j.Attempts[i+1].Step == at.Step) {
+			continue
+		}
+		for name, ext := range map[string]string{worker.StdoutFile: ".stdout", worker.StderrFile: ".stderr"} {
+			if err := copyFile(filepath.Join(at.ResultDir, name), filepath.Join(meta, j.label(at.Step)+ext)); err != nil {
+				return err
+			}
 		}
 	}
-	parts := []content.Part{{Path: outputs}}
-	for _, name := range resultFiles {
-		parts = append(parts, content.Part{Path: filepath.Join(dir, name), Name: name})
+	record := j.clone()
+	record.State = outcome
+	if err := writeJSON(filepath.Join(meta, JobFile), record); err != nil {
+		return err
 	}
-	serveTar(w, parts...)
+	// os.Rename refuses any existing directory; rename(2) replaces an empty one, such as one made ahead.
+	if err := syscall.Rename(tree, j.Out); err != nil {
+		return fmt.Errorf("deliver results: %w", err)
+	}
+	if err := content.SyncDir(parent); err != nil {
+		return err
+	}
+	return s.settle(j, outcome, "")
+}
+
+func (s *Server) settle(j Job, outcome State, reason string) error {
+	j.State, j.Error = outcome, reason
+	if err := s.save(j); err != nil {
+		return err
+	}
+	prune(j)
+	return nil
+}
+
+func unpackFile(archive, dest string) error {
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return content.Unpack(f, dest, nil)
+}
+
+func copyFile(src, dest string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	return errors.Join(err, out.Sync(), out.Close())
 }

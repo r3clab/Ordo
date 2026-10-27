@@ -1,7 +1,153 @@
 {
   "type": "object",
   "properties": {
-    "id": {
+    "out": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^/"
+      },
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
+          },
+          "args": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "resources": {
+            "type": "object",
+            "properties": {
+              "cores": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "memory_mib": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "gpus": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "cores",
+              "memory_mib"
+            ],
+            "additionalProperties": false
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 32768,
+              "pattern": "^[^\\x00]*$"
+            },
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "not": {
+                "pattern": "^NVIDIA_"
+              }
+            }
+          },
+          "network": {
+            "type": "string",
+            "enum": [
+              "none",
+              "egress"
+            ]
+          },
+          "cap_add": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string",
+              "enum": [
+                "NET_ADMIN"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "secrets": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "not": {
+                "pattern": "^NVIDIA_"
+              }
+            },
+            "uniqueItems": true
+          },
+          "services": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+            },
+            "uniqueItems": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31536000
+          },
+          "tags": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "image",
+          "resources"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 32
+    },
+    "name": {
       "type": "string",
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
     },
@@ -9,16 +155,6 @@
       "type": "string",
       "maxLength": 4096,
       "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
-    },
-    "inputs": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "string"
-      },
-      "propertyNames": {
-        "type": "string",
-        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
-      }
     },
     "args": {
       "type": [
@@ -149,10 +285,22 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Ordo job request",
-  "description": "One job; each line ordo submit reads is a job request, which needs an id, or a workflow.",
+  "description": "One job, a line of ordo submit, which writes its results into out. A job of one step may give that step's fields at the top level instead of in steps.",
   "required": [
-    "image",
-    "resources"
+    "out"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "steps"
+      ]
+    },
+    {
+      "required": [
+        "image",
+        "resources"
+      ]
+    }
+  ]
 }

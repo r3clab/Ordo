@@ -6,7 +6,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -21,19 +20,20 @@ const maxBatch = 10000
 const batchChunk = 256
 
 type BatchEntry struct {
-	Line     int
-	Request  Request
-	Workflow *Workflow
-	Err      error
-	steps    []Step
+	Line    int
+	Request Request
+	Err     error
+	done    bool
 }
 
+// BatchResult reports one line: the job it queued or found, or Done when Out already holds results.
 type BatchResult struct {
-	ID       string `json:"id,omitempty"`
 	Line     int    `json:"line,omitempty"`
-	Workflow bool   `json:"workflow,omitempty"`
+	Out      string `json:"out,omitempty"`
+	ID       string `json:"id,omitempty"`
 	State    State  `json:"state,omitempty"`
 	Existing bool   `json:"existing,omitempty"`
+	Done     bool   `json:"done,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
@@ -50,41 +50,26 @@ func ParseBatch(r io.Reader) ([]BatchEntry, error) {
 			return nil, fmt.Errorf("batch exceeds %d lines", maxBatch)
 		}
 		e := BatchEntry{Line: line}
-		var probe struct {
-			Tasks json.RawMessage `json:"tasks"`
-		}
-		if json.Unmarshal(data, &probe) == nil && probe.Tasks != nil {
-			e.Workflow = &Workflow{}
-			e.Err = DecodeJSON(bytes.NewReader(data), e.Workflow)
-		} else {
-			e.Err = DecodeJSON(bytes.NewReader(data), &e.Request)
-			if e.Err == nil && e.Request.ID == "" {
-				e.Err = errors.New("batch jobs need an id so resubmission stays idempotent")
-			}
-		}
+		e.Err = DecodeJSON(bytes.NewReader(data), &e.Request)
 		entries = append(entries, e)
 	}
 	return entries, scanner.Err()
 }
 
+// SubmitBatch builds no image for a line whose Out already holds results.
 func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq[BatchResult] {
 	return func(yield func(BatchResult) bool) {
 		var requests []Request
 		for i := range entries {
 			e := &entries[i]
-			if e.Err != nil {
-				continue
+			if e.Err == nil {
+				e.Err = s.check(e.Request)
 			}
-			if e.Workflow == nil {
-				if e.Err = s.check(e.Request); e.Err == nil {
-					requests = append(requests, e.Request)
-				}
-				continue
+			if e.Err == nil {
+				e.done, e.Err = s.delivered(e.Request.Out)
 			}
-			if e.steps, e.Err = s.checkWorkflow(*e.Workflow); e.Err == nil {
-				for _, step := range e.steps {
-					requests = append(requests, step.Request)
-				}
+			if e.Err == nil && !e.done {
+				requests = append(requests, e.Request)
 			}
 		}
 		st := s.stage(ctx, requests...)
@@ -93,21 +78,14 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 			var jobs []Job
 			var slots []int
 			for i, e := range chunk {
-				results[i] = BatchResult{ID: e.Request.ID, Line: e.Line}
-				err := cmp.Or(e.Err, ctx.Err())
-				if e.Workflow != nil {
-					results[i].ID, results[i].Workflow = e.Workflow.ID, true
-					if err == nil {
-						results[i].Existing, err = s.admitWorkflow(e.Workflow.ID, e.steps, st)
-					}
-					if err != nil {
-						results[i].Error = err.Error()
-					}
+				results[i] = BatchResult{Line: e.Line, Out: e.Request.Out, Done: e.done}
+				if e.done {
 					continue
 				}
+				err := cmp.Or(e.Err, ctx.Err())
 				var j Job
 				if err == nil {
-					j, err = s.prepare(e.Request, nil, st)
+					j, err = s.prepare(e.Request, st)
 				}
 				if err != nil {
 					results[i].Error = err.Error()
@@ -121,7 +99,7 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 				if admitted.err != nil {
 					result.Error = admitted.err.Error()
 				} else {
-					result.State, result.Existing = admitted.state, admitted.existing
+					result.ID, result.State, result.Existing = admitted.id, admitted.state, admitted.existing
 				}
 			}
 			for _, result := range results {

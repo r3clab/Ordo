@@ -30,7 +30,7 @@ func validator(t *testing.T, name string) func(string) error {
 
 func TestRequestSchemaMatchesValidation(t *testing.T) {
 	validate := validator(t, "request")
-	base := `"id":"grep-1","resources":{"cores":2,"memory_mib":4096}`
+	base := `"out":"/results/grep-1","resources":{"cores":2,"memory_mib":4096}`
 	for _, valid := range []string{
 		`{` + base + `,"image":"/nix/store/x.drv^*","args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"tags":["l40s"]}`,
 		`{` + base + `,"image":"/src#images.grep","secrets":["TOKEN"],"inputs":{"corpus":"/data"}}`,
@@ -61,8 +61,11 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{` + base + `,"image":"/src#x","secrets":["NVIDIA_X"]}`,
 		`{` + base + `,"image":"/src#x","retry":{"task":11}}`,
 		`{` + base + `,"image":"/src#x","timeout_seconds":31536001}`,
-		`{"id":"bad id","image":"/src#x","resources":{"cores":1,"memory_mib":1}}`,
-		`{"id":"a","image":"/src#x","resources":{"cores":0,"memory_mib":1}}`,
+		`{"out":"results","image":"/src#x","resources":{"cores":1,"memory_mib":1}}`,
+		`{` + base + `,"image":"/src#x","inputs":{"corpus":"data"}}`,
+		`{` + base + `,"image":"/src#x","steps":[{"image":"/src#x","resources":{"cores":1,"memory_mib":1}}]}`,
+		`{"out":"/results/a"}`,
+		`{"out":"/results/a","image":"/src#x","resources":{"cores":0,"memory_mib":1}}`,
 		`{` + base + `,"image":"/src#x","tags":["l40s","l40s"]}`,
 		`{` + base + `,"image":"/src#x","tags":["bad tag"]}`,
 		`{` + base + `,"image":"/src#a\nb"}`,
@@ -79,19 +82,19 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 	}
 }
 
-func TestWorkflowSchemaRequiresImagesAndBoundsTasks(t *testing.T) {
-	validate := validator(t, "workflow")
-	step := `{"id":"run","image":"/src#images.grep","resources":{"cores":1,"memory_mib":128},"depends_on":["prep"],"from":{"corpus":"prep"}}`
-	if err := validate(`{"id":"eval","tasks":[` + step + `]}`); err != nil {
+func TestStepsSchemaRequiresImagesAndBoundsSteps(t *testing.T) {
+	validate := validator(t, "request")
+	step := `{"name":"klee","image":"/src#images.grep","resources":{"cores":1,"memory_mib":128}}`
+	if err := validate(`{"out":"/results/a","steps":[` + step + `,{"image":"/src#x","resources":{"cores":4,"memory_mib":128}}]}`); err != nil {
 		t.Fatal(err)
 	}
 	for _, invalid := range []string{
-		`{"id":"eval","tasks":[]}`,
-		`{"id":"` + strings.Repeat("w", 25) + `","tasks":[` + step + `]}`,
-		`{"id":"eval","tasks":[{"image":"/src#x","resources":{"cores":1,"memory_mib":128}}]}`,
-		`{"id":"eval","tasks":[{"id":"run","resources":{"cores":1,"memory_mib":128}}]}`,
-		`{"id":"eval","image":"/src#x","tasks":[` + step + `]}`,
-		`{"id":"eval","tasks":[{"id":"run","image":"/src#x","resources":{"cores":1,"memory_mib":128},"matrix":{"program":["grep"]}}]}`,
+		`{"out":"/results/a","steps":[]}`,
+		`{"out":"/results/a","steps":[` + strings.Repeat(step+`,`, server.MaxSteps) + step + `]}`,
+		`{"out":"/results/a","steps":[{"resources":{"cores":1,"memory_mib":128}}]}`,
+		`{"out":"/results/a","steps":[{"image":"/src#x"}]}`,
+		`{"out":"/results/a","steps":[{"name":"bad name","image":"/src#x","resources":{"cores":1,"memory_mib":128}}]}`,
+		`{"out":"/results/a","steps":[{"image":"/src#x","resources":{"cores":1,"memory_mib":128},"out":"/elsewhere"}]}`,
 	} {
 		if err := validate(invalid); err == nil {
 			t.Errorf("accepted %s", invalid)

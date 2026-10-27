@@ -2,25 +2,17 @@ package server
 
 import (
 	"bytes"
-	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/r3clab/Ordo/internal/content"
 )
-
-const ChecksumHeader = "X-Ordo-SHA256"
 
 const maxReasonBytes = 1024
 
@@ -163,52 +155,4 @@ func ListenUnix(socket string) (net.Listener, error) {
 		return nil, errors.Join(err, listener.Close())
 	}
 	return listener, nil
-}
-
-// serveTar streams parts with their digest in a trailer, so the archive needs no staging copy.
-func serveTar(w http.ResponseWriter, parts ...content.Part) {
-	w.Header().Set("Content-Type", "application/x-tar")
-	w.Header().Set("Trailer", ChecksumHeader)
-	hash := sha256.New()
-	body := &sentWriter{Writer: w}
-	if err := content.Tar(io.MultiWriter(body, hash), parts...); err != nil {
-		if body.sent {
-			panic(http.ErrAbortHandler)
-		}
-		w.Header().Del("Trailer")
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	w.Header().Set(ChecksumHeader, hex.EncodeToString(hash.Sum(nil)))
-}
-
-type sentWriter struct {
-	io.Writer
-	sent bool
-}
-
-func (w *sentWriter) Write(p []byte) (int, error) {
-	w.sent = w.sent || len(p) > 0
-	return w.Writer.Write(p)
-}
-
-func Download(ctx context.Context, client *http.Client, endpoint, dest string) error {
-	if _, err := os.Lstat(dest); err == nil {
-		return fmt.Errorf("result destination: %w", fs.ErrExist)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	resp, err := Send(ctx, client, http.MethodGet, endpoint, "", nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return content.Unpack(resp.Body, dest, func(digest string) error {
-		if want := cmp.Or(resp.Header.Get(ChecksumHeader), resp.Trailer.Get(ChecksumHeader)); !content.Valid(want) {
-			return errors.New("result missing checksum")
-		} else if want != digest {
-			return errors.New("content checksum mismatch")
-		}
-		return nil
-	})
 }
