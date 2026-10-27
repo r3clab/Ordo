@@ -16,12 +16,12 @@ type Exec func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 // Skopeo must be nix2container's build; stock skopeo lacks the nix: transport.
 type Tools struct {
-	Nix, Skopeo string
-	Exec        Exec
+	Skopeo string
+	Exec   Exec
 }
 
 func (t Tools) Build(ctx context.Context, installable, link string) (string, error) {
-	data, err := t.run(ctx, cmp.Or(t.Nix, "nix"), "--extra-experimental-features", "nix-command flakes", "build", "--out-link", link, "--print-out-paths", "--", installable)
+	data, err := t.run(ctx, "nix", "--extra-experimental-features", "nix-command flakes", "build", "--out-link", link, "--print-out-paths", "--", installable)
 	if err != nil {
 		return "", err
 	}

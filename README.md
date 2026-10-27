@@ -10,38 +10,79 @@ Ordo schedules reproducible evaluations across SSH-accessible Linux servers.
 Each job runs in rootless Podman on exclusive physical cores and GPUs, from a [nix2container](https://github.com/nlewo/nix2container) image or a registry image pinned by digest.
 Jobs are plain JSONL, the queue survives server restarts and SSH disconnects, and a local web UI shows progress.
 
-## How it works
+## Worker Setup
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/overview-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="assets/figures/overview-light.svg">
-  <img src="assets/figures/overview-light.svg" alt="Ordo's pipeline: submit JSONL jobs; the server prepares pinned images and inputs and queues them, dispatches each job over SSH to a worker that runs it in rootless Podman, collects its logs and outputs, then delivers them into the job's out directory." width="960">
-</picture>
+Each worker must run Linux with rootless Podman, cgroup v2, and a systemd user manager.
+A typical preparation for Ubuntu:
 
-`ordo server` drives the workers over SSH; nothing of Ordo is installed on them.
-Each job names an `out` directory on the server host, where its results land when it ends.
-A non-empty `out` means done: rerunning a sweep queues only what is missing, and deleting an `out` reruns that job.
+```sh
+sudo apt update
+sudo apt install -y podman uidmap passt fuse-overlayfs dbus-user-session \
+  openssh-server tar findutils coreutils util-linux
+sudo systemctl enable --now ssh
 
-## Setup
+# Keep the user's services running after SSH disconnects.
+sudo loginctl enable-linger "$(id -un)"
 
-- **Server:** Nix.
-  The Nix-built `ordo` bundles nix2container's `skopeo`.
-- **Workers:** Linux, rootless Podman with delegated cgroup v2 `cpuset` and `memory` controllers, OpenSSH, a POSIX shell, GNU `tar` and `find`, a user systemd manager, and lingering (`loginctl enable-linger`).
-  The server connects by SSH alias, so set `User`, `Port`, and `IdentityFile` in its `~/.ssh/config`; authentication must not prompt.
-  Each worker account belongs to one server.
-
-List the workers in `$XDG_CONFIG_HOME/ordo/server.json` (or `--config FILE`), then start `ordo server`:
-
-```json
-{"workers":[{"host":"WORKER","cpus":"0,1,64,65","memory_mib":512}]}
+# Both files must have a subordinate ID range for this user.
+grep "^$(id -un):" /etc/subuid /etc/subgid
 ```
 
+## Setting
+
+Ordo uses `--config FILE`, else `$ORDO_CONFIG`, else `$XDG_CONFIG_HOME/ordo/server.json` (if `XDG_CONFIG_HOME` is absolute), else `~/.config/ordo/server.json`.
+The selected file must already exist.
+
+A full config:
+
+```json
+{
+  "listen": "127.0.0.1:7331",
+  "workers": [
+    {
+      "host": "cpu1",
+      "cpus": "0-31,64-95",
+      "memory_mib": 131072
+    },
+    {
+      "host": "gpu1",
+      "state_dir": "/srv/ordo/worker",
+      "cpus": "0,1,64,65",
+      "memory_mib": 65536,
+      "gpus": ["GPU-11111111-1111-1111-1111-111111111111"],
+      "tags": ["l40s-class"]
+    }
+  ],
+  "services": {"model": "127.0.0.1:8000"},
+  "secrets": {"MODEL_TOKEN": "secrets/model-token"}
+}
+```
+
+Only `workers` is required, and each worker needs `host`, `cpus`, and `memory_mib`; unknown keys are rejected.
+
+- `listen` is the web UI and API address (default `127.0.0.1:7331`); see [Web UI](#web-ui).
+- `host` is an SSH alias from the server's `~/.ssh/config`.
 - `cpus` must include every online SMT sibling of each core; jobs request **physical cores**.
 - `memory_mib` is the budget the worker's jobs share.
-- Optional per worker: `gpus`, `tags` (see [GPUs and tags](#gpus-and-tags)), and `state_dir` (worker-local, mode 0700, default `~/.local/state/ordo/worker`; set it for a worker unreachable on the server's first start).
-- Optional top level: `listen`, `services`, `secrets`, `nix`, `skopeo`.
-  Unknown keys are rejected.
-- Server state lives in `--state DIR`, else `$ORDO_STATE`, else `$XDG_STATE_HOME/ordo/server`; client commands find the server the same way.
+- `state_dir` is worker-local, mode 0700, default `~/.local/state/ordo/worker`; set it for a worker unreachable on the server's first start.
+- `gpus` and `tags`: see [GPUs and tags](#gpus-and-tags).
+- `services` and `secrets`: see [Job environment](#job-environment).
+  A relative secret path resolves from the config file's directory.
+- Server state lives in `--state DIR`, else `$ORDO_STATE`, else `$XDG_STATE_HOME/ordo/server` (default `~/.local/state/ordo/server`); client commands find the server the same way.
+
+Start the server in the foreground:
+
+```sh
+ordo server
+```
+
+Keep it running, then check the queue from another terminal on the server host:
+
+```sh
+ordo queue list
+```
+
+You can now [submit jobs](#jobs) or open the [web UI](#web-ui).
 
 ## Jobs
 
@@ -103,7 +144,8 @@ An input inside another unfinished job's `out` makes the job wait for that one, 
 
 - **Nix installable**, such as `"/srv/eval#images.klee"` or `"/nix/store/….drv^*"`: the server builds it and exports the nix2container image.
   Make Ordo's `nix2container` input follow yours.
-  A `go build` binary needs the config's `skopeo` set to nix2container's, since stock `skopeo` lacks the `nix:` transport.
+  The server runs `nix` and `skopeo` from `PATH`, but the Nix-built `ordo` always uses nix2container's `skopeo`, since stock `skopeo` lacks the `nix:` transport.
+  A `go build` binary needs nix2container's `skopeo` ahead of any stock one on `PATH`.
 - **Registry image pinned by digest**, `"docker://NAME@sha256:DIGEST"`.
   Tags are rejected.
 

@@ -32,8 +32,6 @@ type serverConfig struct {
 	Workers  []worker.Config   `json:"workers"`
 	Services map[string]string `json:"services,omitempty"`
 	Secrets  map[string]string `json:"secrets,omitempty"`
-	Nix      string            `json:"nix,omitempty"`
-	Skopeo   string            `json:"skopeo,omitempty"`
 }
 
 func xdgDir(env, fallback string) string {
@@ -58,6 +56,9 @@ func defaultState() string {
 }
 
 func defaultConfig() string {
+	if file := os.Getenv("ORDO_CONFIG"); file != "" {
+		return file
+	}
 	if dir := xdgDir("XDG_CONFIG_HOME", ".config"); dir != "" {
 		return filepath.Join(dir, "ordo", "server.json")
 	}
@@ -69,7 +70,7 @@ func stateFlag(f *flag.FlagSet, root *string) {
 }
 
 func loadServerConfig(file string) (serverConfig, error) {
-	c := serverConfig{Listen: "127.0.0.1:7331", Skopeo: defaultSkopeo}
+	c := serverConfig{Listen: "127.0.0.1:7331"}
 	if err := decodeFile(file, &c); err != nil {
 		return c, fmt.Errorf("server config: %w", err)
 	}
@@ -81,13 +82,13 @@ func loadServerConfig(file string) (serverConfig, error) {
 	return c, nil
 }
 
-const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), listen, services, secrets, nix, skopeo."
+const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), listen, services, secrets."
 
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("server")
 	var root string
 	stateFlag(f, &root)
-	file := f.String("config", defaultConfig(), "server configuration file")
+	file := f.String("config", defaultConfig(), "server configuration file (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json)")
 	if err := parse(f, args, out, serverUsage); err != nil {
 		return err
 	}
@@ -105,7 +106,7 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	s, err := server.Open(server.Config{Root: root, Workers: c.Workers, Services: c.Services, Secrets: secrets, Tools: image.Tools{Nix: c.Nix, Skopeo: c.Skopeo}})
+	s, err := server.Open(server.Config{Root: root, Workers: c.Workers, Services: c.Services, Secrets: secrets, Tools: image.Tools{Skopeo: defaultSkopeo}})
 	if err != nil {
 		return err
 	}
