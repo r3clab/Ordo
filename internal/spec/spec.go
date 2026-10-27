@@ -15,9 +15,7 @@ const NamePattern = `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
 
 var identifier = regexp.MustCompile(NamePattern)
 
-const ImageIDPattern = `^sha256:[0-9a-f]{64}$`
-
-var imageID = regexp.MustCompile(ImageIDPattern)
+var imageID = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 const MaxTimeoutSeconds = 365 * 24 * 60 * 60
 

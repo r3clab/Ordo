@@ -16,11 +16,9 @@ import (
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
-var nixImageID = "sha256:" + strings.Repeat("c", 64)
-
 func nixServer(t *testing.T) (*Server, *imagetest.Nix) {
 	t.Helper()
-	fake := &imagetest.Nix{Output: "/nix/store/aaaa-image.json", Config: nixImageID}
+	fake := testNix()
 	s, err := Open(Config{Root: filepath.Join(t.TempDir(), "server"), Workers: []worker.Config{testWorker("worker")}, Tools: image.Tools{Exec: fake.Exec}})
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +62,7 @@ func TestBatchSharesNixImagesAndContinuesPastBadLines(t *testing.T) {
 		t.Fatalf("batch built %d and exported %d times", fake.Builds.Load(), fake.Exports.Load())
 	}
 	j, _ := s.job("a")
-	if j.Spec.Image != nixImageID || j.ImageOrigin == nil || j.ImageOrigin.Installable != "/src#grep" || j.ImageOrigin.Output != "/nix/store/aaaa-image.json" {
+	if j.Spec.Image != testImageID || j.ImageOrigin == nil || j.ImageOrigin.Installable != "/src#grep" || j.ImageOrigin.Output != "/nix/store/aaaa-image.json" {
 		t.Fatalf("job image %+v %+v", j.Spec.Image, j.ImageOrigin)
 	}
 	again := submit()

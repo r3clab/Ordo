@@ -10,6 +10,7 @@ let
   reservedEnvPattern = fields.env.propertyNames.not.pattern;
   networks = fields.network.enum;
   capabilities = fields.cap_add.items.enum;
+  maxInstallable = fields.image.properties.nix.maxLength;
   maxTimeoutSeconds = fields.timeout_seconds.maximum;
   maxRetry = fields.retry.properties.task.maximum;
   maxWorkflowID = workflowFields.id.maxLength;
@@ -30,6 +31,17 @@ let
     builtins.isString name
     && builtins.match envPattern name != null
     && builtins.match "${reservedEnvPattern}.*" name == null;
+  # builtins.match reads the schema pattern's escapes literally inside
+  # brackets, and Nix strings cannot hold NUL, so the installable rules are
+  # spelled out instead.
+  validInstallable =
+    s:
+    builtins.isString s
+    && s != ""
+    && !lib.hasPrefix "-" s
+    && !lib.hasInfix "\n" s
+    && !lib.hasInfix "\r" s
+    && builtins.stringLength s <= maxInstallable;
   compact = lib.filterAttrs (_: value: value != null);
 
   # Discarding the output dependency keeps only the .drv in a written task file's
@@ -61,7 +73,12 @@ let
       secrets ? null,
     }:
     assert require (validName id) "task id ${builtins.toJSON id} must match ${namePattern}";
-    assert require (image != null) "${id}: needs an image";
+    assert require (
+      lib.isDerivation image || builtins.isAttrs image && builtins.attrNames image == [ "nix" ]
+    ) "${id}: image must be a derivation or { nix = INSTALLABLE; }";
+    assert require (
+      lib.isDerivation image || validInstallable image.nix
+    ) "${id}: invalid nix installable";
     assert require (
       atLeast resources.cores.minimum cores && atLeast resources.memory_mib.minimum memoryMiB
     ) "${id}: cores and memoryMiB must be positive integers";

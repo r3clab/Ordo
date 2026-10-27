@@ -27,8 +27,8 @@ let
       secrets = [ "MODEL_TOKEN" ];
     })
     (mkTask {
-      id = "local";
-      image = "localhost/klee:1";
+      id = "installable";
+      image.nix = "/srv/evaluation#images.klee";
       cores = 1;
       memoryMiB = 128;
     })
@@ -55,7 +55,7 @@ let
   jsonl = pkgs.writeText "tasks.jsonl" (toJSONL tasks);
   valid = {
     id = "ok";
-    image = "localhost/klee:1";
+    image.nix = "/srv/evaluation#images.klee";
     cores = 1;
     memoryMiB = 128;
   };
@@ -65,6 +65,29 @@ let
   invalid = {
     id = mkTask (valid // { id = "bad id"; });
     image = mkTask (removeAttrs valid [ "image" ]);
+    podmanImage = mkTask (valid // { image = "localhost/klee:1"; });
+    archiveImage = mkTask (
+      valid
+      // {
+        image = {
+          archive = "/image.tar";
+          id = "sha256:${pkgs.lib.strings.replicate 64 "a"}";
+        };
+      }
+    );
+    extraImageKey = mkTask (
+      valid
+      // {
+        image = {
+          nix = "/src#x";
+          archive = "/image.tar";
+        };
+      }
+    );
+    emptyInstallable = mkTask (valid // { image.nix = ""; });
+    optionInstallable = mkTask (valid // { image.nix = "--option"; });
+    multilineInstallable = mkTask (valid // { image.nix = "a\nb"; });
+    longInstallable = mkTask (valid // { image.nix = "/${pkgs.lib.strings.replicate 4096 "x"}"; });
     cores = mkTask (valid // { cores = 0; });
     gpus = mkTask (valid // { gpus = -1; });
     timeout = mkTask (valid // { timeoutSeconds = 365 * 24 * 60 * 60 + 1; });

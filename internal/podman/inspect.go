@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
@@ -74,6 +75,17 @@ func ParseInspect(data []byte) (Inspection, error) {
 		return Inspection{}, errors.New("expected exactly one container")
 	}
 	return containers[0], nil
+}
+
+func ParseImageID(data []byte) (string, error) {
+	var images []struct{ ID string }
+	if err := json.Unmarshal(data, &images); err != nil {
+		return "", err
+	}
+	if len(images) != 1 || !content.Valid(strings.TrimPrefix(images[0].ID, "sha256:")) {
+		return "", errors.New("expected one immutable local image")
+	}
+	return "sha256:" + strings.TrimPrefix(images[0].ID, "sha256:"), nil
 }
 
 // CheckInfo requires the rootless cgroup v2 controllers that CPU pinning and memory limits depend on.

@@ -17,45 +17,18 @@
             "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
           },
           "image": {
-            "description": "A local Podman reference, {\"nix\": INSTALLABLE} for a nix2container image the server builds, or {\"archive\": FILE, \"id\": \"sha256:IMAGE_ID\"} for an OCI archive on the server.",
-            "oneOf": [
-              {
+            "type": "object",
+            "properties": {
+              "nix": {
                 "type": "string",
-                "minLength": 1
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "nix": {
-                    "type": "string",
-                    "maxLength": 4096,
-                    "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
-                  }
-                },
-                "required": [
-                  "nix"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "archive": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "id": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$"
-                  }
-                },
-                "required": [
-                  "archive",
-                  "id"
-                ],
-                "additionalProperties": false
+                "maxLength": 4096,
+                "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
               }
-            ]
+            },
+            "required": [
+              "nix"
+            ],
+            "additionalProperties": false
           },
           "inputs": {
             "type": "object",

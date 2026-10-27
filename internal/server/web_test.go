@@ -17,10 +17,7 @@ import (
 )
 
 func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
-	s, err := Open(Config{Root: filepath.Join(t.TempDir(), "server"), Workers: []worker.Config{testWorker("worker")}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := open(t, filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil)
 	defer func() { _ = s.Close() }()
 	token, err := s.Token()
 	if err != nil {
@@ -66,11 +63,7 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 			t.Fatal("asset/security headers", path, w.Code)
 		}
 	}
-	archive := filepath.Join(t.TempDir(), "image.tar")
-	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Submit(context.Background(), Request{ID: "example", Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}); err != nil {
+	if _, err := s.Submit(context.Background(), Request{ID: "example", Image: image.Source{Nix: "/src#image"}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}); err != nil {
 		t.Fatal(err)
 	}
 	w := request("POST", "/v1/jobs/example/cancel", token, "", "http://127.0.0.1:7331", nil)

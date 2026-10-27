@@ -1,5 +1,4 @@
-// Package podman builds the Podman commands Ordo runs on workers, parses their output, and reads
-// images from the server's own Podman storage.
+// Package podman builds the Podman commands Ordo runs on workers and parses their output.
 package podman
 
 import (

@@ -2,23 +2,23 @@
 
 `flake.nix` builds a small nix2container image with Bash and coreutils.
 These scripts are opt-in checks against real workers, not part of sandboxed package tests.
-They require local `ssh`, `jq`, and coreutils, plus the documented worker prerequisites.
+They require local `ssh`, `jq`, `nix`, and coreutils, plus the documented worker prerequisites.
 
-Build Ordo and the image's OCI archive, for example:
+Build the server with nix2container's `skopeo`:
 
 ```sh
-nix build path:. -o result
-nix run path:./tests#image.copyTo -- "oci-archive:/tmp/ordo-smoke.tar:localhost/ordo-smoke:test"
+nix build path:.#ordo-server -o result
 ```
 
-Supply the immutable image configuration ID produced by the test flake (or inspect the archive after loading it locally).
+The server builds the test image from `ORDO_TEST_INSTALLABLE`.
+`ORDO_TEST_IMAGE` is that image's immutable configuration ID, which the scripts use to clean up workers; `ordo queue get` shows it as `spec.image` once the server has built it.
 The pinned fixture currently has the ID below; rebuilding with changed flake inputs/configuration can change it.
 
 ## Server, workflows, and browser
 
 ```sh
 ORDO_TEST_BINARY="$PWD/result/bin/ordo" \
-ORDO_TEST_ARCHIVE=/tmp/ordo-smoke.tar \
+ORDO_TEST_INSTALLABLE="path:$PWD/tests#image" \
 ORDO_TEST_IMAGE=sha256:868a72e2f666cf6a96edadfc5a339f2655865ab968babde2644c31d88380d85e \
 bash tests/server-smoke.sh
 ```
@@ -32,7 +32,7 @@ Go tests separately cover missing/invalid bearer tokens, cross-origin requests, 
 
 ## GPU and tag matching
 
-Build the dedicated `path:./tests#gpu-image.copyTo` fixture as an OCI archive and supply its configuration digest as `ORDO_TEST_IMAGE`.
+Set `ORDO_TEST_INSTALLABLE` to the dedicated `path:$PWD/tests#gpu-image` fixture and `ORDO_TEST_IMAGE` to its configuration digest.
 With the same environment variables, run `bash tests/gpu-smoke.sh HOST FULL_GPU_UUID` only after checking current compute and graphics processes.
 The script captures inventories; dispatch also refuses devices with existing processes.
 It uses one GPU, one physical core, and 256 MiB for a tiny CUDA allocation/set/copy and checks exactly one visible UUID.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "${ORDO_TEST_BINARY:?}" "${ORDO_TEST_ARCHIVE:?}" "${ORDO_TEST_IMAGE:?}"
+: "${ORDO_TEST_BINARY:?}" "${ORDO_TEST_INSTALLABLE:?}" "${ORDO_TEST_IMAGE:?}"
 work=$(mktemp -d /tmp/ordo-server-evidence.XXXXXX)
 root_a=$(ssh vegeta 'umask 077; mktemp -d /tmp/ordo-server-test.XXXXXX')
 root_b=$(ssh goku 'umask 077; mktemp -d /tmp/ordo-server-test.XXXXXX')
@@ -35,9 +35,10 @@ jq -n --arg a "$root_a" --arg b "$root_b" '[{host:"vegeta",state_dir:$a,cpus:"62
 start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/workers.json" --listen 127.0.0.1:0 >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json" 2>/dev/null; then return; fi; sleep 0.2; done; return 1; }
 start
 for id in first second; do
- jq -nc --arg id "$id" --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:$id,image:{archive:$archive,id:$image},resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
+ jq -nc --arg id "$id" --arg installable "$ORDO_TEST_INSTALLABLE" '{id:$id,image:{nix:$installable},resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
  "$ORDO_TEST_BINARY" submit --state "$work/server" --file "$work/$id.json" > "$work/$id-submitted.json"
 done
+if ! "$ORDO_TEST_BINARY" queue get --state "$work/server" --id first | jq -e --arg image "$ORDO_TEST_IMAGE" '.spec.image==$image' >/dev/null; then echo "ORDO_TEST_IMAGE does not match the image built from ORDO_TEST_INSTALLABLE" >&2; exit 1; fi
 for ((i=0;i<90;i++)); do
  "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json"
  if jq -e 'length==2 and all(.state=="running") and ([.[].attempts[-1].worker]|unique|length)==2' "$work/list.json" >/dev/null; then break; fi
@@ -56,14 +57,14 @@ for ((i=0;i<90;i++)); do
 done
 jq -e 'length==2 and all(.state=="succeeded" and (.attempts|length)==1)' "$work/final.json" >/dev/null
 while IFS= read -r result; do test "$(<"$result/outputs/result")" = done; done < <(jq -r '.[].attempts[-1].result_dir' "$work/final.json")
-jq -n --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:"dag",tasks:([
+jq -n --arg installable "$ORDO_TEST_INSTALLABLE" '{id:"dag",tasks:([
  {id:"produce",resources:{cores:1,memory_mib:128},args:["-c","printf source > /outputs/value"]},
  {id:"consume",resources:{cores:1,memory_mib:128},from:{upstream:"produce"},args:["-c","cp /inputs/upstream/value /outputs/value"]},
  {id:"fail",resources:{cores:1,memory_mib:128},retry:{task:1},args:["-c","exit 9"]},
  {id:"skip",resources:{cores:1,memory_mib:128},depends_on:["fail"],args:["-c","exit 0"]},
  {id:"timeout",resources:{cores:1,memory_mib:128},timeout_seconds:2,args:["-c","sleep 30"]},
  {id:"cancel",resources:{cores:1,memory_mib:128},args:["-c","sleep 60"]}
-] | map(.image={archive:$archive,id:$image}))}' > "$work/workflow.json"
+] | map(.image={nix:$installable}))}' > "$work/workflow.json"
 "$ORDO_TEST_BINARY" queue workflow --state "$work/server" --file "$work/workflow.json" > "$work/workflow-submitted.json"
 for ((i=0;i<60;i++)); do
   "$ORDO_TEST_BINARY" queue get --state "$work/server" --id dag--cancel > "$work/cancel.json"

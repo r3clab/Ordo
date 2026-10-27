@@ -4,11 +4,8 @@ package schema
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
-	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/r3clab/Ordo/internal/image"
@@ -23,18 +20,17 @@ func Names() []string { return []string{"request", "workflow"} }
 func file(name string) string { return name + ".schema.json" }
 
 func build(name string) (*jsonschema.Schema, error) {
-	opts := &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{reflect.TypeFor[image.Source](): imageSchema()}}
 	var s *jsonschema.Schema
 	var err error
 	switch name {
 	case "request":
-		if s, err = jsonschema.For[server.Request](opts); err == nil {
+		if s, err = jsonschema.For[server.Request](nil); err == nil {
 			refineRequest(s)
 			s.Title = "Ordo job request"
 			s.Description = "One job; ordo submit reads one per line and requires its id."
 		}
 	case "workflow":
-		if s, err = jsonschema.For[server.Workflow](opts); err == nil {
+		if s, err = jsonschema.For[server.Workflow](nil); err == nil {
 			refineWorkflow(s)
 			s.Title = "Ordo workflow"
 		}
@@ -73,20 +69,6 @@ func Write(dir string) error {
 	return nil
 }
 
-func imageSchema() *jsonschema.Schema {
-	closed := func(properties map[string]*jsonschema.Schema) *jsonschema.Schema {
-		return &jsonschema.Schema{Type: "object", Properties: properties, Required: slices.Sorted(maps.Keys(properties)), AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}}}
-	}
-	return &jsonschema.Schema{
-		Description: `A local Podman reference, {"nix": INSTALLABLE} for a nix2container image the server builds, or {"archive": FILE, "id": "sha256:IMAGE_ID"} for an OCI archive on the server.`,
-		OneOf: []*jsonschema.Schema{
-			{Type: "string", MinLength: jsonschema.Ptr(1)},
-			closed(map[string]*jsonschema.Schema{"nix": {Type: "string", MaxLength: jsonschema.Ptr(image.MaxInstallableBytes), Pattern: image.InstallablePattern}}),
-			closed(map[string]*jsonschema.Schema{"archive": {Type: "string", MinLength: jsonschema.Ptr(1)}, "id": {Type: "string", Pattern: spec.ImageIDPattern}}),
-		},
-	}
-}
-
 func at(s *jsonschema.Schema, path ...string) *jsonschema.Schema {
 	for _, step := range path {
 		switch step {
@@ -122,6 +104,8 @@ func enum(values []string) []any {
 
 func refineRequest(s *jsonschema.Schema) {
 	at(s, "id").Pattern = spec.NamePattern
+	at(s, "image", "nix").MaxLength = jsonschema.Ptr(image.MaxInstallableBytes)
+	at(s, "image", "nix").Pattern = image.InstallablePattern
 	at(s, "inputs").PropertyNames = names()
 	resources := at(s, "resources")
 	at(resources, "cores").Minimum = jsonschema.Ptr(1.0)

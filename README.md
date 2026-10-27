@@ -39,7 +39,7 @@ Prefer a small Go implementation over importing Nomad's full control plane or ma
 
 ## Deployment
 
-- **Server:** has Nix and Podman installed; owns the queue, scheduling decisions, and durable run records.
+- **Server:** has Nix and nix2container's `skopeo` installed (`.#ordo-server` bundles `skopeo`); owns the queue, scheduling decisions, and durable run records.
 - **Workers:** each has rootless Podman installed and runs no Ordo process.
   The server runs each step as a short shell script over one SSH connection per worker.
 - **Tasks:** declare a container image, command, inputs, resource requirements, and outputs.
@@ -130,13 +130,10 @@ pkgs.writeText "jobs.jsonl" (toJSONL tasks)
 - Every task needs an `id`.
   Resubmitting an ID with the same request returns the existing job, so rerunning a generator only queues what is new; the same ID with a different request is an error.
 - It prints one result per line (`id`, `line`, `state`, `existing`, or `error`), keeps going past bad lines, and exits nonzero if any line failed.
-- Image archives and input paths refer to the server's filesystem.
-- `image` takes one of three forms:
-  - A derivation, written as `{"nix": "/nix/store/….drv^*"}`, or any `{"nix": INSTALLABLE}` such as `/path/flake#images.grep`: the server runs `nix build`, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
-    Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
-    A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
-  - A local Podman reference, resolved and exported from the server's Podman storage.
-  - `{ archive = FILE; id = "sha256:IMAGE_ID"; }`: an OCI archive on the server with its immutable image ID.
+- Installables and input paths resolve on the server.
+- `image` is `{"nix": INSTALLABLE}`, such as a derivation written as `{"nix": "/nix/store/….drv^*"}` or `{"nix": "/path/flake#images.grep"}`: the server runs `nix build`, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
+  Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
+  A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
 - The server finds `nix` on its `PATH` (`--nix` overrides it) and `skopeo` through `--skopeo` or `ORDO_SKOPEO`.
   Stock `skopeo` lacks the `nix:` transport; run the server from `nix run .#ordo-server`, which sets `ORDO_SKOPEO`.
 - Only the private control socket accepts submissions; the web UI's API has none, since a submission can build Nix code, read server files, and use every configured secret.
@@ -303,7 +300,7 @@ pkgs.writeText "workflow.json" (builtins.toJSON (mkWorkflow {
 
 The flake's `lib` provides `mkTask`, `mkStep`, `mkWorkflow`, and `toJSONL`, checking each task at evaluation time against the patterns, enums, and limits it reads from `schema/`.
 
-- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`) and returns the request attrset; every task needs an `image`.
+- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`) and returns the request attrset; every task needs an `image`, either a derivation or `{ nix = INSTALLABLE; }`.
   `mkStep` also takes `dependsOn` and `from`, and `mkWorkflow` takes an `id` and its steps as `tasks`.
 - Sweeps and other repetition are plain Nix, such as `map` over seeds or `lib.mapAttrsToList` over images.
 - A derivation `image` becomes `{"nix": "/nix/store/….drv^*"}`: the task file keeps the `.drv` alive without building the image, which the server builds on submission.

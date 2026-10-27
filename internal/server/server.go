@@ -343,7 +343,7 @@ func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
 	seen := map[image.Source]bool{}
 	var wg sync.WaitGroup
 	for _, r := range requests {
-		if r.Image.IsNix() && !seen[r.Image] && s.check(r) == nil {
+		if !seen[r.Image] && s.check(r) == nil {
 			seen[r.Image] = true
 			wg.Go(func() { _, _ = st.image(ctx, r.Image) })
 		}

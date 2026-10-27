@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/image/imagetest"
 	"github.com/r3clab/Ordo/internal/podman"
 	"github.com/r3clab/Ordo/internal/pool"
 	"github.com/r3clab/Ordo/internal/spec"
@@ -27,6 +28,14 @@ import (
 func testWorker(host string, tags ...string) worker.Config {
 	return worker.Config{Host: host, StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024, Tags: tags}
 }
+
+var testImageID = "sha256:" + strings.Repeat("a", 64)
+
+func testNix() *imagetest.Nix {
+	return &imagetest.Nix{Output: "/nix/store/aaaa-image.json", Config: testImageID}
+}
+
+func testTools() image.Tools { return image.Tools{Exec: testNix().Exec} }
 
 func handlerClient(t *testing.T, handler http.Handler) *http.Client {
 	remote := httptest.NewServer(handler)
@@ -127,7 +136,7 @@ func (f *fakeHost) Inspect(_ context.Context, attempt string) (podman.Inspection
 	if !ok {
 		return in, errors.New("no such container")
 	}
-	in.ID, in.Name, in.Image = c.ID, podman.Name(attempt), strings.Repeat("a", 64)
+	in.ID, in.Name, in.Image = c.ID, podman.Name(attempt), strings.TrimPrefix(testImageID, "sha256:")
 	in.Config.Labels = c.Labels
 	in.State.Status, in.State.ExitCode, in.State.StartedAt, in.State.FinishedAt = c.State, &c.exit, c.StartedAt.Time, c.finished
 	return in, nil
@@ -157,20 +166,15 @@ func (f *fakeHost) Remove(_ context.Context, attempt string) error {
 
 func open(t *testing.T, state string, workers []worker.Config, services map[string]string) *Server {
 	t.Helper()
-	s, err := Open(Config{Root: state, Workers: workers, Services: services})
+	s, err := Open(Config{Root: state, Workers: workers, Services: services, Tools: testTools()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
 }
 
-func request(t *testing.T, id string) Request {
-	t.Helper()
-	archive := filepath.Join(t.TempDir(), "image.tar")
-	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return Request{ID: id, Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}
+func request(id string) Request {
+	return Request{ID: id, Image: image.Source{Nix: "/src#image"}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}
 }
 
 func submit(t *testing.T, s *Server, r Request) {
@@ -227,7 +231,7 @@ func TestLostLaunchResponseAndRestartDoNotDuplicate(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
 	workers := []worker.Config{testWorker("worker")}
 	s := open(t, state, workers, nil)
-	submit(t, s, request(t, "one"))
+	submit(t, s, request("one"))
 	h := newFakeHost(s.id)
 	h.lose = ssh.ErrTransport
 	if err := tick(s, workers[0], h); !errors.Is(err, ssh.ErrTransport) {
@@ -266,7 +270,7 @@ func TestLostLaunchResponseAndRestartDoNotDuplicate(t *testing.T) {
 
 func TestRefusedLaunchRetriesAndChangedWorkerBlocks(t *testing.T) {
 	f := newFixture(t)
-	submit(t, f.s, request(t, "job"))
+	submit(t, f.s, request("job"))
 	f.h.refuse = &ssh.ExitError{Code: 125, Stderr: "image not known"}
 	f.tick(t)
 	j := mustJob(t, f.s, "job")
@@ -296,7 +300,7 @@ func TestRefusedLaunchRetriesAndChangedWorkerBlocks(t *testing.T) {
 
 func TestRetryReleasesTheFinishedAttempt(t *testing.T) {
 	f := newFixture(t)
-	req := request(t, "whole")
+	req := request("whole")
 	req.Resources.Cores, req.Retry.Task = 4, 1
 	submit(t, f.s, req)
 	f.tick(t)
@@ -314,7 +318,7 @@ func TestRetryReleasesTheFinishedAttempt(t *testing.T) {
 
 func TestFailedCollectionBlocksOnce(t *testing.T) {
 	f := newFixture(t)
-	submit(t, f.s, request(t, "job"))
+	submit(t, f.s, request("job"))
 	f.tick(t)
 	at := mustJob(t, f.s, "job").Attempts[0]
 	f.h.exit(at.ID, 0)
@@ -342,7 +346,7 @@ func TestTagsSelectWorkers(t *testing.T) {
 	state := filepath.Join(root, "state")
 	s := open(t, state, workers, nil)
 	defer func() { _ = s.Close() }()
-	req := request(t, "tagged")
+	req := request("tagged")
 	req.Tags = []string{"l40s", "fast"}
 	if _, err := s.Submit(context.Background(), req); err == nil {
 		t.Fatal("accepted tags that no single worker has")
@@ -373,7 +377,7 @@ func TestTagsSelectWorkers(t *testing.T) {
 
 func TestSecretsServicesAndStop(t *testing.T) {
 	ctx := context.Background()
-	config := Config{Root: filepath.Join(t.TempDir(), "state"), Workers: []worker.Config{testWorker("worker")}, Services: map[string]string{"model": "127.0.0.1:8317"}, Secrets: map[string]string{"TOKEN": "hunter2"}}
+	config := Config{Root: filepath.Join(t.TempDir(), "state"), Workers: []worker.Config{testWorker("worker")}, Services: map[string]string{"model": "127.0.0.1:8317"}, Secrets: map[string]string{"TOKEN": "hunter2"}, Tools: testTools()}
 	workers := config.Workers
 	broken := config
 	broken.Secrets = map[string]string{"TOKEN": "a\nb"}
@@ -384,7 +388,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := request(t, "agent")
+	req := request("agent")
 	req.Sandbox = spec.Sandbox{Env: map[string]string{"MODE": "eval"}, Network: spec.Egress, CapAdd: []string{"NET_ADMIN"}}
 	req.Secrets, req.Services, req.Retry = []string{"TOKEN"}, []string{"model"}, RetryPolicy{Task: 2}
 	for name, change := range map[string]func(*Request){
@@ -460,7 +464,7 @@ func TestTimeoutsCountAgainstTheTask(t *testing.T) {
 	f := newFixture(t)
 	f.h.skew = -time.Hour
 	for _, id := range []string{"stopped", "backstop"} {
-		req := request(t, id)
+		req := request(id)
 		req.TimeoutSeconds = 60
 		submit(t, f.s, req)
 	}
@@ -492,7 +496,7 @@ func TestTimeoutsCountAgainstTheTask(t *testing.T) {
 func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
 	f := newFixture(t)
 	f.h.add("foreign", "other", podman.Running)
-	submit(t, f.s, request(t, "job"))
+	submit(t, f.s, request("job"))
 	f.tick(t)
 	if info := f.s.Workers()[0].Info; len(f.h.launches) != 0 || info == nil || !strings.Contains(info.Error, "another server") {
 		t.Fatalf("dispatched beside another server's containers: %+v", info)

@@ -2,14 +2,11 @@ package server
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/r3clab/Ordo/internal/image"
-	"github.com/r3clab/Ordo/internal/spec"
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
@@ -40,17 +37,9 @@ func TestWorkflowScoping(t *testing.T) {
 	}
 }
 func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
-	root := t.TempDir()
-	archive := filepath.Join(root, "image.tar")
-	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Open(Config{Root: filepath.Join(root, "state"), Workers: []worker.Config{testWorker("worker")}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := open(t, filepath.Join(t.TempDir(), "state"), []worker.Config{testWorker("worker")}, nil)
 	defer func() { _ = s.Close() }()
-	req := Request{Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}
+	req := request("")
 	a := Step{Request: req}
 	a.ID = "a"
 	a.Retry.Task = 1

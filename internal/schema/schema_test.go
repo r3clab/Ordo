@@ -32,9 +32,8 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 	validate := validator(t, "request")
 	base := `"id":"grep-1","resources":{"cores":2,"memory_mib":4096}`
 	for _, valid := range []string{
-		`{` + base + `,"image":"localhost/klee:1"}`,
 		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"tags":["l40s"]}`,
-		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"},"secrets":["TOKEN"],"inputs":{"corpus":"/data"}}`,
+		`{` + base + `,"image":{"nix":"/src#images.grep"},"secrets":["TOKEN"],"inputs":{"corpus":"/data"}}`,
 	} {
 		if err := validate(valid); err != nil {
 			t.Errorf("rejected %s: %v", valid, err)
@@ -46,32 +45,30 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 	}
 	for _, invalid := range []string{
 		`{"resources":{"cores":1,"memory_mib":1}}`,
-		`{` + base + `,"image":"x","color":"red"}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"color":"red"}`,
 		`{` + base + `,"image":{"nix":"x","tag":"y"}}`,
 		`{` + base + `,"image":{"nix":"--option"}}`,
-		`{` + base + `,"image":{"archive":"/image.tar"}}`,
-		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:abc"}}`,
-		`{` + base + `,"image":{"archive":"","id":"sha256:` + strings.Repeat("a", 64) + `"}}`,
-		`{` + base + `,"image":{"nix":"/src#a","archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"}}`,
-		`{` + base + `,"image":"x","archive":"/image.tar"}`,
-		`{` + base + `,"image":"x","network":"host"}`,
-		`{` + base + `,"image":"x","cap_add":["SYS_ADMIN"]}`,
-		`{` + base + `,"image":"x","cap_add":["NET_ADMIN","NET_ADMIN"]}`,
-		`{` + base + `,"image":"x","env":{"1BAD":"x"}}`,
-		`{` + base + `,"image":"x","env":{"NVIDIA_VISIBLE_DEVICES":"all"}}`,
-		`{` + base + `,"image":"x","secrets":{"TOKEN":"x"}}`,
-		`{` + base + `,"image":"x","secrets":["TOKEN","TOKEN"]}`,
-		`{` + base + `,"image":"x","secrets":["1BAD"]}`,
-		`{` + base + `,"image":"x","secrets":["NVIDIA_X"]}`,
-		`{` + base + `,"image":"x","retry":{"task":11}}`,
-		`{` + base + `,"image":"x","timeout_seconds":31536001}`,
-		`{"id":"bad id","image":"x","resources":{"cores":1,"memory_mib":1}}`,
-		`{"id":"a","image":"x","resources":{"cores":0,"memory_mib":1}}`,
-		`{` + base + `,"image":"x","tags":["l40s","l40s"]}`,
-		`{` + base + `,"image":"x","tags":["bad tag"]}`,
+		`{` + base + `,"image":{}}`,
+		`{` + base + `,"image":"localhost/klee:1"}`,
+		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"}}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"network":"host"}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"cap_add":["SYS_ADMIN"]}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"cap_add":["NET_ADMIN","NET_ADMIN"]}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"env":{"1BAD":"x"}}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"env":{"NVIDIA_VISIBLE_DEVICES":"all"}}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"secrets":{"TOKEN":"x"}}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"secrets":["TOKEN","TOKEN"]}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"secrets":["1BAD"]}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"secrets":["NVIDIA_X"]}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"retry":{"task":11}}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"timeout_seconds":31536001}`,
+		`{"id":"bad id","image":{"nix":"/src#x"},"resources":{"cores":1,"memory_mib":1}}`,
+		`{"id":"a","image":{"nix":"/src#x"},"resources":{"cores":0,"memory_mib":1}}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"tags":["l40s","l40s"]}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"tags":["bad tag"]}`,
 		`{` + base + `,"image":{"nix":"/src#a\nb"}}`,
 		`{` + base + `,"image":{"nix":"/` + strings.Repeat("x", image.MaxInstallableBytes) + `"}}`,
-		`{` + base + `,"image":"x","env":{"MODE":"a\u0000b"}}`,
+		`{` + base + `,"image":{"nix":"/src#x"},"env":{"MODE":"a\u0000b"}}`,
 	} {
 		if err := validate(invalid); err == nil {
 			t.Errorf("accepted %s", invalid)
@@ -92,10 +89,10 @@ func TestWorkflowSchemaRequiresImagesAndBoundsTasks(t *testing.T) {
 	for _, invalid := range []string{
 		`{"id":"eval","tasks":[]}`,
 		`{"id":"` + strings.Repeat("w", 25) + `","tasks":[` + step + `]}`,
-		`{"id":"eval","tasks":[{"image":"x","resources":{"cores":1,"memory_mib":128}}]}`,
+		`{"id":"eval","tasks":[{"image":{"nix":"/src#x"},"resources":{"cores":1,"memory_mib":128}}]}`,
 		`{"id":"eval","tasks":[{"id":"run","resources":{"cores":1,"memory_mib":128}}]}`,
-		`{"id":"eval","image":"x","tasks":[` + step + `]}`,
-		`{"id":"eval","tasks":[{"id":"run","image":"x","resources":{"cores":1,"memory_mib":128},"matrix":{"program":["grep"]}}]}`,
+		`{"id":"eval","image":{"nix":"/src#x"},"tasks":[` + step + `]}`,
+		`{"id":"eval","tasks":[{"id":"run","image":{"nix":"/src#x"},"resources":{"cores":1,"memory_mib":128},"matrix":{"program":["grep"]}}]}`,
 	} {
 		if err := validate(invalid); err == nil {
 			t.Errorf("accepted %s", invalid)

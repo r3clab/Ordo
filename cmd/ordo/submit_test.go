@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/image/imagetest"
 	"github.com/r3clab/Ordo/internal/server"
 	"github.com/r3clab/Ordo/internal/worker"
 )
@@ -46,17 +48,14 @@ func decodeLines[T any](t *testing.T, data []byte) []T {
 
 func TestSubmitStreamsResultsAndIsIdempotent(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "server")
-	s, err := server.Open(server.Config{Root: root, Workers: []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024}}})
+	fake := &imagetest.Nix{Output: "/nix/store/aaaa-image.json", Config: "sha256:" + strings.Repeat("a", 64)}
+	s, err := server.Open(server.Config{Root: root, Workers: []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024}}, Tools: image.Tools{Exec: fake.Exec}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
 	serveSocket(t, root, s.Handler())
-	archive := filepath.Join(t.TempDir(), "image.tar")
-	if err := os.WriteFile(archive, []byte("image"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	job := `"image":{"archive":"` + archive + `","id":"sha256:` + strings.Repeat("a", 64) + `"},"resources":{"cores":1,"memory_mib":128}`
+	job := `"image":{"nix":"/src#image"},"resources":{"cores":1,"memory_mib":128}`
 	jobs := `{"id":"a",` + job + "}\n" + `{"id":"b",` + job + "}\n" + `{"id":"bad id",` + job + "}\n"
 	submit := func() ([]server.BatchResult, error) {
 		stdin = strings.NewReader(jobs)

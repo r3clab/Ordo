@@ -2,7 +2,6 @@ package image
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -52,52 +51,13 @@ func TestArchiveID(t *testing.T) {
 	}
 }
 
-func TestSourceJSON(t *testing.T) {
-	for _, test := range []struct {
-		in   string
-		want Source
-		ok   bool
-	}{
-		{`"localhost/klee:1"`, Source{Ref: "localhost/klee:1"}, true},
-		{` {"nix": "/src#images.grep"} `, Source{Nix: "/src#images.grep"}, true},
-		{`{"archive":"/image.tar","id":"` + config + `"}`, Source{Archive: "/image.tar", ID: config}, true},
-		{`{"archive":"/image.tar","tag":"y"}`, Source{}, false},
-		{`null`, Source{}, true},
-		{`{"nix":""}`, Source{}, false},
-		{`{"nix":"x","tag":"y"}`, Source{}, false},
-		{`{}`, Source{}, false},
-		{`7`, Source{}, false},
-		{`["x"]`, Source{}, false},
-	} {
-		var got Source
-		err := json.Unmarshal([]byte(test.in), &got)
-		if (err == nil) != test.ok || got != test.want {
-			t.Fatalf("%s: got %+v, %v", test.in, got, err)
-		}
-		if !test.ok || got == (Source{}) {
-			continue
-		}
-		data, err := json.Marshal(got)
-		var back Source
-		if err != nil || json.Unmarshal(data, &back) != nil || back != got {
-			t.Fatalf("%s did not round-trip: %s", test.in, data)
-		}
-	}
-}
-
 func TestSourceValidate(t *testing.T) {
 	for _, test := range []struct {
 		src Source
 		ok  bool
 	}{
-		{Source{Ref: "localhost/x"}, true},
-		{Source{Archive: "/image.tar", ID: config}, true},
 		{Source{Nix: "/src#x"}, true},
 		{Source{}, false},
-		{Source{Ref: "x", Nix: "y"}, false},
-		{Source{Nix: "/src#x", Archive: "/image.tar"}, false},
-		{Source{Archive: "/image.tar", ID: "localhost/x:1"}, false},
-		{Source{ID: config}, false},
 		{Source{Nix: "--option"}, false},
 		{Source{Nix: "a\nb"}, false},
 		{Source{Nix: strings.Repeat("x", MaxInstallableBytes+1)}, false},
@@ -198,35 +158,5 @@ func TestResolverSharesBuildsAndBoundsThem(t *testing.T) {
 	wg.Wait()
 	if got := fake.Builds.Load(); got != 2*builds {
 		t.Fatalf("%d builds for %d distinct installables", got, 2*builds)
-	}
-}
-
-func TestResolverLocalSources(t *testing.T) {
-	r := newResolver(t, fakeNix())
-	root := t.TempDir()
-	saves := 0
-	r.imageID = func(_ context.Context, reference string) (string, error) {
-		if reference != "localhost/x:1" {
-			t.Errorf("inspected %s", reference)
-		}
-		return config, nil
-	}
-	r.save = func(_ context.Context, id, dest string) error {
-		saves++
-		return os.WriteFile(dest, []byte("podman"), 0o600)
-	}
-	exported, err := r.Resolve(context.Background(), Source{Ref: "localhost/x:1"})
-	if err != nil || exported.ID != config || exported.Origin != nil {
-		t.Fatalf("podman source: %+v %v", exported, err)
-	}
-	if again, err := r.Resolve(context.Background(), Source{Ref: "localhost/x:1"}); err != nil || again != exported || saves != 1 {
-		t.Fatalf("an exported image ID must be reused: %+v %v saves=%d", again, err, saves)
-	}
-	archive := filepath.Join(root, "image.tar")
-	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := r.Resolve(context.Background(), Source{Archive: archive, ID: config}); err != nil || got.ID != config || got.Blob == exported.Blob {
-		t.Fatalf("archive source: %+v %v", got, err)
 	}
 }
