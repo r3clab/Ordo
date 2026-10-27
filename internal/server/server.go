@@ -722,7 +722,6 @@ func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job
 	return j, nil
 }
 
-// Submit queues one request as a batch of one would.
 type admission struct {
 	id       string
 	state    State

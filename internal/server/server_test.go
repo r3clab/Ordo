@@ -743,6 +743,7 @@ type seeded struct {
 	moved         bool
 }
 
+// Submit queues one request as a batch of one would.
 func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 	result := slices.Collect(s.SubmitBatch(ctx, []BatchEntry{{Line: 1, Request: r}}))[0]
 	switch {
