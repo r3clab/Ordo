@@ -58,7 +58,7 @@
 {#if workflows.length === 0}
   <div class="card px-6 py-16 text-center">
     <p class="font-medium">No workflows yet</p>
-    <p class="mt-1 muted text-sm">Queue a workflow with ordo queue workflow to see its tasks grouped by dependency stage.</p>
+    <p class="mt-1 muted text-sm">Queue a workflow with ordo submit to see its tasks grouped by dependency stage.</p>
   </div>
 {:else}
   <div class="space-y-4">

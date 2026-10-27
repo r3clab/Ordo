@@ -56,8 +56,8 @@ func TestSubmitStreamsResultsAndIsIdempotent(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 	serveSocket(t, root, s.Handler())
-	job := `"image":{"nix":"/src#image"},"resources":{"cores":1,"memory_mib":128}`
-	jobs := `{"id":"a",` + job + "}\n" + `{"id":"b",` + job + "}\n" + `{"id":"bad id",` + job + "}\n"
+	job := `"image":"/src#image","resources":{"cores":1,"memory_mib":128}`
+	jobs := `{"id":"a",` + job + "}\n" + `{"id":"b",` + job + "}\n" + `{"id":"bad id",` + job + "}\n" + `{"id":"flow","tasks":[{"id":"t",` + job + "}]}\n"
 	submit := func() ([]server.BatchResult, error) {
 		stdin = strings.NewReader(jobs)
 		defer func() { stdin = os.Stdin }()
@@ -66,11 +66,11 @@ func TestSubmitStreamsResultsAndIsIdempotent(t *testing.T) {
 		return decodeLines[server.BatchResult](t, out.Bytes()), err
 	}
 	results, err := submit()
-	if err == nil || err.Error() != "1 of 3 jobs failed to submit" || len(results) != 3 || results[0].State != "queued" || results[2].Error == "" {
+	if err == nil || err.Error() != "1 of 4 lines failed to submit" || len(results) != 4 || results[0].State != "queued" || results[2].Error == "" || !results[3].Workflow || results[3].Error != "" || results[3].Existing {
 		t.Fatalf("submit: %+v %v", results, err)
 	}
 	again, _ := submit()
-	if !again[0].Existing || !again[1].Existing {
+	if !again[0].Existing || !again[1].Existing || !again[3].Existing {
 		t.Fatalf("resubmission created new jobs: %+v", again)
 	}
 }

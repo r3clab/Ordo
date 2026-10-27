@@ -9,7 +9,7 @@ The detailed [command reference](https://github.com/r3clab/Ordo/wiki/Command-map
 Start `ordo server` first; it reaches each configured worker over SSH and installs nothing there.
 Command labels identify actions, not complete invocations: required flags are omitted.
 
-1. **Submit:** on the controller, `ordo submit` sends JSONL jobs or `ordo queue workflow` sends a dependency graph through the server's private Unix socket.
+1. **Submit:** on the controller, `ordo submit` sends JSONL jobs and dependency graphs through the server's private Unix socket.
 2. **Schedule:** the server owns a durable queue, prepares pinned images and inputs, and dispatches eligible work over SSH when dependencies and resource requirements are satisfied.
 3. **Execute:** the server reserves the requested cores, GPUs, and memory budget on a worker, then starts the task there with `podman run` in rootless Podman.
 4. **Collect and verify:** after the container exits, the server streams its logs and outputs back over SSH and records them before marking success.

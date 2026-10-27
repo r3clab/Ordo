@@ -22,9 +22,9 @@ start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/wor
 submit() { jq -nc --arg installable "$ORDO_TEST_INSTALLABLE" "$1" | "$ORDO_TEST_BINARY" submit --state "$work/server" >> "$work/submitted.json"; }
 job() { "$ORDO_TEST_BINARY" queue get --state "$work/server" --id "$1"; }
 start
-if submit '{id:"mismatch",image:{nix:$installable},resources:{cores:1,memory_mib:128},tags:["absent"]}' 2> "$work/mismatch.txt"; then echo "accepted a tag no worker carries" >&2; exit 1; fi
+if submit '{id:"mismatch",image:$installable,resources:{cores:1,memory_mib:128},tags:["absent"]}' 2> "$work/mismatch.txt"; then echo "accepted a tag no worker carries" >&2; exit 1; fi
 jq -se 'any(.[]; .id=="mismatch" and (.error|contains("no configured worker has all tags")))' "$work/submitted.json" >/dev/null
-submit '{id:"gpu",image:{nix:$installable},resources:{cores:1,memory_mib:256,gpus:1},tags:["gpu-smoke"],timeout_seconds:30,args:["-c","timeout --kill-after=2 10 ordo-gpu-probe || exit $?; sleep 12"]}'
+submit '{id:"gpu",image:$installable,resources:{cores:1,memory_mib:256,gpus:1},tags:["gpu-smoke"],timeout_seconds:30,args:["-c","timeout --kill-after=2 10 ordo-gpu-probe || exit $?; sleep 12"]}'
 if ! job gpu | jq -e --arg image "$ORDO_TEST_IMAGE" '.spec.image==$image' >/dev/null; then echo "ORDO_TEST_IMAGE does not match the image built from ORDO_TEST_INSTALLABLE" >&2; exit 1; fi
 for ((i=0;i<60;i++)); do
  job gpu > "$work/gpu.json"
@@ -32,7 +32,7 @@ for ((i=0;i<60;i++)); do
  sleep 1
 done
 jq -e --arg gpu "$gpu" '.state=="running" and .attempts[-1].allocation.gpus==[$gpu]' "$work/gpu.json" >/dev/null
-submit '{id:"overlap",image:{nix:$installable},resources:{cores:1,memory_mib:128,gpus:1}}'
+submit '{id:"overlap",image:$installable,resources:{cores:1,memory_mib:128,gpus:1}}'
 kill -KILL "$pid"; wait "$pid" 2>/dev/null || true; pid=
 start
 sleep 3

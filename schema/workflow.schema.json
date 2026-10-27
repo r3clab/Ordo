@@ -17,18 +17,9 @@
             "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
           },
           "image": {
-            "type": "object",
-            "properties": {
-              "nix": {
-                "type": "string",
-                "maxLength": 4096,
-                "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
-              }
-            },
-            "required": [
-              "nix"
-            ],
-            "additionalProperties": false
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
           },
           "inputs": {
             "type": "object",

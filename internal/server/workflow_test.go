@@ -1,12 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"slices"
 	"testing"
 
-	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
@@ -47,22 +48,37 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	b.ID = "b"
 	b.Depends = []string{"a"}
 	flow := Workflow{ID: "flow", Tasks: []Step{a, b}}
-	for _, change := range []func(*Step){func(step *Step) { step.Resources.Cores = 0 }, func(step *Step) { step.Image = image.Source{} }} {
+	submit := func(w Workflow) BatchResult {
+		t.Helper()
+		line, err := json.Marshal(w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries, err := ParseBatch(bytes.NewReader(line))
+		if err != nil {
+			t.Fatal(err)
+		}
+		results := slices.Collect(s.SubmitBatch(context.Background(), entries))
+		if len(results) != 1 || !results[0].Workflow || results[0].ID != w.ID {
+			t.Fatalf("results %+v", results)
+		}
+		return results[0]
+	}
+	for _, change := range []func(*Step){func(step *Step) { step.Resources.Cores = 0 }, func(step *Step) { step.Image = "" }} {
 		bad := flow
 		bad.Tasks = append([]Step(nil), flow.Tasks...)
 		change(&bad.Tasks[1])
-		if _, err := s.SubmitWorkflow(context.Background(), bad); err == nil || len(s.List(Filter{})) != 0 {
+		if submit(bad).Error == "" || len(s.List(Filter{})) != 0 {
 			t.Fatal("published partial workflow")
 		}
 	}
-	jobs, err := s.SubmitWorkflow(context.Background(), flow)
-	if err != nil {
-		t.Fatal(err)
+	if result := submit(flow); result.Error != "" || result.Existing {
+		t.Fatal(result)
 	}
-	if _, err := s.SubmitWorkflow(context.Background(), flow); err != nil {
-		t.Fatal("idempotent workflow rejected", err)
+	if result := submit(flow); result.Error != "" || !result.Existing {
+		t.Fatal("idempotent workflow rejected", result)
 	}
-	j := jobs[0]
+	j := mustJob(t, s, "flow--a")
 	j.Attempts = []Attempt{{ID: "one"}}
 	if err := s.finish(j, "task"); err != nil {
 		t.Fatal(err)
@@ -78,7 +94,7 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	if mustJob(t, s, j.ID).State != "failed" {
 		t.Fatal("unbounded retry")
 	}
-	dependent := jobs[1]
+	dependent := mustJob(t, s, "flow--b")
 	if ready, err := s.dependencies(&dependent); err != nil || ready {
 		t.Fatal("failed dependency advanced", err)
 	}

@@ -638,7 +638,6 @@ func (s *Server) Run(ctx context.Context, address string) error {
 
 func (s *Server) Handler() http.Handler {
 	mux := s.routes()
-	mux.HandleFunc("POST /v1/workflows", s.serveWorkflow)
 	mux.HandleFunc("POST /v1/batches", s.serveBatch)
 	mux.HandleFunc("GET /v1/jobs/{id}/result", s.serveResult)
 	return mux

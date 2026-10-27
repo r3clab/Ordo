@@ -27,7 +27,7 @@ func build(name string) (*jsonschema.Schema, error) {
 		if s, err = jsonschema.For[server.Request](nil); err == nil {
 			refineRequest(s)
 			s.Title = "Ordo job request"
-			s.Description = "One job; ordo submit reads one per line and requires its id."
+			s.Description = "One job; each line ordo submit reads is a job request, which needs an id, or a workflow."
 		}
 	case "workflow":
 		if s, err = jsonschema.For[server.Workflow](nil); err == nil {
@@ -104,8 +104,8 @@ func enum(values []string) []any {
 
 func refineRequest(s *jsonschema.Schema) {
 	at(s, "id").Pattern = spec.NamePattern
-	at(s, "image", "nix").MaxLength = jsonschema.Ptr(image.MaxInstallableBytes)
-	at(s, "image", "nix").Pattern = image.InstallablePattern
+	at(s, "image").MaxLength = jsonschema.Ptr(image.MaxInstallableBytes)
+	at(s, "image").Pattern = image.InstallablePattern
 	at(s, "inputs").PropertyNames = names()
 	resources := at(s, "resources")
 	at(resources, "cores").Minimum = jsonschema.Ptr(1.0)

@@ -2,14 +2,12 @@ package server
 
 import (
 	"cmp"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"net/http"
 	"path/filepath"
 	"slices"
 
@@ -137,40 +135,28 @@ func jobKey(j Job) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
-func (s *Server) serveWorkflow(w http.ResponseWriter, r *http.Request) {
-	var flow Workflow
-	if err := DecodeJSON(http.MaxBytesReader(w, r.Body, 8<<20), &flow); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	jobs, err := s.SubmitWorkflow(r.Context(), flow)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	WriteJSON(w, http.StatusOK, jobs)
-}
-
-func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) {
+func (s *Server) checkWorkflow(w Workflow) ([]Step, error) {
 	steps, err := w.scope()
 	if err != nil {
 		return nil, err
 	}
-	jobs := make([]Job, 0, len(steps))
-	requests := make([]Request, len(steps))
-	for i, step := range steps {
+	for _, step := range steps {
 		if err := s.check(step.Request); err != nil {
 			return nil, err
 		}
-		requests[i] = step.Request
 	}
-	st := s.stage(ctx, requests...)
+	return steps, nil
+}
+
+// admitWorkflow takes steps that passed checkWorkflow and were staged.
+func (s *Server) admitWorkflow(id string, steps []Step, st *staging) (existing bool, err error) {
+	jobs := make([]Job, 0, len(steps))
 	for _, step := range steps {
 		j, err := s.prepare(step.Request, step.From, st)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
-		j.Workflow = w.ID
+		j.Workflow = id
 		j.Depends = step.Depends
 		j.Key = jobKey(j)
 		jobs = append(jobs, j)
@@ -178,35 +164,30 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 	s.write.Lock()
 	defer s.write.Unlock()
 	if s.fault != nil {
-		return nil, s.fault
+		return false, s.fault
 	}
-	existing := 0
+	count := 0
 	for _, old := range s.records {
-		if old.Workflow == w.ID {
-			existing++
+		if old.Workflow == id {
+			count++
 		}
 	}
 	for _, j := range jobs {
 		if old, ok := s.records[j.ID]; ok {
-			if old.Workflow != w.ID || old.key != j.Key {
-				return nil, errors.New("workflow ID conflicts with existing specification")
+			if old.Workflow != id || old.key != j.Key {
+				return false, errors.New("workflow ID conflicts with existing specification")
 			}
-		} else if existing > 0 {
-			return nil, errors.New("workflow ID has a different task set")
+		} else if count > 0 {
+			return false, errors.New("workflow ID has a different task set")
 		}
 	}
-	if existing == 0 {
-		return jobs, s.commit(jobs...)
+	if count == 0 {
+		return false, s.commit(jobs...)
 	}
-	if existing != len(jobs) {
-		return nil, errors.New("workflow ID has a different task set")
+	if count != len(jobs) {
+		return false, errors.New("workflow ID has a different task set")
 	}
-	for i, j := range jobs {
-		if jobs[i], _, err = s.job(j.ID); err != nil {
-			return nil, err
-		}
-	}
-	return jobs, nil
+	return true, nil
 }
 func (s *Server) dependencies(j *Job) (bool, error) {
 	s.mu.Lock()

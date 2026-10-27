@@ -36,7 +36,7 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f.StringVar(&workersFile, "workers", "", "JSON array of worker connection configurations")
 	f.Func("service", "NAME=HOST:PORT reachable from this server, published to tasks at /services/NAME/socket (repeatable)", keyValue(services, "service", "NAME=HOST:PORT"))
 	f.Func("secret", "NAME=FILE whose content, without one trailing newline, tasks listing NAME in secrets receive as $NAME (repeatable)", keyValue(secretFiles, "secret", "NAME=FILE"))
-	f.StringVar(&tools.Nix, "nix", "nix", "nix executable that builds {\"nix\": INSTALLABLE} images")
+	f.StringVar(&tools.Nix, "nix", "nix", "nix executable that builds task images")
 	f.StringVar(&tools.Skopeo, "skopeo", defaultSkopeo, "nix2container skopeo that exports them")
 	if err := parse(f, args, out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331] [--service NAME=HOST:PORT ...] [--secret NAME=FILE ...] [--nix PATH] [--skopeo PATH]"); err != nil {
 		return err
@@ -74,7 +74,7 @@ func keyValue(values map[string]string, kind, shape string) func(string) error {
 	}
 }
 
-const queueUsage = "Usage: ordo queue <workflow|list|get|cancel|cancel-workflow|stop> --state DIR [--file workflow.json | --id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents."
+const queueUsage = "Usage: ordo queue <list|get|cancel|cancel-workflow|stop> --state DIR [--id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents."
 
 func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] == "--help" {
@@ -83,9 +83,8 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	}
 	operation := args[0]
 	f := newFlags("queue")
-	var root, file, id, reason string
+	var root, id, reason string
 	f.StringVar(&root, "state", "", "server state directory")
-	f.StringVar(&file, "file", "", "JSON workflow")
 	f.StringVar(&id, "id", "", "job ID")
 	f.StringVar(&reason, "reason", "", "why a job is stopped or cancelled")
 	if err := parse(f, args[1:], out, queueUsage); err != nil {
@@ -97,15 +96,6 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	method, endpoint := http.MethodPost, "/v1/jobs/"+id+"/"+operation
 	var body any
 	switch operation {
-	case "workflow":
-		var flow server.Workflow
-		if err := decodeFile(file, &flow); err != nil {
-			return err
-		}
-		if id != "" {
-			flow.ID = id
-		}
-		endpoint, body = "/v1/workflows", flow
 	case "cancel", "stop":
 		body = server.StopRequest{Reason: reason}
 	case "cancel-workflow":

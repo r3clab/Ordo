@@ -53,7 +53,7 @@ func dispatch(ctx context.Context, args []string, output io.Writer) error {
 		return command(ctx, flags.Args()[1:], output)
 	}
 
-	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests from stdin (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Submit workflows, inspect, stop or cancel queued jobs\n  schema   Print the JSON Schema for job requests and workflows")
+	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests and workflows (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Inspect, stop or cancel queued jobs\n  schema   Print the JSON Schema for job requests and workflows")
 	return err
 }
 

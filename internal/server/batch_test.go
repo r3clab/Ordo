@@ -31,14 +31,14 @@ func TestBatchSharesNixImagesAndContinuesPastBadLines(t *testing.T) {
 	s, fake := nixServer(t)
 	resources := `"resources":{"cores":1,"memory_mib":128}`
 	batch := strings.Join([]string{
-		`{"id":"a","image":{"nix":"/src#grep"},` + resources + `}`,
+		`{"id":"a","image":"/src#grep",` + resources + `}`,
 		``,
-		`{"id":"b","image":{"nix":"/src#grep"},"args":["x"],` + resources + `}`,
+		`{"id":"b","image":"/src#grep","args":["x"],` + resources + `}`,
 		`not json`,
-		`{"image":{"nix":"/src#grep"},` + resources + `}`,
-		`{"id":"c","image":{"nix":"/src#grep"},"color":"red",` + resources + `}`,
-		`{"id":"a","image":{"nix":"/src#grep"},"args":["changed"],` + resources + `}`,
-		`{"id":"d","image":{"nix":"/src#never"},"resources":{"cores":0,"memory_mib":128}}`,
+		`{"image":"/src#grep",` + resources + `}`,
+		`{"id":"c","image":"/src#grep","color":"red",` + resources + `}`,
+		`{"id":"a","image":"/src#grep","args":["changed"],` + resources + `}`,
+		`{"id":"d","image":"/src#never","resources":{"cores":0,"memory_mib":128}}`,
 	}, "\n")
 	submit := func() []BatchResult {
 		entries, err := ParseBatch(strings.NewReader(batch))
@@ -77,9 +77,8 @@ func TestBrowserRoutesCannotSubmit(t *testing.T) {
 		method, path, body string
 		want               int
 	}{
-		{http.MethodPost, "/v1/jobs", `{"id":"a","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}`, http.StatusMethodNotAllowed},
-		{http.MethodPost, "/v1/workflows", `{"id":"w","tasks":[{"id":"t","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}]}`, http.StatusNotFound},
-		{http.MethodPost, "/v1/batches", `{"id":"a","image":{"nix":"/src#grep"},"resources":{"cores":1,"memory_mib":128}}`, http.StatusNotFound},
+		{http.MethodPost, "/v1/jobs", `{"id":"a","image":"/src#grep","resources":{"cores":1,"memory_mib":128}}`, http.StatusMethodNotAllowed},
+		{http.MethodPost, "/v1/batches", `{"id":"a","image":"/src#grep","resources":{"cores":1,"memory_mib":128}}`, http.StatusNotFound},
 		{http.MethodGet, "/v1/jobs/a/result", ``, http.StatusNotFound},
 	} {
 		w := httptest.NewRecorder()

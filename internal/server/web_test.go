@@ -63,7 +63,7 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 			t.Fatal("asset/security headers", path, w.Code)
 		}
 	}
-	if _, err := s.Submit(context.Background(), Request{ID: "example", Image: image.Source{Nix: "/src#image"}, Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}); err != nil {
+	if _, err := s.Submit(context.Background(), Request{ID: "example", Image: image.Source("/src#image"), Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}); err != nil {
 		t.Fatal(err)
 	}
 	w := request("POST", "/v1/jobs/example/cancel", token, "", "http://127.0.0.1:7331", nil)

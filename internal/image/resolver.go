@@ -52,7 +52,7 @@ func (r *Resolver) Close() {
 
 func (r *Resolver) Resolve(ctx context.Context, src Source) (Resolved, error) {
 	// A build outlives the request that started it, so a retry after a disconnect finds it cached.
-	return r.flight.do(ctx, src.Nix, func() (Resolved, error) { return r.nix(r.ctx, src.Nix) })
+	return r.flight.do(ctx, string(src), func() (Resolved, error) { return r.nix(r.ctx, string(src)) })
 }
 
 func (r *Resolver) nix(ctx context.Context, installable string) (Resolved, error) {

@@ -6,9 +6,7 @@ import (
 	"regexp"
 )
 
-type Source struct {
-	Nix string `json:"nix"`
-}
+type Source string
 
 const (
 	MaxInstallableBytes = 4096
@@ -18,10 +16,10 @@ const (
 var installable = regexp.MustCompile(InstallablePattern)
 
 func (s Source) Validate() error {
-	if s.Nix == "" {
-		return errors.New(`image must be {"nix": INSTALLABLE}`)
+	if s == "" {
+		return errors.New("image must be a nix installable")
 	}
-	if len(s.Nix) > MaxInstallableBytes || !installable.MatchString(s.Nix) {
+	if len(s) > MaxInstallableBytes || !installable.MatchString(string(s)) {
 		return errors.New("invalid nix installable")
 	}
 	return nil

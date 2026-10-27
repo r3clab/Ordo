@@ -41,7 +41,6 @@
 #number(54, 88, "01")
 #words(88, 91, "Submit")
 #command(56, 130, "ordo submit")
-#command(56, 171, "ordo queue workflow")
 #arrow(230, 270, 150)
 
 #rect(270, 70, 304, 276)

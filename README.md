@@ -108,30 +108,29 @@ Start `ordo server --state SERVER_DIR --workers workers.json [--service NAME=HOS
 [{"host":"WORKER","state_dir":"/home/worker/.local/state/ordo","cpus":"0,1,64,65","memory_mib":512}]
 ```
 
-Write tasks with the flake's [`lib`](#nix-library); a parameter sweep is a `map` over a list:
+A task is a JSON object, one per line; any generator may write them, and [Nix](#nix-library) makes a parameter sweep a `map` over a list:
 
 ```nix
 let
-  inherit (ordo.lib) mkTask toJSONL;
-  tasks = map (seed: mkTask {
+  inherit (ordo.lib) image toJSONL;
+  tasks = map (seed: {
     id = "evaluation-${seed}";
-    image = evaluation.images.grep;
+    image = image evaluation.images.grep;
     inputs.dataset = "/absolute/path/data";
     args = [ "-c" "run-eval --seed ${seed} /inputs/dataset > /outputs/score" ];
-    cores = 1;
-    memoryMiB = 256;
+    resources = { cores = 1; memory_mib = 256; };
   }) [ "1" "2" "3" ];
 in
 pkgs.writeText "jobs.jsonl" (toJSONL tasks)
 ```
 
-`ordo submit --state SERVER_DIR --file jobs.jsonl` queues one job request per line (stdin without `--file`).
+`ordo submit --state SERVER_DIR --file jobs.jsonl` queues each line, a job request or a [workflow](#workflows) (stdin without `--file`).
 
 - Every task needs an `id`.
   Resubmitting an ID with the same request returns the existing job, so rerunning a generator only queues what is new; the same ID with a different request is an error.
-- It prints one result per line (`id`, `line`, `state`, `existing`, or `error`), keeps going past bad lines, and exits nonzero if any line failed.
+- It prints one result per line (`id`, `line`, `workflow`, `state`, `existing`, or `error`), keeps going past bad lines, and exits nonzero if any line failed.
 - Installables and input paths resolve on the server.
-- `image` is `{"nix": INSTALLABLE}`, such as a derivation written as `{"nix": "/nix/store/….drv^*"}` or `{"nix": "/path/flake#images.grep"}`: the server runs `nix build`, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
+- `image` is a Nix installable, such as a derivation `"/nix/store/….drv^*"` or `"/path/flake#images.grep"`: the server runs `nix build`, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
   Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
   A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
 - The server finds `nix` on its `PATH` (`--nix` overrides it) and uses the nix2container `skopeo` bundled by the Nix build (`--skopeo` overrides it).
@@ -162,7 +161,7 @@ For a remote server, use SSH forwarding, for example `ssh -L 7331:127.0.0.1:7331
 Do not expose the listener with a public proxy; public deployment/TLS/multi-user authorization are deliberately unsupported.
 Authenticated API requests additionally enforce loopback Host headers and same-origin browser requests.
 
-The page shows worker connectivity/hardware/reservations and attempt histories, and cancels jobs or whole workflows; queue work with `ordo submit` or `ordo queue workflow`.
+The page shows worker connectivity/hardware/reservations and attempt histories, and cancels jobs or whole workflows; queue work with `ordo submit`.
 Logs are available after result collection, with the last 1 MiB of each stream shown; full logs remain in each attempt's result directory.
 Untrusted task output is rendered as text, not HTML.
 Auto-refresh can be paused.
@@ -188,7 +187,7 @@ After changing `ui/package-lock.json`, update `npmDepsHash` in `nix/checks/ui.ni
 ## GPU workers
 
 Configure a worker's optional `gpus` array with full NVIDIA GPU UUIDs.
-Request them with `gpus` in `mkTask` or `mkStep`.
+Request them with a task's `resources.gpus`.
 An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, and unsupported device controls are rejected.
 
 - The server reads UUID/model/memory information with `nvidia-smi` and generates a private CDI specification under `STATE/cdi` with `nvidia-ctk` on the worker.
@@ -208,7 +207,7 @@ An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, 
 Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-class"]` in each of their `workers.json` entries, then require it in the task's `tags`:
 
 ```nix
-mkTask { id = "train"; image = evaluation.images.train; cores = 1; gpus = 2; memoryMiB = 8192; tags = [ "l40s-class" ]; }
+{ id = "train"; image = image evaluation.images.train; resources = { cores = 1; gpus = 2; memory_mib = 8192; }; tags = [ "l40s-class" ]; }
 ```
 
 - A job runs only on workers carrying every tag it lists; jobs without tags still run on any worker.
@@ -222,7 +221,7 @@ mkTask { id = "train"; image = evaluation.images.train; cores = 1; gpus = 2; mem
 Tasks may declare environment, secrets, network access, capabilities, and controller-side services:
 
 ```nix
-mkTask { env.MODE = "eval"; secrets = [ "MODEL_TOKEN" ]; network = "egress"; capAdd = [ "NET_ADMIN" ]; services = [ "model" ]; /* … */ }
+{ env.MODE = "eval"; secrets = [ "MODEL_TOKEN" ]; network = "egress"; cap_add = [ "NET_ADMIN" ]; services = [ "model" ]; /* … */ }
 ```
 
 - `env` values are part of the job's specification and appear in job records, `run.json`, and the web UI.
@@ -238,7 +237,7 @@ mkTask { env.MODE = "eval"; secrets = [ "MODEL_TOKEN" ]; network = "egress"; cap
   **Anyone who can submit jobs can use every configured secret**, and a task can print one to the logs the web UI shows.
 - `network` is `none` (default, loopback only) or `egress` (rootless pasta with full outbound access).
   Domain filtering belongs in the image, for example with nftables under `NET_ADMIN`.
-- `capAdd` accepts only `NET_ADMIN`, which acts on the container's own network namespace under rootless Podman.
+- `cap_add` accepts only `NET_ADMIN`, which acts on the container's own network namespace under rootless Podman.
 - `services` names endpoints configured on the server with repeated `--service NAME=HOST:PORT`, resolved from the server.
   The server's SSH connection to each worker forwards each one to a Unix socket, and the task sees it at `/services/NAME/socket`, even with `network` set to `none`.
   The directory is mounted rather than the socket, so a task keeps reaching the service after a reconnect; while the server is disconnected, connections fail and the task must retry.
@@ -249,40 +248,40 @@ mkTask { env.MODE = "eval"; secrets = [ "MODEL_TOKEN" ]; network = "egress"; cap
 
 ## Workflows
 
-`mkWorkflow` combines steps, which are tasks that may also name `dependsOn` and `from`:
+A workflow is a line with an `id` and its `tasks`, which may also name `depends_on` and `from`:
 
 ```nix
 let
-  inherit (ordo.lib) mkStep mkWorkflow;
-  step = args: mkStep ({ image = evaluation.images.grep; cores = 1; memoryMiB = 128; } // args);
+  inherit (ordo.lib) image toJSONL;
+  step = args: { image = image evaluation.images.grep; resources = { cores = 1; memory_mib = 128; }; } // args;
 in
-pkgs.writeText "workflow.json" (builtins.toJSON (mkWorkflow {
+pkgs.writeText "workflow.jsonl" (toJSONL [{
   id = "example";
   tasks = [
     (step { id = "produce"; args = [ "-c" "printf data > /outputs/value" ]; })
     (step { id = "consume"; from.data = "produce"; args = [ "-c" "cp /inputs/data/value /outputs/value" ]; })
   ] ++ map (seed: step {
     id = "score-${seed}";
-    dependsOn = [ "produce" ];
-    timeoutSeconds = 60;
+    depends_on = [ "produce" ];
+    timeout_seconds = 60;
     retry = { task = 1; infrastructure = 1; };
     args = [ "-c" "printf ${seed} > /outputs/seed" ];
   }) [ "1" "2" ];
-}))
+}])
 ```
 
-`ordo queue workflow --state SERVER_DIR --file workflow.json` submits the entire graph atomically.
+`ordo submit` queues each workflow line atomically: all of its tasks, or none.
 
 - Workflow IDs are at most 24 characters, task IDs 32; jobs use `WORKFLOW--TASK` IDs.
   A workflow holds at most 1,000 tasks.
-- `dependsOn` requires every referenced task to succeed.
+- `depends_on` requires every referenced task to succeed.
   `from` selects one task's collected output directory and adds its dependency automatically.
 - Failed/cancelled dependencies skip downstream tasks; independent branches continue.
 - Task-exit retries default to zero, confirmed infrastructure-failure retries to one.
   Each count is bounded to 0–10.
   Every executed attempt remains visible.
   Unknown/disconnected executions do not consume retries.
-- `timeoutSeconds` is a per-attempt wall-clock limit from container start.
+- `timeout_seconds` is a per-attempt wall-clock limit from container start.
   The server stops an expired container; while the server is unreachable, Podman kills it 60 seconds past the limit.
   Either way the attempt counts as a task failure.
   Zero disables it; the maximum is one year.
@@ -298,19 +297,18 @@ pkgs.writeText "workflow.json" (builtins.toJSON (mkWorkflow {
 
 ## Nix library
 
-The flake's `lib` provides `mkTask`, `mkStep`, `mkWorkflow`, and `toJSONL`, checking each task at evaluation time against the patterns, enums, and limits it reads from `schema/`.
+Tasks and workflows are plain attrsets with the [wire format](#wire-format)'s fields; the flake's `lib` adds two helpers.
 
-- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`) and returns the request attrset; every task needs an `image`, either a derivation or `{ nix = INSTALLABLE; }`.
-  `mkStep` also takes `dependsOn` and `from`, and `mkWorkflow` takes an `id` and its steps as `tasks`.
-- Sweeps and other repetition are plain Nix, such as `map` over seeds or `lib.mapAttrsToList` over images.
-- A derivation `image` becomes `{"nix": "/nix/store/….drv^*"}`: the task file keeps the `.drv` alive without building the image, which the server builds on submission.
+- `image DRV` returns the installable `"/nix/store/….drv^*"`: the task file keeps the `.drv` alive without building the image, which the server builds on submission.
   The `.drv` must be in the server's Nix store, so evaluate on the server host or `nix copy --derivation` it there.
   JSON printed by `nix eval` roots nothing, so garbage collection can remove the `.drv` before submission.
+- `toJSONL LINES` writes each task or workflow as one line for `ordo submit`.
+- Sweeps and other repetition are plain Nix, such as `map` over seeds or `lib.mapAttrsToList` over images.
 - Consumers should make Ordo's `nix2container` input follow their own, so the server's `skopeo` reads their image format.
 
 ### Wire format
 
-`ordo submit` reads JSON job requests, one per line, and `ordo queue workflow` reads one JSON workflow; any generator may write them.
+`ordo submit` reads one JSON value per line: a job request, or a workflow, which is any line with a `tasks` field.
 Their fields are snake_case (`resources.memory_mib`, `timeout_seconds`, `cap_add`, `depends_on`).
 `ordo schema [request|workflow]` prints their JSON Schema, generated from the Go types; `schema/` holds committed copies for editors and other tools.
 The schema covers names, enums, and limits; rules spanning fields, such as input conflicts, are checked only on submission.
@@ -334,7 +332,7 @@ nix flake check                # formatting, lint, build, race-enabled tests, an
 - `nix/devshell.nix`: tools and a fail-fast formatting/lint pre-commit hook, installed on shell entry.
 - `nix/formatter.nix`: treefmt configuration and formatting check.
 - `nix/package.nix`: Go build with nix2container's `skopeo` baked in, tests, and sandboxed lint check.
-- `nix/lib/default.nix`: `mkTask`, `mkStep`, `mkWorkflow`, and `toJSONL`.
+- `nix/lib/default.nix`: `image` and `toJSONL`.
 - `nix/checks/ui.nix`: UI type check and committed-build freshness check.
 - `nix/checks/schema.nix`: fails when `schema/` differs from `ordo schema --out`; regenerate with `go run ./cmd/ordo schema --out schema`.
 - `nix/checks/lib.nix`: validates `lib` output against the schema, with an unbuildable image to prove task files build no images, and requires every invalid sample to fail evaluation.

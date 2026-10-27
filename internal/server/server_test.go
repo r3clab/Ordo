@@ -199,7 +199,7 @@ func open(t *testing.T, state string, workers []worker.Config, services map[stri
 }
 
 func request(id string) Request {
-	return Request{ID: id, Image: image.Source{Nix: "/src#image"}, Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}
+	return Request{ID: id, Image: image.Source("/src#image"), Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}
 }
 
 func submit(t *testing.T, s *Server, r Request) {

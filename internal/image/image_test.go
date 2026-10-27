@@ -56,11 +56,11 @@ func TestSourceValidate(t *testing.T) {
 		src Source
 		ok  bool
 	}{
-		{Source{Nix: "/src#x"}, true},
-		{Source{}, false},
-		{Source{Nix: "--option"}, false},
-		{Source{Nix: "a\nb"}, false},
-		{Source{Nix: strings.Repeat("x", MaxInstallableBytes+1)}, false},
+		{Source("/src#x"), true},
+		{Source(""), false},
+		{Source("--option"), false},
+		{Source("a\nb"), false},
+		{Source(strings.Repeat("x", MaxInstallableBytes+1)), false},
 	} {
 		if err := test.src.Validate(); (err == nil) != test.ok {
 			t.Fatalf("%+v: %v", test.src, err)
@@ -102,7 +102,7 @@ func TestResolverCachesNixExportsByStorePath(t *testing.T) {
 	fake := fakeNix()
 	r := newResolver(t, fake)
 	ctx := context.Background()
-	src := Source{Nix: "/src#images.grep"}
+	src := Source("/src#images.grep")
 	first, err := r.Resolve(ctx, src)
 	if err != nil {
 		t.Fatal(err)
@@ -135,13 +135,13 @@ func TestResolverSharesBuildsAndBoundsThem(t *testing.T) {
 	r := newResolver(t, fake)
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := r.Resolve(gone, Source{Nix: "/src#a"}); !errors.Is(err, context.Canceled) {
+	if _, err := r.Resolve(gone, Source("/src#a")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled waiter: %v", err)
 	}
 	var wg sync.WaitGroup
 	for i := range 3 * builds {
 		wg.Go(func() {
-			if _, err := r.Resolve(context.Background(), Source{Nix: fmt.Sprintf("/src#%c", 'a'+i%(2*builds))}); err != nil {
+			if _, err := r.Resolve(context.Background(), Source(fmt.Sprintf("/src#%c", 'a'+i%(2*builds)))); err != nil {
 				t.Error(err)
 			}
 		})

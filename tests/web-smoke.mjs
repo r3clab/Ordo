@@ -32,14 +32,14 @@ try {
   await evaluate('document.getElementById("login").requestSubmit()');
   await wait('!!document.querySelector("nav[aria-label=Views]")');
   assert(await evaluate('localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ""'));
-  const image = { nix: process.env.ORDO_TEST_INSTALLABLE };
+  const image = process.env.ORDO_TEST_INSTALLABLE;
   const workflow = { id: "browser", tasks: [
     { id: "log", image, resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf '<script>globalThis.injection=true</script>\\n'"] },
     { id: "stop", image, resources: { cores: 1, memory_mib: 128 }, timeout_seconds: 60, args: ["-c", "sleep 45"] },
   ] };
-  const file = `${evidence}/browser-workflow.json`;
+  const file = `${evidence}/browser-workflow.jsonl`;
   await writeFile(file, JSON.stringify(workflow), { mode: 0o600 });
-  execFileSync(process.env.ORDO_TEST_BINARY, ["queue", "workflow", "--state", root, "--file", file], { stdio: "ignore" });
+  execFileSync(process.env.ORDO_TEST_BINARY, ["submit", "--state", root, "--file", file], { stdio: "ignore" });
   await evaluate('document.querySelector(\'a[href="#/jobs"]\').click()');
   await wait(state("browser--stop", "running"));
   await evaluate(`${row("browser--stop")}.click()`);
