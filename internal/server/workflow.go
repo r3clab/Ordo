@@ -175,43 +175,44 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		j.Key = jobKey(j)
 		jobs = append(jobs, j)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.write.Lock()
+	defer s.write.Unlock()
 	if s.fault != nil {
 		return nil, s.fault
 	}
 	existing := 0
-	for _, old := range s.jobs {
+	for _, old := range s.records {
 		if old.Workflow == w.ID {
 			existing++
 		}
 	}
-	for i, j := range jobs {
-		if old, ok := s.jobs[j.ID]; ok {
-			if old.Workflow != w.ID || old.Key != j.Key {
+	for _, j := range jobs {
+		if old, ok := s.records[j.ID]; ok {
+			if old.Workflow != w.ID || old.key != j.Key {
 				return nil, errors.New("workflow ID conflicts with existing specification")
 			}
-			jobs[i] = old
 		} else if existing > 0 {
 			return nil, errors.New("workflow ID has a different task set")
 		}
 	}
-	if existing > 0 {
-		if existing != len(jobs) {
-			return nil, errors.New("workflow ID has a different task set")
-		}
-		return jobs, nil
+	if existing == 0 {
+		return jobs, s.commit(jobs...)
 	}
-	if err := s.commitLocked(jobs...); err != nil {
-		return nil, err
+	if existing != len(jobs) {
+		return nil, errors.New("workflow ID has a different task set")
+	}
+	for i, j := range jobs {
+		if jobs[i], _, err = s.job(j.ID); err != nil {
+			return nil, err
+		}
 	}
 	return jobs, nil
 }
 func (s *Server) dependencies(j *Job) (bool, error) {
 	s.mu.Lock()
-	deps := map[string]Job{}
+	deps := map[string]record{}
 	for _, id := range j.Depends {
-		dep, ok := s.jobs[id]
+		dep, ok := s.records[id]
 		if !ok {
 			s.mu.Unlock()
 			return false, errors.New("missing persisted dependency")
@@ -239,22 +240,19 @@ func (s *Server) importOutputs(j *Job) error {
 	if len(j.Attempts) > 0 {
 		return nil
 	}
-	s.mu.Lock()
-	deps := map[string]Job{}
-	for _, id := range j.From {
-		deps[id] = s.jobs[id]
-	}
-	s.mu.Unlock()
 	j.Spec.Inputs = maps.Clone(j.Spec.Inputs)
 	if j.Spec.Inputs == nil {
 		j.Spec.Inputs = map[string]string{}
 	}
 	for name, id := range j.From {
-		dep := deps[id]
-		at := dep.current()
-		if at.Result == nil {
+		dep, ok, err := s.job(id)
+		if err != nil {
+			return err
+		}
+		if !ok || len(dep.Attempts) == 0 || dep.current().Result == nil {
 			return errors.New("dependency has no output identity")
 		}
+		at := dep.current()
 		hash := at.Result.OutputsSHA256
 		// Collection verified the archive against this digest, and nothing rewrites a result directory.
 		if err := content.Link(s.images.Blobs, filepath.Join(at.ResultDir, OutputsArchive), hash); err != nil {
@@ -273,33 +271,32 @@ func (s *Server) Stop(id, reason string) error {
 }
 
 func (s *Server) requestStop(id string, workflow bool, reason string, mark func(*Job)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.write.Lock()
+	defer s.write.Unlock()
 	var targets []Job
 	if !workflow {
 		if j, ok := s.jobs[id]; ok {
-			targets = append(targets, j)
+			targets = append(targets, j.clone())
 		}
 	} else {
 		for _, j := range s.jobs {
 			if j.Workflow == id {
-				targets = append(targets, j)
+				targets = append(targets, j.clone())
 			}
 		}
 	}
-	var changed []Job
-	for _, j := range targets {
-		if j.State.Terminal() {
-			continue
-		}
-		mark(&j)
+	s.mu.Lock()
+	for i := range targets {
+		j := &targets[i]
+		mark(j)
 		j.StopReason = cmp.Or(j.StopReason, reason)
+		// A pass that took a stale copy cannot revive the job, as save drops writes to finished jobs.
 		if j.State == Queued && !s.busy[j.ID] {
 			j.State = Cancelled
 		}
-		changed = append(changed, j)
 	}
-	return s.commitLocked(changed...)
+	s.mu.Unlock()
+	return s.commit(targets...)
 }
 func (s *Server) finish(j Job, class Failure) error {
 	s.refresh(&j)

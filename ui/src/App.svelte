@@ -18,14 +18,9 @@
 
   const readView = (): View => views.find((v) => location.hash === `#/${v.id}`)?.id ?? "jobs";
   let view = $state<View>(readView());
-  let selected = $state<string | null>(null);
-  const job = $derived(session.jobs.find((j) => j.id === selected));
+  const job = $derived(session.detail?.id === session.selected ? session.detail : null);
   const online = $derived(session.workers.filter((w) => w.connected).length);
-  const select = (id: string | null) => (selected = id);
-
-  $effect(() => {
-    if (!session.connected) selected = null;
-  });
+  const select = (id: string | null) => void session.select(id);
 
   $effect(() => {
     if (location.hash !== `#/${view}`) history.replaceState(null, "", `#/${view}`);

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -85,13 +86,15 @@ func TestFetchWaitsAndSkipsExistingDirectories(t *testing.T) {
 		}
 	}
 	var polls atomic.Int32
+	var repolled atomic.Value
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
 		state := server.Running
 		if polls.Add(1) > 1 {
 			state = server.Succeeded
+			repolled.Store(r.URL.Query()["id"])
 		}
-		server.WriteJSON(w, 200, []server.Job{{ID: "a", State: state}, {ID: "b", State: "succeeded"}, {ID: "c", State: "failed"}})
+		server.WriteJSON(w, 200, []server.Summary{{ID: "a", State: state}, {ID: "b", State: "succeeded"}, {ID: "c", State: "failed"}})
 	})
 	mux.HandleFunc("GET /v1/jobs/{id}/result", func(w http.ResponseWriter, r *http.Request) {
 		var tar bytes.Buffer
@@ -119,6 +122,9 @@ func TestFetchWaitsAndSkipsExistingDirectories(t *testing.T) {
 	}
 	if err == nil || len(got) != 3 || statuses["a"] != "fetched" || statuses["b"] != "exists" || statuses["c"] != "unsuccessful" || got[2].ID != "a" {
 		t.Fatalf("fetch: %+v %v", got, err)
+	}
+	if ids, _ := repolled.Load().([]string); !slices.Equal(ids, []string{"a"}) {
+		t.Fatalf("a wait must poll only the pending jobs, not %q", ids)
 	}
 	if data, err := os.ReadFile(filepath.Join(into, "a", "klee", "info")); err != nil || string(data) != "stats" {
 		t.Fatalf("outputs not at the job directory's root: %q %v", data, err)

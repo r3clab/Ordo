@@ -61,7 +61,7 @@ func TestBatchSharesNixImagesAndContinuesPastBadLines(t *testing.T) {
 	if fake.Builds.Load() != 1 || fake.Exports.Load() != 1 {
 		t.Fatalf("batch built %d and exported %d times", fake.Builds.Load(), fake.Exports.Load())
 	}
-	j, _ := s.job("a")
+	j := mustJob(t, s, "a")
 	if j.Spec.Image != testImageID || j.ImageOrigin == nil || j.ImageOrigin.Installable != "/src#grep" || j.ImageOrigin.Output != "/nix/store/aaaa-image.json" {
 		t.Fatalf("job image %+v %+v", j.Spec.Image, j.ImageOrigin)
 	}
@@ -104,14 +104,7 @@ func TestResultIsOutputsBesideLogs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, j := range []Job{
-		{ID: "done", State: "succeeded", Attempts: []Attempt{{ID: "attempt", ResultDir: dir}}},
-		{ID: "running", State: "running", Attempts: []Attempt{{ID: "attempt"}}},
-	} {
-		if err := s.save(j); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seed(t, s, Job{ID: "done", State: "succeeded", Attempts: []Attempt{{ID: "attempt", ResultDir: dir}}}, Job{ID: "running", State: "running", Attempts: []Attempt{{ID: "attempt"}}})
 	client := handlerClient(t, s.Handler())
 	into := t.TempDir()
 	if err := Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "done")); err != nil {

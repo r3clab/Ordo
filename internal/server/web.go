@@ -171,9 +171,8 @@ func (s *Server) serveLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown log stream", 400)
 		return
 	}
-	job, ok := s.job(r.PathValue("id"))
+	job, ok := s.lookup(w, r)
 	if !ok {
-		http.NotFound(w, r)
 		return
 	}
 	index := len(job.Attempts) - 1

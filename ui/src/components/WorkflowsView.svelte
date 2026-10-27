@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Job, JobState } from "../lib/api";
+  import type { JobState, JobSummary } from "../lib/api";
   import { colors, isActive, plural, relative, taskName } from "../lib/format";
   import { session } from "../lib/session.svelte";
   import CancelButton from "./CancelButton.svelte";
@@ -10,10 +10,10 @@
 
   const order: JobState[] = ["succeeded", "failed", "running", "collecting", "dispatching", "blocked", "queued", "cancelled", "skipped"];
 
-  function layers(jobs: Job[]): Job[][] {
+  function layers(jobs: JobSummary[]): JobSummary[][] {
     const byId = new Map(jobs.map((j) => [j.id, j]));
     const depth = new Map<string, number>();
-    const visit = (job: Job): number => {
+    const visit = (job: JobSummary): number => {
       const known = depth.get(job.id);
       if (known !== undefined) return known;
       depth.set(job.id, 0);
@@ -21,12 +21,12 @@
       depth.set(job.id, level);
       return level;
     };
-    const result: Job[][] = [];
+    const result: JobSummary[][] = [];
     for (const job of jobs) (result[visit(job)] ??= []).push(job);
     return result;
   }
 
-  function overall(jobs: Job[]): JobState {
+  function overall(jobs: JobSummary[]): JobState {
     if (jobs.some((j) => j.state === "failed")) return "failed";
     if (jobs.some((j) => j.state === "blocked")) return "blocked";
     if (jobs.some((j) => isActive(j.state))) return jobs.some((j) => j.state !== "queued") ? "running" : "queued";

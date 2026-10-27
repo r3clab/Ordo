@@ -1,9 +1,9 @@
-import type { Job, JobState } from "./api";
+import type { JobState, JobSummary, Resources } from "./api";
 
 export const terminal: JobState[] = ["succeeded", "failed", "cancelled", "skipped"];
 export const isActive = (state: JobState) => !terminal.includes(state);
 
-export const filters: { id: string; label: string; match: (job: Job) => boolean }[] = [
+export const filters: { id: string; label: string; match: (job: JobSummary) => boolean }[] = [
   { id: "all", label: "All", match: () => true },
   { id: "active", label: "Active", match: (j) => isActive(j.state) },
   { id: "succeeded", label: "Succeeded", match: (j) => j.state === "succeeded" },
@@ -33,7 +33,7 @@ export const palette: Record<string, { badge: string; dot: string }> = {
 
 export const colors = (state: string) => palette[state] ?? neutral;
 
-export function taskName(job: Job): string {
+export function taskName(job: { id: string; workflow?: string }): string {
   return job.workflow && job.id.startsWith(`${job.workflow}--`) ? job.id.slice(job.workflow.length + 2) : job.id;
 }
 
@@ -65,8 +65,7 @@ export function memory(mib: number): string {
   return mib >= 1024 ? `${(mib / 1024).toFixed(mib % 1024 === 0 ? 0 : 1)} GiB` : `${mib} MiB`;
 }
 
-export function resources(job: Job): string {
-  const { cores, memory_mib, gpus } = job.spec.resources;
+export function resources({ cores, memory_mib, gpus }: Resources): string {
   return [plural(cores, "core"), memory(memory_mib), gpus ? plural(gpus, "GPU") : ""].filter(Boolean).join(" · ");
 }
 

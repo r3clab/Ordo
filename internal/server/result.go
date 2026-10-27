@@ -167,9 +167,8 @@ func (j Job) resultDir(index int) (string, error) {
 }
 
 func (s *Server) serveResult(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.job(r.PathValue("id"))
+	j, ok := s.lookup(w, r)
 	if !ok {
-		http.NotFound(w, r)
 		return
 	}
 	dir, err := j.resultDir(len(j.Attempts) - 1)

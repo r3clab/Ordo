@@ -90,7 +90,7 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 				if admitted.err != nil {
 					result.Error = admitted.err.Error()
 				} else {
-					result.State, result.Existing = admitted.job.State, admitted.existing
+					result.State, result.Existing = admitted.state, admitted.existing
 				}
 			}
 			for _, result := range results {

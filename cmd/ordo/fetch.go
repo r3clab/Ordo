@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -53,16 +54,16 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 	}
 	client := server.Client(server.Socket(root))
 	defer client.CloseIdleConnections()
-	jobs := map[string]server.Job{}
-	poll := func() ([]server.Job, error) {
-		var list []server.Job
-		err := server.Call(ctx, client, http.MethodGet, "/v1/jobs", nil, &list)
+	jobs := map[string]server.Summary{}
+	poll := func(ids []string) ([]server.Summary, error) {
+		var list []server.Summary
+		err := server.Call(ctx, client, http.MethodGet, "/v1/jobs?"+url.Values{"id": ids}.Encode(), nil, &list)
 		for _, j := range list {
 			jobs[j.ID] = j
 		}
 		return list, err
 	}
-	list, err := poll()
+	list, err := poll(ids)
 	if err != nil {
 		return err
 	}
@@ -112,7 +113,7 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 			return ctx.Err()
 		case <-time.After(pollInterval):
 		}
-		if _, err := poll(); err != nil {
+		if _, err := poll(pending); err != nil {
 			return err
 		}
 	}

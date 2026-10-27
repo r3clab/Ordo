@@ -67,7 +67,7 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := request("POST", "/v1/jobs/example/cancel", token, "", "http://127.0.0.1:7331", nil)
-	if w.Code != 200 || !s.List()[0].CancelRequested {
+	if w.Code != 200 || !mustJob(t, s, "example").CancelRequested {
 		t.Fatal("cancel failed", w.Body.String())
 	}
 	dir := filepath.Join(s.Root, "result")
@@ -77,9 +77,7 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "stdout.log"), []byte(strings.Repeat("x", 1<<20)+"tail"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.save(Job{ID: "logs", State: "succeeded", Attempts: []Attempt{{ResultDir: dir}}}); err != nil {
-		t.Fatal(err)
-	}
+	seed(t, s, Job{ID: "logs", State: "succeeded", Attempts: []Attempt{{ResultDir: dir}}})
 	w = request("GET", "/v1/jobs/logs/logs/stdout", token, "", "", nil)
 	if w.Code != 200 || w.Body.Len() != 1<<20 || !strings.HasSuffix(w.Body.String(), "tail") || w.Header().Get("X-Ordo-Truncated") != "true" {
 		t.Fatal("bounded log read failed")

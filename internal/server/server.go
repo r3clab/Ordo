@@ -109,7 +109,39 @@ type Job struct {
 	ImageOrigin     *image.Origin     `json:"image_origin,omitempty"`
 }
 
+// Summary is how GET /v1/jobs lists a job; GET /v1/jobs/{id} returns all of it.
+type Summary struct {
+	ID              string         `json:"id"`
+	State           State          `json:"state"`
+	Workflow        string         `json:"workflow,omitempty"`
+	Image           string         `json:"image"`
+	Resources       spec.Resources `json:"resources"`
+	Worker          string         `json:"worker,omitempty"`
+	Attempts        int            `json:"attempts,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	Error           string         `json:"error,omitempty"`
+	Depends         []string       `json:"depends_on,omitempty"`
+	CancelRequested bool           `json:"cancel_requested,omitempty"`
+}
+
+func (j Job) summary() Summary {
+	s := Summary{ID: j.ID, State: j.State, Workflow: j.Workflow, Image: j.Spec.Image, Resources: j.Spec.Resources, Attempts: len(j.Attempts), CreatedAt: j.CreatedAt, Error: j.Error, Depends: j.Depends, CancelRequested: j.CancelRequested}
+	if len(j.Attempts) > 0 {
+		s.Worker = j.current().Worker
+	}
+	return s
+}
+
+// record is what stays in memory of every job, finished or not.
+type record struct {
+	Summary
+	key string
+}
+
 type Server struct {
+	// write serializes changes to jobs, records, attempts and the store, so mu guards only reading and
+	// installing them and is never held across a commit. A holder of write may read them without mu.
+	write    sync.Mutex
 	mu       sync.Mutex
 	Root     string
 	store    *state.Store
@@ -117,7 +149,10 @@ type Server struct {
 	workers  []worker.Config
 	services map[string]string
 	secrets  map[string]string
+	// jobs holds only unfinished jobs; a finished one is read back from the store.
 	jobs     map[string]Job
+	records  map[string]record
+	attempts map[string]string
 	busy     map[string]bool
 	fault    error
 	nodes    map[string]WorkerStatus
@@ -169,7 +204,7 @@ func Open(c Config) (_ *Server, err error) {
 			_ = db.Close()
 		}
 	}()
-	s := &Server{Root: root, store: db, workers: c.Workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	s := &Server{Root: root, store: db, workers: c.Workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)
 	if errors.Is(err, state.ErrNotFound) {
@@ -195,7 +230,7 @@ func Open(c Config) (_ *Server, err error) {
 				return nil, fmt.Errorf("unfinished job %s: %w", j.ID, err)
 			}
 		}
-		s.jobs[j.ID] = j
+		s.installLocked(j)
 	}
 	s.images = image.NewResolver(filepath.Join(root, "blobs"), root, c.Tools, imageCache{db})
 	return s, nil
@@ -230,40 +265,75 @@ func (j Job) clone() Job {
 	j.Attempts = slices.Clone(j.Attempts)
 	return j
 }
-func (s *Server) job(id string) (Job, bool) {
+func (s *Server) job(id string) (Job, bool, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	j, ok := s.jobs[id]
-	return j.clone(), ok
-}
-func (s *Server) List() []Job {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	jobs := make([]Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		jobs = append(jobs, j.clone())
+	j, unfinished := s.jobs[id]
+	_, known := s.records[id]
+	s.mu.Unlock()
+	if unfinished {
+		return j.clone(), true, nil
 	}
-	slices.SortFunc(jobs, func(a, b Job) int { return a.CreatedAt.Compare(b.CreatedAt) })
+	if !known {
+		return Job{}, false, nil
+	}
+	// A commit writes the store before it installs, so the store is never behind memory.
+	err := s.store.Get("job", id, &j)
+	return j, err == nil, err
+}
+
+// Filter keeps the jobs that match every field it sets, and any value within one.
+type Filter struct {
+	IDs       []string
+	States    []State
+	Workflows []string
+}
+
+func (f Filter) keeps(r Summary) bool {
+	return (len(f.States) == 0 || slices.Contains(f.States, r.State)) && (len(f.Workflows) == 0 || slices.Contains(f.Workflows, r.Workflow))
+}
+
+func (s *Server) List(f Filter) []Summary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var jobs []Summary
+	add := func(r record) {
+		if f.keeps(r.Summary) {
+			jobs = append(jobs, r.Summary)
+		}
+	}
+	if f.IDs != nil {
+		for _, id := range f.IDs {
+			if r, ok := s.records[id]; ok {
+				add(r)
+			}
+		}
+	} else {
+		for _, r := range s.records {
+			add(r)
+		}
+	}
+	slices.SortFunc(jobs, func(a, b Summary) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	return jobs
 }
 
 func (s *Server) unfinished() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var ids []string
-	for id, j := range s.jobs {
-		if !j.State.Terminal() {
-			ids = append(ids, id)
-		}
-	}
+	ids := slices.Collect(maps.Keys(s.jobs))
 	slices.SortFunc(ids, func(a, b string) int { return s.jobs[a].CreatedAt.Compare(s.jobs[b].CreatedAt) })
 	return ids
 }
+
+// save drops a write to a job that has finished meanwhile: no job leaves a terminal state, so the
+// writer worked from a copy taken before it finished.
 func (s *Server) save(j Job) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.write.Lock()
+	defer s.write.Unlock()
+	if _, unfinished := s.jobs[j.ID]; !unfinished {
+		return nil
+	}
 	s.refreshLocked(&j)
-	return s.commitLocked(j)
+	return s.commit(j)
 }
 
 // refresh adopts cancel and stop requests that arrived after reconcile copied j.
@@ -296,9 +366,9 @@ func (j Job) stopKind() StopKind {
 	return ""
 }
 
-// commitLocked writes jobs in one transaction. A failed write latches s.fault so no later mutation
-// diverges from the store.
-func (s *Server) commitLocked(jobs ...Job) error {
+// commit writes jobs in one transaction, then installs them; the caller holds s.write. A failed write
+// latches s.fault so no later mutation diverges from the store.
+func (s *Server) commit(jobs ...Job) error {
 	if s.fault != nil || len(jobs) == 0 {
 		return s.fault
 	}
@@ -310,14 +380,28 @@ func (s *Server) commitLocked(jobs ...Job) error {
 		}
 		return nil
 	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err != nil {
 		s.fault = err
 		return err
 	}
 	for _, j := range jobs {
-		s.jobs[j.ID] = j.clone()
+		s.installLocked(j)
 	}
 	return nil
+}
+
+func (s *Server) installLocked(j Job) {
+	s.records[j.ID] = record{Summary: j.summary(), key: j.Key}
+	for _, at := range j.Attempts {
+		s.attempts[at.ID] = j.ID
+	}
+	if j.State.Terminal() {
+		delete(s.jobs, j.ID)
+	} else {
+		s.jobs[j.ID] = j.clone()
+	}
 }
 
 type staged[V any] struct {
@@ -467,40 +551,43 @@ func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	admitted := s.admit([]Job{j})[0]
-	return admitted.job, admitted.err
+	if err := s.admit([]Job{j})[0].err; err != nil {
+		return Job{}, err
+	}
+	j, _, err = s.job(j.ID)
+	return j, err
 }
 
 type admission struct {
-	job      Job
+	state    State
 	existing bool
 	err      error
 }
 
 func (s *Server) admit(jobs []Job) []admission {
 	out := make([]admission, len(jobs))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	pending := map[string]Job{}
+	s.write.Lock()
+	defer s.write.Unlock()
+	pending := map[string]record{}
 	fresh := []Job{}
 	for i, j := range jobs {
 		j.Key = jobKey(j)
-		old, ok := s.jobs[j.ID]
+		old, ok := s.records[j.ID]
 		if !ok {
 			old, ok = pending[j.ID]
 		}
 		switch {
 		case !ok:
-			pending[j.ID] = j
+			pending[j.ID] = record{Summary: j.summary(), key: j.Key}
 			fresh = append(fresh, j)
-			out[i].job = j
-		case old.Key != j.Key:
+			out[i].state = j.State
+		case old.key != j.Key:
 			out[i].err = errors.New("job ID already has a different immutable specification")
 		default:
-			out[i] = admission{job: old, existing: true}
+			out[i] = admission{state: old.State, existing: true}
 		}
 	}
-	if err := s.commitLocked(fresh...); err != nil {
+	if err := s.commit(fresh...); err != nil {
 		for i := range out {
 			out[i].err = cmp.Or(out[i].err, err)
 		}
@@ -569,14 +656,31 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", cancel(false))
 	mux.HandleFunc("POST /v1/workflows/{id}/cancel", cancel(true))
 	mux.HandleFunc("POST /v1/jobs/{id}/stop", StopHandler(s.Stop))
-	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) { WriteJSON(w, http.StatusOK, s.List()) })
-	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		j, ok := s.job(r.PathValue("id"))
-		if !ok {
-			http.NotFound(w, r)
-			return
+	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		f := Filter{IDs: query["id"], Workflows: query["workflow"]}
+		for _, state := range query["state"] {
+			f.States = append(f.States, State(state))
 		}
-		WriteJSON(w, http.StatusOK, j)
+		WriteJSON(w, http.StatusOK, s.List(f))
+	})
+	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		j, ok := s.lookup(w, r)
+		if ok {
+			WriteJSON(w, http.StatusOK, j)
+		}
 	})
 	return mux
+}
+
+// lookup answers 404 or 500 itself when it finds no job.
+func (s *Server) lookup(w http.ResponseWriter, r *http.Request) (Job, bool) {
+	j, ok, err := s.job(r.PathValue("id"))
+	switch {
+	case err != nil:
+		http.Error(w, err.Error(), 500)
+	case !ok:
+		http.NotFound(w, r)
+	}
+	return j, ok && err == nil
 }

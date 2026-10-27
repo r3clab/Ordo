@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,7 +56,10 @@ type fakeContainer struct {
 }
 
 // fakeHost is a worker with four single-thread cores whose containers run only when a test says so.
+// Its methods lock mu, as a pass runs launches and collections beside it; a test reads and changes it
+// only between ticks.
 type fakeHost struct {
+	mu         sync.Mutex
 	server     string
 	boot       string
 	machine    string
@@ -67,6 +72,8 @@ type fakeHost struct {
 	// lose is returned by the next launch after it creates the container; refuse, before.
 	lose, refuse error
 	broken       error
+	// upload fails the next EnsureImage.
+	upload error
 }
 
 func newFakeHost(server string) *fakeHost {
@@ -88,6 +95,8 @@ func (f *fakeHost) Probe(context.Context) (worker.Probe, error) {
 }
 
 func (f *fakeHost) Poll(context.Context) (worker.Snapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	snap := worker.Snapshot{BootID: f.boot, Now: f.now()}
 	for _, c := range f.containers {
 		snap.Containers = append(snap.Containers, c.Container)
@@ -95,13 +104,21 @@ func (f *fakeHost) Poll(context.Context) (worker.Snapshot, error) {
 	return snap, nil
 }
 
-func (f *fakeHost) EnsureImage(context.Context, string, string) error { return nil }
+func (f *fakeHost) EnsureImage(context.Context, string, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	err := f.upload
+	f.upload = nil
+	return err
+}
 
 func (f *fakeHost) EnsureInput(context.Context, string, string) error { return nil }
 
 func (f *fakeHost) GPUBusy(context.Context, []pool.GPU) ([]string, error) { return nil, nil }
 
 func (f *fakeHost) Launch(_ context.Context, l worker.Launch) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.refuse; err != nil {
 		f.refuse = nil
 		return "", err
@@ -125,12 +142,16 @@ func (f *fakeHost) exit(attempt string, code int) {
 }
 
 func (f *fakeHost) Stop(_ context.Context, attempt string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.stops = append(f.stops, attempt)
 	f.exit(attempt, 137)
 	return nil
 }
 
 func (f *fakeHost) Inspect(_ context.Context, attempt string) (podman.Inspection, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var in podman.Inspection
 	c, ok := f.containers[attempt]
 	if !ok {
@@ -143,6 +164,8 @@ func (f *fakeHost) Inspect(_ context.Context, attempt string) (podman.Inspection
 }
 
 func (f *fakeHost) Collect(_ context.Context, attempt, dir string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.collects++
 	if f.broken != nil {
 		return f.broken
@@ -159,6 +182,8 @@ func (f *fakeHost) Collect(_ context.Context, attempt, dir string) error {
 }
 
 func (f *fakeHost) Remove(_ context.Context, attempt string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.containers, attempt)
 	f.removed = append(f.removed, attempt)
 	return nil
@@ -184,12 +209,18 @@ func submit(t *testing.T, s *Server, r Request) {
 	}
 }
 
+// tick waits for the pass's background steps, as the next pass would find them still busy.
 func tick(s *Server, cfg worker.Config, h *fakeHost) error {
 	probe, err := h.Probe(context.Background())
 	if err != nil {
 		return err
 	}
-	return s.pass(context.Background(), cfg, h, &probe)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	bg := &steps{cancel: cancel}
+	err = s.pass(ctx, cfg, h, &probe, bg)
+	bg.wg.Wait()
+	return cmp.Or(err, context.Cause(ctx))
 }
 
 func mustTick(t *testing.T, s *Server, cfg worker.Config, h *fakeHost) {
@@ -199,11 +230,21 @@ func mustTick(t *testing.T, s *Server, cfg worker.Config, h *fakeHost) {
 	}
 }
 
+// seed commits jobs as they are, which save would refuse for a job it does not know.
+func seed(t *testing.T, s *Server, jobs ...Job) {
+	t.Helper()
+	s.write.Lock()
+	defer s.write.Unlock()
+	if err := s.commit(jobs...); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mustJob(t *testing.T, s *Server, id string) Job {
 	t.Helper()
-	j, ok := s.job(id)
-	if !ok {
-		t.Fatalf("job %s missing", id)
+	j, ok, err := s.job(id)
+	if !ok || err != nil {
+		t.Fatalf("job %s missing: %v", id, err)
 	}
 	return j
 }
@@ -405,7 +446,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 		}
 	}
 	submit(t, s, req)
-	listed, _ := json.Marshal(s.List())
+	listed, _ := json.Marshal(mustJob(t, s, "agent"))
 	if strings.Contains(string(listed), "hunter2") || !slices.Equal(mustJob(t, s, "agent").Spec.Secrets, []string{"TOKEN"}) {
 		t.Fatalf("jobs must name secrets without values: %s", listed)
 	}
@@ -530,5 +571,69 @@ func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
 	f.tick(t)
 	if len(f.h.containers) != 0 {
 		t.Fatalf("finished attempt's container not swept: %v", f.h.containers)
+	}
+}
+
+func TestFinishedJobsLeaveMemoryAndListAsSummaries(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	cfg := testWorker("worker")
+	s := open(t, state, []worker.Config{cfg}, nil)
+	h := newFakeHost(s.id)
+	submit(t, s, request("done"))
+	submit(t, s, request("cancelled"))
+	stale := mustJob(t, s, "cancelled")
+	if err := s.Cancel("cancelled", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.save(stale); err != nil {
+		t.Fatal(err)
+	}
+	if mustJob(t, s, "cancelled").State != Cancelled {
+		t.Fatal("a stale copy revived a cancelled job")
+	}
+	mustTick(t, s, cfg, h)
+	done := mustJob(t, s, "done")
+	h.exit(done.current().ID, 0)
+	mustTick(t, s, cfg, h)
+	if len(s.jobs) != 0 {
+		t.Fatalf("finished jobs stayed in memory: %v", slices.Collect(maps.Keys(s.jobs)))
+	}
+	if done = mustJob(t, s, "done"); done.State != Succeeded || done.current().Result == nil {
+		t.Fatalf("finished job did not load from the store: %+v", done)
+	}
+	succeeded := s.List(Filter{States: []State{Succeeded}})
+	if len(succeeded) != 1 || succeeded[0].ID != "done" || succeeded[0].Worker != "worker" || succeeded[0].Attempts != 1 {
+		t.Fatalf("state filter: %+v", succeeded)
+	}
+	if listed := s.List(Filter{IDs: []string{"cancelled", "missing"}}); len(listed) != 1 || listed[0].State != Cancelled {
+		t.Fatalf("ID filter: %+v", listed)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/jobs?state=succeeded&state=cancelled", nil))
+	var listed []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil || len(listed) != 2 || listed[0]["spec"] != nil {
+		t.Fatalf("GET /v1/jobs must list summaries: %s", w.Body.String())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open(t, state, []worker.Config{cfg}, nil)
+	defer func() { _ = s.Close() }()
+	if len(s.jobs) != 0 || len(s.List(Filter{})) != 2 || mustJob(t, s, "done").State != Succeeded {
+		t.Fatal("a restart lost finished jobs or kept them in memory")
+	}
+}
+
+func TestFailedUploadRequeuesWithoutAnAttempt(t *testing.T) {
+	f := newFixture(t)
+	submit(t, f.s, request("job"))
+	f.h.upload = errors.New("disk full")
+	f.tick(t)
+	if j := mustJob(t, f.s, "job"); j.State != Queued || len(j.Attempts) != 0 || j.Error != "disk full" {
+		t.Fatalf("failed upload must requeue without an attempt: %+v", j)
+	}
+	f.tick(t)
+	if j := mustJob(t, f.s, "job"); j.State != Running || len(j.Attempts) != 1 {
+		t.Fatalf("requeued job did not launch: %+v", j)
 	}
 }

@@ -1,8 +1,11 @@
-import { ApiError, message, request, type Job, type WorkerStatus } from "./api";
+import { ApiError, message, request, type Job, type JobSummary, type WorkerStatus } from "./api";
 
 class Session {
   token = $state("");
-  jobs = $state.raw<Job[]>([]);
+  jobs = $state.raw<JobSummary[]>([]);
+  // The list holds summaries; the job open in the detail view is fetched whole.
+  selected = $state<string | null>(null);
+  detail = $state.raw<Job | null>(null);
   workers = $state.raw<WorkerStatus[]>([]);
   error = $state("");
   notice = $state("");
@@ -36,6 +39,8 @@ class Session {
     clearInterval(this.#timer);
     this.token = "";
     this.jobs = [];
+    this.selected = null;
+    this.detail = null;
     this.workers = [];
     this.updated = null;
     this.error = reason;
@@ -59,7 +64,7 @@ class Session {
     if (!this.connected || this.#refreshing) return;
     this.#refreshing = true;
     try {
-      const [jobs, workers] = await Promise.all([this.call("jobs").then((r) => r.json()), this.call("workers").then((r) => r.json())]);
+      const [jobs, workers] = await Promise.all([this.call("jobs").then((r) => r.json()), this.call("workers").then((r) => r.json()), this.#loadDetail()]);
       this.jobs = jobs ?? [];
       this.workers = workers ?? [];
       this.updated = new Date();
@@ -69,6 +74,23 @@ class Session {
     } finally {
       this.#refreshing = false;
     }
+  }
+
+  async select(id: string | null) {
+    this.selected = id;
+    this.detail = null;
+    try {
+      await this.#loadDetail();
+    } catch (error) {
+      if (this.connected) this.error = message(error);
+    }
+  }
+
+  async #loadDetail() {
+    const id = this.selected;
+    if (!id) return;
+    const job: Job = await this.call(`jobs/${encodeURIComponent(id)}`).then((r) => r.json());
+    if (this.selected === id) this.detail = job;
   }
 
   flash(text: string) {

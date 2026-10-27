@@ -16,7 +16,7 @@
   const facts = $derived(
     [
       ["Image", job.spec.image],
-      ["Resources", resources(job)],
+      ["Resources", resources(job.spec.resources)],
       ["Timeout", job.spec.timeout_seconds ? `${job.spec.timeout_seconds}s` : "None"],
       ["Retries", `${job.retry?.task ?? 0} task · ${job.retry?.infrastructure ?? 1} infrastructure`],
       ["Created", new Date(job.created_at).toLocaleString()],

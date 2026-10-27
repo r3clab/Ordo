@@ -51,7 +51,7 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 		bad := flow
 		bad.Tasks = append([]Step(nil), flow.Tasks...)
 		change(&bad.Tasks[1])
-		if _, err := s.SubmitWorkflow(context.Background(), bad); err == nil || len(s.List()) != 0 {
+		if _, err := s.SubmitWorkflow(context.Background(), bad); err == nil || len(s.List(Filter{})) != 0 {
 			t.Fatal("published partial workflow")
 		}
 	}
@@ -67,7 +67,7 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	if err := s.finish(j, "task"); err != nil {
 		t.Fatal(err)
 	}
-	j = s.List()[0]
+	j = mustJob(t, s, j.ID)
 	if j.State != "queued" {
 		t.Fatal("retry omitted")
 	}
@@ -75,7 +75,7 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	if err := s.finish(j, "task"); err != nil {
 		t.Fatal(err)
 	}
-	if s.List()[0].State != "failed" {
+	if mustJob(t, s, j.ID).State != "failed" {
 		t.Fatal("unbounded retry")
 	}
 	dependent := jobs[1]

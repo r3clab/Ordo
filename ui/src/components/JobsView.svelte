@@ -12,7 +12,7 @@
     const needle = query.trim().toLowerCase();
     return session.jobs
       .filter(filter.match)
-      .filter((j) => !needle || [j.id, j.workflow ?? "", j.spec.image, j.attempts?.at(-1)?.worker ?? ""].some((field) => field.toLowerCase().includes(needle)))
+      .filter((j) => !needle || [j.id, j.workflow ?? "", j.image, j.worker ?? ""].some((field) => field.toLowerCase().includes(needle)))
       .toReversed();
   });
 </script>
@@ -54,12 +54,11 @@
           </thead>
           <tbody class="divide-y divide-zinc-100 dark:divide-zinc-800">
             {#each visible as job (job.id)}
-              {@const attempt = job.attempts?.at(-1)}
               <tr data-job-id={job.id} class="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50" onclick={() => onselect(job.id)}>
                 <td class="max-w-80 px-4 py-3">
                   <button class="block max-w-full truncate text-left font-medium hover:underline">{taskName(job)}</button>
                   <div class="muted truncate text-xs">
-                    {#if job.workflow}<span class="font-medium text-zinc-600 dark:text-zinc-300">{job.workflow}</span> · {/if}<span class="font-mono">{shortImage(job.spec.image)}</span>
+                    {#if job.workflow}<span class="font-medium text-zinc-600 dark:text-zinc-300">{job.workflow}</span> · {/if}<span class="font-mono">{shortImage(job.image)}</span>
                   </div>
                 </td>
                 <td class="px-4 py-3">
@@ -67,9 +66,9 @@
                   {#if job.error}<p class="mt-1 max-w-64 truncate text-xs text-rose-600 dark:text-rose-400" title={job.error}>{job.error}</p>{/if}
                 </td>
                 <td class="hidden px-4 py-3 md:table-cell">
-                  {#if attempt}{attempt.worker}<span class="text-zinc-400"> · attempt {job.attempts?.length}</span>{:else}<span class="text-zinc-400">—</span>{/if}
+                  {#if job.worker}{job.worker}<span class="text-zinc-400"> · attempt {job.attempts}</span>{:else}<span class="text-zinc-400">—</span>{/if}
                 </td>
-                <td class="hidden px-4 py-3 text-zinc-600 lg:table-cell dark:text-zinc-300">{resources(job)}</td>
+                <td class="hidden px-4 py-3 text-zinc-600 lg:table-cell dark:text-zinc-300">{resources(job.resources)}</td>
                 <td class="muted hidden px-4 py-3 whitespace-nowrap sm:table-cell" title={new Date(job.created_at).toLocaleString()}>{relative(job.created_at)}</td>
               </tr>
             {/each}

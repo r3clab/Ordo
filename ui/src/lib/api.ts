@@ -73,6 +73,20 @@ export interface Job {
   cancel_requested?: boolean;
 }
 
+export interface JobSummary {
+  id: string;
+  state: JobState;
+  workflow?: string;
+  image: string;
+  resources: Resources;
+  worker?: string;
+  attempts?: number;
+  created_at: string;
+  error?: string;
+  depends_on?: string[];
+  cancel_requested?: boolean;
+}
+
 export interface WorkerStatus {
   host: string;
   connected: boolean;
