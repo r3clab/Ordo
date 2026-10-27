@@ -36,19 +36,10 @@ func TestSandboxValidation(t *testing.T) {
 	}
 }
 
-func TestNormalizeSortsMatchTags(t *testing.T) {
-	m := Spec{Match: &Match{Tags: []string{"l40s", "fast"}}}.Normalize().Match
-	if !slices.Equal(m.Tags, []string{"fast", "l40s"}) {
-		t.Fatal("tag order changes job identity", m.Tags)
-	}
-}
-
-func TestMatchValidation(t *testing.T) {
-	if err := (Match{GPUModel: "L40S"}).Validate(Resources{Cores: 1, MemoryMiB: 128}); err == nil {
-		t.Fatal("GPU matching without GPU request accepted")
-	}
-	if err := (Match{Arch: "riscv64"}).Validate(Resources{Cores: 1, MemoryMiB: 128}); err == nil {
-		t.Fatal("unknown architecture accepted")
+func TestNormalizeSortsTags(t *testing.T) {
+	tags := Spec{Tags: []string{"l40s", "fast"}}.Normalize().Tags
+	if !slices.Equal(tags, []string{"fast", "l40s"}) {
+		t.Fatal("tag order changes job identity", tags)
 	}
 }
 

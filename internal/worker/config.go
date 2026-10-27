@@ -8,6 +8,7 @@ import (
 	"net"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -51,6 +52,15 @@ func (c Config) Validate() error {
 		return errors.New("tags must be distinct names")
 	}
 	return nil
+}
+
+func (c Config) Carries(tags []string) bool {
+	for _, tag := range tags {
+		if !slices.Contains(c.Tags, tag) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c Config) runDir(attempt string) string { return path.Join(c.StateDir, "runs", attempt) }

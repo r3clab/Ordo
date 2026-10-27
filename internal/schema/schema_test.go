@@ -35,7 +35,7 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 	tagged := []worker.Config{{Tags: []string{"l40s"}}}
 	for _, valid := range []string{
 		`{` + base + `,"image":"localhost/klee:1"}`,
-		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"match":{"arch":"amd64","tags":["l40s"]}}`,
+		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"tags":["l40s"]}`,
 		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"},"secrets":{"TOKEN":"x"},"inputs":{"corpus":"/data"}}`,
 	} {
 		if err := validate(valid); err != nil {
@@ -66,9 +66,8 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{` + base + `,"image":"x","timeout_seconds":31536001}`,
 		`{"id":"bad id","image":"x","resources":{"cores":1,"memory_mib":1}}`,
 		`{"id":"a","image":"x","resources":{"cores":0,"memory_mib":1}}`,
-		`{` + base + `,"image":"x","match":{"arch":"riscv64"}}`,
-		`{` + base + `,"image":"x","match":{"tags":["l40s","l40s"]}}`,
-		`{` + base + `,"image":"x","match":{"tags":["bad tag"]}}`,
+		`{` + base + `,"image":"x","tags":["l40s","l40s"]}`,
+		`{` + base + `,"image":"x","tags":["bad tag"]}`,
 		`{` + base + `,"image":{"nix":"/src#a\nb"}}`,
 		`{` + base + `,"image":{"nix":"/` + strings.Repeat("x", image.MaxInstallableBytes) + `"}}`,
 		`{` + base + `,"image":"x","env":{"MODE":"a\u0000b"}}`,

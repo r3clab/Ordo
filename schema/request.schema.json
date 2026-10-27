@@ -172,45 +172,16 @@
       },
       "additionalProperties": false
     },
-    "match": {
+    "tags": {
       "type": [
         "null",
-        "object"
+        "array"
       ],
-      "properties": {
-        "arch": {
-          "type": "string",
-          "enum": [
-            "amd64",
-            "arm64"
-          ]
-        },
-        "cpu_model": {
-          "type": "string"
-        },
-        "gpu_model": {
-          "type": "string"
-        },
-        "min_gpu_memory_mib": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "gpu_driver": {
-          "type": "string"
-        },
-        "tags": {
-          "type": [
-            "null",
-            "array"
-          ],
-          "items": {
-            "type": "string",
-            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
-          },
-          "uniqueItems": true
-        }
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
       },
-      "additionalProperties": false
+      "uniqueItems": true
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

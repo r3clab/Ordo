@@ -7,7 +7,7 @@
 </h1>
 
 Ordo makes it easy to schedule reproducible evaluations across SSH-accessible servers.
-Exclusive CPU/GPU allocations and hardware matching support fair comparisons, while a durable queue, JSON workflows, and a local web UI simplify task management.
+Exclusive CPU/GPU allocations and worker tags support fair comparisons, while a durable queue, JSON workflows, and a local web UI simplify task management.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
 ## How it works
@@ -55,7 +55,7 @@ Fairness means giving compared runs the same declared hardware resources, not fa
 
 - Assign exclusive CPU cores and GPU devices where requested, with consistent memory budgets.
   Concurrent runs must not share their allocated cores or GPUs.
-- Let users define hardware-matching requirements per evaluation: relaxed CPU-model matching may be acceptable for some experiments; others require identical hardware configurations.
+- Let users define hardware requirements per evaluation with worker tags: a broad tag may suit some experiments; others need a tag shared only by identical machines.
 - Pin container images by digest and record code, input, configuration, and seed versions where applicable.
 - Preserve worker details, resource assignments, timings, exit status, logs, and outputs.
   Keep failed and retried attempts visible.
@@ -181,7 +181,7 @@ Configure a worker's optional `gpus` array with full NVIDIA GPU UUIDs.
 Request `resources.gpus` in queue/workflow JSON.
 An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, and unsupported device controls are rejected.
 
-- The server reads UUID/model/memory/driver information with `nvidia-smi` and generates a private CDI specification under `STATE/cdi` with `nvidia-ctk` on the worker.
+- The server reads UUID/model/memory information with `nvidia-smi` and generates a private CDI specification under `STATE/cdi` with `nvidia-ctk` on the worker.
   No global CDI registration or host configuration change is needed.
 - GPU reservations are exclusive and durable.
   A configured GPU missing from the worker keeps that worker offline.
@@ -190,35 +190,21 @@ An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, 
   No privileged mode or device-isolation fallback is used.
 - GPU images must work with the injected driver libraries; NVIDIA CDI supplies `NVIDIA_CTK_LIBCUDA_DIR`.
   The nix2container GPU fixture uses this directory to load `libcuda.so.1`.
-- `tests/gpu-smoke.sh` verifies exactly one visible GPU UUID, a tiny CUDA allocation/set/copy, exclusive allocation, hardware matching, and server-restart recovery.
+- `tests/gpu-smoke.sh` verifies exactly one visible GPU UUID, a tiny CUDA allocation/set/copy, exclusive allocation, tag matching, and server-restart recovery.
   Run it only against a GPU confirmed free of existing processes.
 
-## Hardware matching
+## Worker tags
 
-Queue/workflow tasks accept an optional `match` object:
-
-```json
-{"match":{"arch":"amd64","cpu_model":"AMD EPYC 9554 64-Core Processor","gpu_model":"NVIDIA L40S","min_gpu_memory_mib":40000,"gpu_driver":"580.178.04"}}
-```
-
-Omitted fields are relaxed.
-Model/driver strings match exactly; architecture is `amd64` or `arm64`.
-GPU constraints require a positive GPU count and filter the devices actually allocated, not merely the host inventory.
-A job with no eligible worker remains queued; it never falls back to weaker hardware.
-Matching uses the worker's reported inventory and does not control clocks, thermal state, shared memory bandwidth, or unrelated host activity.
-
-### Worker tags
-
-Hardware fields match exact strings, so they cannot group differing machines.
-Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-class"]` in each of their `workers.json` entries, then require it in `match.tags`:
+Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-class"]` in each of their `workers.json` entries, then require it in the task's `tags`:
 
 ```json
-{"resources":{"cores":1,"gpus":2,"memory_mib":8192},"match":{"tags":["l40s-class"]}}
+{"resources":{"cores":1,"gpus":2,"memory_mib":8192},"tags":["l40s-class"]}
 ```
 
 - A job runs only on workers carrying every tag it lists; jobs without tags still run on any worker.
-- Tags combine with the hardware fields above.
 - Submission rejects tags that no single configured worker carries together.
+- A job whose tagged workers are full remains queued; it never falls back to an untagged worker.
+- A tag describes the whole worker, including every GPU in its `gpus` list.
 - Tags are server policy kept in `workers.json`; changing them needs a server restart.
 
 ## Task environment
@@ -288,7 +274,7 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
 ## Typed specification
 
 `ordo schema [request|workflow]` prints the JSON Schema of a job request or workflow, generated from the Go types; `schema/` holds committed copies for editors and other tools.
-The schema covers names, enums, and limits; rules spanning fields, such as GPU matching or input conflicts, are checked only on submission.
+The schema covers names, enums, and limits; rules spanning fields, such as input conflicts, are checked only on submission.
 
 The flake's `lib` builds requests at Nix evaluation time, checking them against the patterns, enums, and limits it reads from `schema/`:
 
@@ -307,7 +293,7 @@ in
 pkgs.writeText "tasks.jsonl" (toJSONL tasks)
 ```
 
-- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`, `match.minGPUMemoryMiB`) and returns the request attrset.
+- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`) and returns the request attrset.
   `mkStep` adds `dependsOn`, `from`, and `matrix`, and `mkWorkflow` combines steps.
 - A derivation `image` becomes `{"nix": "/nix/store/….drv^*"}`: the task file keeps the `.drv` alive without building the image, which the server builds on submission.
   The `.drv` must be in the server's Nix store, so evaluate on the server host or `nix copy --derivation` it there.

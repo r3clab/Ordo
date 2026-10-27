@@ -25,7 +25,6 @@ type GPU struct {
 	Index     int    `json:"index"`
 	Model     string `json:"model"`
 	MemoryMiB int64  `json:"memory_mib"`
-	Driver    string `json:"driver"`
 }
 
 type Allocation struct {
@@ -34,8 +33,8 @@ type Allocation struct {
 	GPUs      []string `json:"gpus,omitempty"`
 }
 
-// allocate takes whole physical cores, so a task never shares an SMT sibling with another task.
-func allocate(h Hardware, req spec.Resources, held []Allocation) (Allocation, error) {
+// Plan takes whole physical cores, so a task never shares an SMT sibling with another task.
+func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error) {
 	used := map[int]bool{}
 	gpuUsed := map[string]bool{}
 	remaining := h.MemoryMiB
@@ -81,30 +80,4 @@ func allocate(h Hardware, req spec.Resources, held []Allocation) (Allocation, er
 		return Allocation{}, ErrCapacity
 	}
 	return a, nil
-}
-
-// matched keeps only the GPUs a match accepts, so allocation never hands out a weaker device.
-func matched(h Hardware, m *spec.Match) (Hardware, bool) {
-	if m == nil {
-		return h, true
-	}
-	if (m.Arch != "" && h.Arch != m.Arch) || (m.CPUModel != "" && h.CPUModel != m.CPUModel) {
-		return h, false
-	}
-	all := h.GPUs
-	h.GPUs = nil
-	for _, gpu := range all {
-		if (m.GPUModel == "" || gpu.Model == m.GPUModel) && gpu.MemoryMiB >= m.MinGPUMemoryMiB && (m.GPUDriver == "" || gpu.Driver == m.GPUDriver) {
-			h.GPUs = append(h.GPUs, gpu)
-		}
-	}
-	return h, true
-}
-
-func Plan(h Hardware, s spec.Spec, held []Allocation) (Allocation, error) {
-	filtered, ok := matched(h, s.Match)
-	if !ok {
-		return Allocation{}, ErrCapacity
-	}
-	return allocate(filtered, s.Resources, held)
 }

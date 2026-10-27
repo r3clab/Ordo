@@ -30,13 +30,13 @@ Browser logs and a screenshot join the evidence directory.
 The headless browser uses a private profile and disabled sandbox only for this local test; no browser/runtime dependency is added to Ordo.
 Go tests separately cover missing/invalid bearer tokens, cross-origin requests, hostile Host headers, token permissions, and bounded log reads.
 
-## GPU and hardware matching
+## GPU and tag matching
 
 Build the dedicated `path:./tests#gpu-image.copyTo` fixture as an OCI archive and supply its configuration digest as `ORDO_TEST_IMAGE`.
 With the same environment variables, run `bash tests/gpu-smoke.sh HOST FULL_GPU_UUID` only after checking current compute and graphics processes.
 The script captures inventories; dispatch also refuses devices with existing processes.
 It uses one GPU, one physical core, and 256 MiB for a tiny CUDA allocation/set/copy and checks exactly one visible UUID.
-A second GPU job stays queued while the first holds the device, a job matching other hardware never dispatches, and a server SIGKILL/restart leaves the GPU job with one attempt.
+A second GPU job stays queued while the first holds the device, submission rejects a tag no worker carries, and a server SIGKILL/restart leaves the GPU job with one attempt.
 No sustained GPU workload or global CDI registration is used.
 
 ## Cleanup

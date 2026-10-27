@@ -17,7 +17,6 @@ export interface GPU {
   index: number;
   model: string;
   memory_mib: number;
-  driver: string;
 }
 
 export interface Hardware {
@@ -35,7 +34,7 @@ export interface Spec {
   resources: Resources;
   inputs?: Record<string, string>;
   timeout_seconds?: number;
-  match?: { tags?: string[] };
+  tags?: string[];
 }
 
 export interface Result {

@@ -18,8 +18,7 @@ let
       capAdd = [ "NET_ADMIN" ];
       services = [ "model" ];
       retry.task = 1;
-      match.arch = "amd64";
-      match.tags = [ "l40s" ];
+      tags = [ "l40s" ];
     })
     (mkTask {
       id = "local";
@@ -82,7 +81,7 @@ let
       }
     );
     service = mkTask (valid // { services = [ "bad name" ]; });
-    tag = mkTask (valid // { match.tags = [ "bad tag" ]; });
+    tag = mkTask (valid // { tags = [ "bad tag" ]; });
     retry = mkTask (valid // { retry.task = 11; });
     stepId = mkStep (step // { id = pkgs.lib.strings.replicate 33 "s"; });
     workflowId = mkWorkflow {

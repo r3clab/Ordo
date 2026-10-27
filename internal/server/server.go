@@ -35,7 +35,7 @@ type Request struct {
 	Services       []string          `json:"services,omitempty"`
 	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
 	Retry          RetryPolicy       `json:"retry,omitempty"`
-	Match          *spec.Match       `json:"match,omitempty"`
+	Tags           []string          `json:"tags,omitempty"`
 }
 
 type Failure string
@@ -199,6 +199,9 @@ func Open(root string, workers []worker.Config, services map[string]string, tool
 				if _, ok := services[name]; !ok {
 					return nil, fmt.Errorf("configuration removes service %s, which unfinished job %s uses", name, j.ID)
 				}
+			}
+			if !slices.ContainsFunc(workers, func(w worker.Config) bool { return w.Carries(j.Spec.Tags) }) {
+				return nil, fmt.Errorf("configuration leaves no worker with all tags %q, which unfinished job %s uses", j.Spec.Tags, j.ID)
 			}
 		}
 		s.jobs[j.ID] = j
@@ -398,20 +401,16 @@ func (r Request) Check(services map[string]string, workers []worker.Config) erro
 			return fmt.Errorf("service %q is unknown; configure it with ordo server --service", name)
 		}
 	}
-	if r.Match != nil && !slices.ContainsFunc(workers, func(w worker.Config) bool { return carriesTags(w, r.Match) }) {
-		return fmt.Errorf("no configured worker has all match tags %q; add them to a worker's \"tags\" in the ordo server --workers file", r.Match.Tags)
+	if len(r.Tags) > 0 && !slices.ContainsFunc(workers, func(w worker.Config) bool { return w.Carries(r.Tags) }) {
+		return fmt.Errorf("no configured worker has all tags %q; add them to a worker's \"tags\" in the ordo server --workers file", r.Tags)
 	}
 	return nil
-}
-
-func carriesTags(w worker.Config, m *spec.Match) bool {
-	return m == nil || !slices.ContainsFunc(m.Tags, func(tag string) bool { return !slices.Contains(w.Tags, tag) })
 }
 
 func (r Request) nix() bool { return r.Image.IsNix() }
 
 func (r Request) spec() spec.Spec {
-	return spec.Spec{Args: r.Args, Resources: r.Resources, Sandbox: r.Sandbox, Secrets: slices.Collect(maps.Keys(r.Secrets)), Services: r.Services, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}.Normalize()
+	return spec.Spec{Args: r.Args, Resources: r.Resources, Sandbox: r.Sandbox, Secrets: slices.Collect(maps.Keys(r.Secrets)), Services: r.Services, TimeoutSeconds: r.TimeoutSeconds, Tags: r.Tags}.Normalize()
 }
 
 // prepare also takes the workflow inputs a job will import, so the launch size check counts them.
@@ -451,7 +450,7 @@ func (s *Server) prepare(ctx context.Context, r Request, from map[string]string,
 		worst.Inputs[name] = strings.Repeat("0", 64)
 	}
 	for _, w := range s.workers {
-		if carriesTags(w, j.Spec.Match) {
+		if w.Carries(j.Spec.Tags) {
 			if err := w.CheckLaunch(worst, r.Secrets); err != nil {
 				return Job{}, err
 			}

@@ -285,11 +285,11 @@ func TestParseProbe(t *testing.T) {
 
 func TestGPUParsers(t *testing.T) {
 	id := "GPU-11111111-1111-1111-1111-111111111111"
-	gpus, err := parseGPUs([]byte("0, "+id+", NVIDIA L40S, 46068, 580.1, Disabled\n1, GPU-other, X, 1, 1, Disabled\n"), []string{id})
+	gpus, err := parseGPUs([]byte("0, "+id+", NVIDIA L40S, 46068, Disabled\n1, GPU-other, X, 1, Disabled\n"), []string{id})
 	if err != nil || len(gpus) != 1 || gpus[0].Model != "NVIDIA L40S" || gpus[0].MemoryMiB != 46068 {
 		t.Fatalf("gpus %+v, %v", gpus, err)
 	}
-	if _, err := parseGPUs([]byte("0, "+id+", X, 1, 1, Enabled\n"), []string{id}); err == nil {
+	if _, err := parseGPUs([]byte("0, "+id+", X, 1, Enabled\n"), []string{id}); err == nil {
 		t.Fatal("accepted MIG")
 	}
 	if err := checkCDI([]byte(`{"kind":"nvidia.com/gpu","devices":[{"name":"`+id+`"}]}`), []string{id}); err != nil {

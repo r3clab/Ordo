@@ -259,18 +259,18 @@ func (j Job) stop(started, now time.Time) (StopKind, string) {
 }
 
 func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
-	if v.fault != "" || !carriesTags(v.cfg, j.Spec.Match) {
+	if v.fault != "" || !v.cfg.Carries(j.Spec.Tags) {
 		return false, nil
 	}
 	hw := v.probe.Hardware
-	allocation, err := pool.Plan(hw, j.Spec, v.held)
+	allocation, err := pool.Plan(hw, j.Spec.Resources, v.held)
 	if err == nil && j.Spec.Resources.GPUs > 0 {
 		// A device busy outside Ordo would break the exclusive allocation the job asks for.
 		var busy []string
 		if busy, err = v.host.GPUBusy(ctx, hw.GPUs); err != nil {
 			return false, err
 		}
-		allocation, err = pool.Plan(hw, j.Spec, append(slices.Clone(v.held), pool.Allocation{GPUs: busy}))
+		allocation, err = pool.Plan(hw, j.Spec.Resources, append(slices.Clone(v.held), pool.Allocation{GPUs: busy}))
 	}
 	if errors.Is(err, pool.ErrCapacity) {
 		return false, nil

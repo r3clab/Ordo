@@ -136,18 +136,16 @@ func refineRequest(s *jsonschema.Schema) {
 	at(s, "network").Enum = enum(spec.Networks())
 	at(s, "cap_add").UniqueItems = true
 	at(s, "cap_add", "[]").Enum = enum(spec.Capabilities())
-	at(s, "services").UniqueItems = true
-	at(s, "services", "[]").Pattern = spec.NamePattern
+	for _, field := range []string{"services", "tags"} {
+		at(s, field).UniqueItems = true
+		at(s, field, "[]").Pattern = spec.NamePattern
+	}
 	at(s, "timeout_seconds").Minimum = jsonschema.Ptr(0.0)
 	at(s, "timeout_seconds").Maximum = jsonschema.Ptr(float64(spec.MaxTimeoutSeconds))
 	for _, field := range []string{"task", "infrastructure"} {
 		at(s, "retry", field).Minimum = jsonschema.Ptr(0.0)
 		at(s, "retry", field).Maximum = jsonschema.Ptr(float64(server.MaxRetry))
 	}
-	at(s, "match", "arch").Enum = enum(spec.Architectures())
-	at(s, "match", "min_gpu_memory_mib").Minimum = jsonschema.Ptr(0.0)
-	at(s, "match", "tags").UniqueItems = true
-	at(s, "match", "tags", "[]").Pattern = spec.NamePattern
 }
 
 func refineWorkflow(s *jsonschema.Schema) {

@@ -17,7 +17,7 @@ import (
 // gpus installs a private CDI specification for exactly the configured devices, so Podman can hand a
 // task only the GPUs it was allocated without a global CDI registration.
 func (h *Host) gpus(ctx context.Context) ([]pool.GPU, error) {
-	data, err := h.output(ctx, "nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version,mig.mode.current --format=csv,noheader,nounits", nil)
+	data, err := h.output(ctx, "nvidia-smi --query-gpu=index,uuid,name,memory.total,mig.mode.current --format=csv,noheader,nounits", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func parseGPUs(data []byte, ids []string) ([]pool.GPU, error) {
 	}
 	gpus := []pool.GPU{}
 	for _, row := range rows {
-		if len(row) != 6 {
+		if len(row) != 5 {
 			return nil, errors.New("unexpected NVIDIA inventory format")
 		}
 		for i := range row {
@@ -56,7 +56,7 @@ func parseGPUs(data []byte, ids []string) ([]pool.GPU, error) {
 		if !slices.Contains(ids, row[1]) {
 			continue
 		}
-		if row[5] != "Disabled" && row[5] != "[N/A]" {
+		if row[4] != "Disabled" && row[4] != "[N/A]" {
 			return nil, errors.New("MIG allocations are unsupported")
 		}
 		index, err := strconv.Atoi(row[0])
@@ -67,7 +67,7 @@ func parseGPUs(data []byte, ids []string) ([]pool.GPU, error) {
 		if err != nil {
 			return nil, err
 		}
-		gpus = append(gpus, pool.GPU{UUID: row[1], Index: index, Model: row[2], MemoryMiB: memory, Driver: row[4]})
+		gpus = append(gpus, pool.GPU{UUID: row[1], Index: index, Model: row[2], MemoryMiB: memory})
 	}
 	if len(gpus) != len(ids) {
 		return nil, errors.New("configured GPU UUID is missing")

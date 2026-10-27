@@ -53,7 +53,7 @@ let
       capAdd ? null,
       services ? null,
       retry ? null,
-      match ? null,
+      tags ? null,
     }:
     assert require (validName id) "task id ${builtins.toJSON id} must match ${namePattern}";
     assert require (
@@ -81,9 +81,7 @@ let
       caps: distinct caps && builtins.all (c: builtins.elem c capabilities) caps
     ) capAdd) "${id}: capAdd allows only distinct ${toString capabilities}";
     assert require (optional distinctNames services) "${id}: services must be distinct names";
-    assert require (optional distinctNames (
-      match.tags or null
-    )) "${id}: match.tags must be distinct names";
+    assert require (optional distinctNames tags) "${id}: tags must be distinct names";
     assert require (optional (
       r: builtins.all (n: between 0 maxRetry n) (builtins.attrValues r)
     ) retry) "${id}: retry counts must be 0..${toString maxRetry}";
@@ -96,6 +94,7 @@ let
         env
         network
         services
+        tags
         ;
       image = if image == null then null else imageRef image;
       resources = compact {
@@ -111,18 +110,6 @@ let
           compact {
             task = retry.task or null;
             infrastructure = retry.infrastructure or null;
-          };
-      match =
-        if match == null then
-          null
-        else
-          compact {
-            arch = match.arch or null;
-            cpu_model = match.cpuModel or null;
-            gpu_model = match.gpuModel or null;
-            gpu_driver = match.gpuDriver or null;
-            min_gpu_memory_mib = match.minGPUMemoryMiB or null;
-            tags = match.tags or null;
           };
     };
 in

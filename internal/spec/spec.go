@@ -50,21 +50,17 @@ type Spec struct {
 	Secrets        []string `json:"secrets,omitempty"`
 	Services       []string `json:"services,omitempty"`
 	TimeoutSeconds int64    `json:"timeout_seconds,omitempty"`
-	Match          *Match   `json:"match,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
 }
 
 func (s Spec) Normalize() Spec {
-	if s.Match != nil {
-		match := *s.Match
-		match.Tags = slices.Sorted(slices.Values(match.Tags))
-		s.Match = &match
-	}
 	s.Args = slices.Clone(s.Args)
 	s.Inputs = maps.Clone(s.Inputs)
 	s.Env = maps.Clone(s.Env)
 	s.CapAdd = slices.Sorted(slices.Values(s.CapAdd))
 	s.Secrets = slices.Sorted(slices.Values(s.Secrets))
 	s.Services = slices.Sorted(slices.Values(s.Services))
+	s.Tags = slices.Sorted(slices.Values(s.Tags))
 	return s
 }
 
@@ -75,11 +71,6 @@ func (s Spec) Validate(secrets map[string]string) error {
 	if s.TimeoutSeconds < 0 || s.TimeoutSeconds > MaxTimeoutSeconds {
 		return fmt.Errorf("timeout must be 0..%d seconds", MaxTimeoutSeconds)
 	}
-	if s.Match != nil {
-		if err := s.Match.Validate(s.Resources); err != nil {
-			return err
-		}
-	}
 	if !slices.Equal(slices.Sorted(slices.Values(s.Secrets)), slices.Sorted(maps.Keys(secrets))) {
 		return errors.New("secret values must match the declared secret names")
 	}
@@ -88,6 +79,9 @@ func (s Spec) Validate(secrets map[string]string) error {
 	}
 	if !ValidNameSet(s.Services) {
 		return errors.New("invalid or duplicate service name")
+	}
+	if !ValidNameSet(s.Tags) {
+		return errors.New("invalid or duplicate tag")
 	}
 	return nil
 }

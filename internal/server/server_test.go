@@ -339,14 +339,15 @@ func TestTagsSelectWorkers(t *testing.T) {
 		t.Fatal("accepted a duplicate worker tag")
 	}
 	workers := []worker.Config{testWorker("plain"), testWorker("a", "l40s"), testWorker("b", "fast")}
-	s := open(t, filepath.Join(root, "state"), workers, nil)
+	state := filepath.Join(root, "state")
+	s := open(t, state, workers, nil)
 	defer func() { _ = s.Close() }()
 	req := request(t, "tagged")
-	req.Match = &spec.Match{Tags: []string{"l40s", "fast"}}
+	req.Tags = []string{"l40s", "fast"}
 	if _, err := s.Submit(context.Background(), req); err == nil {
 		t.Fatal("accepted tags that no single worker has")
 	}
-	req.Match = &spec.Match{Tags: []string{"l40s"}}
+	req.Tags = []string{"l40s"}
 	submit(t, s, req)
 	for _, cfg := range workers {
 		h := newFakeHost(s.id)
@@ -359,6 +360,15 @@ func TestTagsSelectWorkers(t *testing.T) {
 			t.Fatalf("worker %s launched %d, want %d", cfg.Host, len(h.launches), want)
 		}
 	}
+
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if other, err := Open(state, []worker.Config{testWorker("plain"), testWorker("a"), testWorker("b", "fast")}, nil, image.Tools{}); err == nil {
+		_ = other.Close()
+		t.Fatal("dropped a tag an unfinished job uses")
+	}
+	s = open(t, state, workers, nil)
 }
 
 func TestSecretsServicesAndStop(t *testing.T) {
