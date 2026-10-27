@@ -6,9 +6,6 @@ import (
 	"embed"
 	"encoding/hex"
 	"errors"
-	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/task"
-	"github.com/r3clab/Ordo/internal/worker"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/pool"
+	"github.com/r3clab/Ordo/internal/worker"
 )
 
 //go:embed web/*
@@ -29,18 +30,25 @@ var webAssets = map[string]struct{ file, kind string }{
 	"/style.css": {"style.css", "text/css; charset=utf-8"},
 }
 
-var logStreams = map[string]string{"stdout": task.StdoutFile, "stderr": task.StderrFile}
+var logStreams = map[string]string{"stdout": worker.StdoutFile, "stderr": worker.StderrFile}
 
-type WorkerStatus struct {
-	Host      string       `json:"host"`
-	Connected bool         `json:"connected"`
-	LastSeen  time.Time    `json:"last_seen"`
-	Error     string       `json:"error,omitempty"`
-	Info      *worker.Info `json:"info,omitempty"`
-	Tags      []string     `json:"tags,omitempty"`
+type WorkerInfo struct {
+	BootID   string            `json:"boot_id"`
+	Hardware pool.Hardware     `json:"hardware"`
+	Held     []pool.Allocation `json:"held"`
+	Error    string            `json:"error,omitempty"`
 }
 
-func (s *Server) workerStatus(host string, info *worker.Info, err error) {
+type WorkerStatus struct {
+	Host      string      `json:"host"`
+	Connected bool        `json:"connected"`
+	LastSeen  time.Time   `json:"last_seen"`
+	Error     string      `json:"error,omitempty"`
+	Info      *WorkerInfo `json:"info,omitempty"`
+	Tags      []string    `json:"tags,omitempty"`
+}
+
+func (s *Server) workerStatus(host string, info *WorkerInfo, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.nodes[host]
@@ -155,7 +163,7 @@ func (s *Server) WebHandler(token string) http.Handler {
 	})
 }
 func (s *Server) webRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { worker.WriteJSON(w, http.StatusOK, s.Workers()) })
+	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { WriteJSON(w, http.StatusOK, s.Workers()) })
 	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", func(w http.ResponseWriter, r *http.Request) {
 		name, ok := logStreams[r.PathValue("stream")]
 		if !ok {

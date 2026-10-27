@@ -21,7 +21,7 @@ func decodeFile(file string, value any) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	return worker.DecodeJSON(f, value)
+	return server.DecodeJSON(f, value)
 }
 
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
@@ -41,7 +41,7 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	if root == "" || config == "" || f.NArg() != 0 {
 		return errors.New("--state and --workers are required")
 	}
-	var workers []worker.Remote
+	var workers []worker.Config
 	if err := decodeFile(config, &workers); err != nil {
 		return err
 	}
@@ -55,7 +55,7 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 
 // The queue API is a local socket, and nix builds behind a submit can take minutes.
 func serverClient(root string) *http.Client {
-	client := worker.Client(server.Socket(root))
+	client := server.Client(server.Socket(root))
 	client.Timeout = 0
 	return client
 }
@@ -107,9 +107,9 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 		}
 		endpoint, body = "/v1/workflows", flow
 	case "cancel", "stop":
-		body = worker.StopRequest{Reason: reason}
+		body = server.StopRequest{Reason: reason}
 	case "cancel-workflow":
-		endpoint, body = "/v1/workflows/"+id+"/cancel", worker.StopRequest{Reason: reason}
+		endpoint, body = "/v1/workflows/"+id+"/cancel", server.StopRequest{Reason: reason}
 	case "list":
 		method, endpoint = http.MethodGet, "/v1/jobs"
 	case "get":
@@ -120,7 +120,7 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	client := serverClient(root)
 	defer client.CloseIdleConnections()
 	var result any
-	if err := worker.Call(ctx, client, method, endpoint, body, &result); err != nil {
+	if err := server.Call(ctx, client, method, endpoint, body, &result); err != nil {
 		return err
 	}
 	return printJSON(out, result)

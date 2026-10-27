@@ -2,92 +2,33 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/podman"
+	"github.com/r3clab/Ordo/internal/pool"
+	"github.com/r3clab/Ordo/internal/spec"
+	"github.com/r3clab/Ordo/internal/ssh"
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
-func TestDispatchResponseLossAndServerRestartDoNotDuplicate(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "server")
-	workers := []worker.Remote{{Host: "worker"}}
-	s, err := Open(root, workers, nil, image.Tools{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var accepted *worker.Attempt
-	puts := 0
-	client := fakeWorker(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasPrefix(r.URL.Path, "/v1/blobs/"):
-			w.WriteHeader(200)
-		case r.URL.Path == "/v1/images":
-			w.WriteHeader(200)
-		case r.Method == http.MethodPut:
-			puts++
-			var submission worker.Submission
-			if err := json.NewDecoder(r.Body).Decode(&submission); err != nil {
-				t.Error(err)
-			}
-			accepted = &worker.Attempt{ID: strings.TrimPrefix(r.URL.Path, "/v1/attempts/"), Spec: submission.Spec, State: "running"}
-			http.Error(w, "lost response after acceptance", 500)
-		case accepted != nil:
-			worker.WriteJSON(w, http.StatusOK, accepted)
-		default:
-			http.NotFound(w, r)
-		}
-	})
-	j := Job{ID: "one", Spec: worker.Spec{Image: "sha256:" + strings.Repeat("a", 64), Resources: worker.Resources{Cores: 1, MemoryMiB: 128}}, Archive: strings.Repeat("b", 64), State: "queued", CreatedAt: time.Now()}
-	if err := os.Mkdir(filepath.Join(root, "blobs"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "blobs", j.Archive), []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.save(j); err != nil {
-		t.Fatal(err)
-	}
-	info := worker.Info{ID: "agent", Hardware: worker.Hardware{Cores: [][]int{{0, 64}}, MemoryMiB: 128}}
-	if err := s.reconcile(context.Background(), j, workers[0], &info, client); err == nil {
-		t.Fatal("expected response failure")
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s, err = Open(root, workers, nil, image.Tools{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = s.Close() }()
-	j = s.List()[0]
-	if len(j.Attempts) != 1 || j.State != "dispatching" {
-		t.Fatal("dispatch not durable")
-	}
-	if err := s.reconcile(context.Background(), j, workers[0], &info, client); err != nil {
-		t.Fatal(err)
-	}
-	j = s.List()[0]
-	if puts != 1 || j.State != "running" || j.Attempts[0].ID != accepted.ID {
-		t.Fatal("duplicated execution")
-	}
-	info.ID = "replacement"
-	if err := s.reconcile(context.Background(), j, workers[0], &info, client); err != nil {
-		t.Fatal(err)
-	}
-	if s.List()[0].State != "blocked" || puts != 1 {
-		t.Fatal("silently adopted replacement agent")
-	}
+func testWorker(host string, tags ...string) worker.Config {
+	return worker.Config{Host: host, StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024, Tags: tags}
 }
 
-func fakeWorker(t *testing.T, handler http.HandlerFunc) *http.Client {
+func handlerClient(t *testing.T, handler http.Handler) *http.Client {
 	remote := httptest.NewServer(handler)
 	t.Cleanup(remote.Close)
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -97,43 +38,490 @@ func fakeWorker(t *testing.T, handler http.HandlerFunc) *http.Client {
 	return client
 }
 
-func TestTagsSelectWorkers(t *testing.T) {
-	root := t.TempDir()
-	if _, err := Open(filepath.Join(root, "bad"), []worker.Remote{{Host: "a", Tags: []string{"l40s", "l40s"}}}, nil, image.Tools{}); err == nil {
-		t.Fatal("accepted a duplicate worker tag")
+type fakeContainer struct {
+	podman.Container
+	exit     int
+	finished time.Time
+}
+
+// fakeHost is a worker with four single-thread cores whose containers run only when a test says so.
+type fakeHost struct {
+	server     string
+	boot       string
+	machine    string
+	skew       time.Duration
+	containers map[string]*fakeContainer
+	launches   []worker.Launch
+	stops      []string
+	collects   int
+	removed    []string
+	// lose is returned by the next launch after it creates the container; refuse, before.
+	lose, refuse error
+	broken       error
+}
+
+func newFakeHost(server string) *fakeHost {
+	return &fakeHost{server: server, boot: "boot-1", machine: "machine-1", containers: map[string]*fakeContainer{}}
+}
+
+func (f *fakeHost) now() time.Time { return time.Now().Add(f.skew) }
+
+func (f *fakeHost) add(attempt, server, state string) *fakeContainer {
+	id := strings.Repeat(strconv.Itoa(len(f.containers)%10), 64)
+	now := podman.Time{Time: f.now()}
+	c := &fakeContainer{Container: podman.Container{ID: id, State: state, Labels: map[string]string{podman.AttemptLabel: attempt, podman.ServerLabel: server}, Created: now, StartedAt: now}}
+	f.containers[attempt] = c
+	return c
+}
+
+func (f *fakeHost) Probe(context.Context) (worker.Probe, error) {
+	return worker.Probe{BootID: f.boot, Hardware: pool.Hardware{Hostname: "worker", MachineID: f.machine, Arch: "amd64", Cores: [][]int{{0}, {1}, {2}, {3}}, MemoryMiB: 1024}}, nil
+}
+
+func (f *fakeHost) Poll(context.Context) (worker.Snapshot, error) {
+	snap := worker.Snapshot{BootID: f.boot, Now: f.now()}
+	for _, c := range f.containers {
+		snap.Containers = append(snap.Containers, c.Container)
 	}
-	archive := filepath.Join(root, "image.tar")
+	return snap, nil
+}
+
+func (f *fakeHost) EnsureImage(context.Context, string, string) error { return nil }
+
+func (f *fakeHost) EnsureInput(context.Context, string, string) error { return nil }
+
+func (f *fakeHost) GPUBusy(context.Context, []pool.GPU) ([]string, error) { return nil, nil }
+
+func (f *fakeHost) Launch(_ context.Context, l worker.Launch) (string, error) {
+	if err := f.refuse; err != nil {
+		f.refuse = nil
+		return "", err
+	}
+	if _, ok := f.containers[l.Attempt]; ok {
+		return "", &ssh.ExitError{Code: 125, Stderr: "name is already in use"}
+	}
+	f.launches = append(f.launches, l)
+	c := f.add(l.Attempt, f.server, podman.Running)
+	err := f.lose
+	f.lose = nil
+	if err != nil {
+		return "", err
+	}
+	return c.ID, nil
+}
+
+func (f *fakeHost) exit(attempt string, code int) {
+	c := f.containers[attempt]
+	c.State, c.exit, c.finished = podman.Exited, code, c.StartedAt.Add(time.Second)
+}
+
+func (f *fakeHost) Stop(_ context.Context, attempt string) error {
+	f.stops = append(f.stops, attempt)
+	f.exit(attempt, 137)
+	return nil
+}
+
+func (f *fakeHost) Inspect(_ context.Context, attempt string) (podman.Inspection, error) {
+	var in podman.Inspection
+	c, ok := f.containers[attempt]
+	if !ok {
+		return in, errors.New("no such container")
+	}
+	in.ID, in.Name, in.Image = c.ID, podman.Name(attempt), strings.Repeat("a", 64)
+	in.Config.Labels = c.Labels
+	in.State.Status, in.State.ExitCode, in.State.StartedAt, in.State.FinishedAt = c.State, &c.exit, c.StartedAt.Time, c.finished
+	return in, nil
+}
+
+func (f *fakeHost) Collect(_ context.Context, attempt, dir string) error {
+	f.collects++
+	if f.broken != nil {
+		return f.broken
+	}
+	for name, data := range map[string]string{worker.StdoutFile: "out", worker.StderrFile: "err", worker.OutputsDir + "/score": attempt} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *fakeHost) Remove(_ context.Context, attempt string) error {
+	delete(f.containers, attempt)
+	f.removed = append(f.removed, attempt)
+	return nil
+}
+
+func open(t *testing.T, state string, workers []worker.Config, services map[string]string) *Server {
+	t.Helper()
+	s, err := Open(state, workers, services, image.Tools{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func request(t *testing.T, id string) Request {
+	t.Helper()
+	archive := filepath.Join(t.TempDir(), "image.tar")
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	workers := []worker.Remote{{Host: "plain"}, {Host: "a", Tags: []string{"l40s"}}, {Host: "b", Tags: []string{"fast"}}}
-	s, err := Open(filepath.Join(root, "state"), workers, nil, image.Tools{})
-	if err != nil {
+	return Request{ID: id, Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}
+}
+
+func submit(t *testing.T, s *Server, r Request) {
+	t.Helper()
+	if _, err := s.Submit(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func tick(s *Server, cfg worker.Config, h *fakeHost) error {
+	probe, err := h.Probe(context.Background())
+	if err != nil {
+		return err
+	}
+	return s.pass(context.Background(), cfg, h, &probe)
+}
+
+func mustTick(t *testing.T, s *Server, cfg worker.Config, h *fakeHost) {
+	t.Helper()
+	if err := tick(s, cfg, h); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustJob(t *testing.T, s *Server, id string) Job {
+	t.Helper()
+	j, ok := s.job(id)
+	if !ok {
+		t.Fatalf("job %s missing", id)
+	}
+	return j
+}
+
+// fixture is one server with one fake worker.
+type fixture struct {
+	s   *Server
+	cfg worker.Config
+	h   *fakeHost
+}
+
+func newFixture(t *testing.T) fixture {
+	cfg := testWorker("worker")
+	s := open(t, filepath.Join(t.TempDir(), "state"), []worker.Config{cfg}, nil)
+	t.Cleanup(func() { _ = s.Close() })
+	return fixture{s: s, cfg: cfg, h: newFakeHost(s.id)}
+}
+
+func (f fixture) tick(t *testing.T) {
+	t.Helper()
+	mustTick(t, f.s, f.cfg, f.h)
+}
+
+func TestLostLaunchResponseAndRestartDoNotDuplicate(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	workers := []worker.Config{testWorker("worker")}
+	s := open(t, state, workers, nil)
+	submit(t, s, request(t, "one"))
+	h := newFakeHost(s.id)
+	h.lose = ssh.ErrTransport
+	if err := tick(s, workers[0], h); !errors.Is(err, ssh.ErrTransport) {
+		t.Fatalf("lost launch response: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open(t, state, workers, nil)
 	defer func() { _ = s.Close() }()
-	ctx := context.Background()
-	req := Request{ID: "tagged", Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}, Match: &worker.Match{Tags: []string{"l40s"}}}
-	split := req
-	split.Match = &worker.Match{Tags: []string{"l40s", "fast"}}
-	if _, err := s.Submit(ctx, split); err == nil {
+	if j := mustJob(t, s, "one"); len(j.Attempts) != 1 || j.State != Dispatching {
+		t.Fatalf("dispatch not durable: %+v", j)
+	}
+	mustTick(t, s, workers[0], h)
+	j := mustJob(t, s, "one")
+	at := j.Attempts[0]
+	if len(h.launches) != 1 || j.State != Running || at.ContainerID != h.containers[at.ID].ID {
+		t.Fatalf("restart did not adopt the launched container: %d launches, %+v", len(h.launches), j)
+	}
+
+	h.exit(at.ID, 0)
+	mustTick(t, s, workers[0], h)
+	j = mustJob(t, s, "one")
+	at = j.Attempts[0]
+	if j.State != Succeeded || at.Result == nil || at.Result.ExitCode != 0 || len(at.Result.OutputsSHA256) != 64 || len(h.containers) != 0 {
+		t.Fatalf("collection: %+v, containers %v", j, h.containers)
+	}
+	record, err := readRecord(at.ResultDir)
+	if err != nil || record.Attempt != at.ID || record.Spec.Image != j.Spec.Image || record.OutputsSHA256 != at.Result.OutputsSHA256 {
+		t.Fatalf("run.json %+v: %v", record, err)
+	}
+	if _, err := os.Stat(filepath.Join(at.ResultDir, OutputsArchive)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRefusedLaunchRetriesAndChangedWorkerBlocks(t *testing.T) {
+	f := newFixture(t)
+	submit(t, f.s, request(t, "job"))
+	f.h.refuse = &ssh.ExitError{Code: 125, Stderr: "image not known"}
+	f.tick(t)
+	j := mustJob(t, f.s, "job")
+	if j.State != Queued || j.Attempts[0].Failure != InfrastructureFailure || !slices.Contains(f.h.removed, j.Attempts[0].ID) {
+		t.Fatalf("refused launch must requeue as an infrastructure failure: %+v", j)
+	}
+	f.tick(t)
+	if j = mustJob(t, f.s, "job"); j.State != Running || len(j.Attempts) != 2 {
+		t.Fatalf("retry not launched: %+v", j)
+	}
+
+	f.h.machine = "machine-2"
+	f.tick(t)
+	f.h.machine = "machine-1"
+	f.tick(t)
+	if j = mustJob(t, f.s, "job"); j.State != Blocked || len(f.h.launches) != 1 {
+		t.Fatalf("a changed worker must block the job until it is cancelled: %+v", j)
+	}
+	if err := f.s.Cancel("job", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.tick(t)
+	if j = mustJob(t, f.s, "job"); j.State != Cancelled || len(f.h.containers) != 0 {
+		t.Fatalf("cancel must release a blocked job and sweep its container: %+v, %v", j, f.h.containers)
+	}
+}
+
+func TestRetryReleasesTheFinishedAttempt(t *testing.T) {
+	f := newFixture(t)
+	req := request(t, "whole")
+	req.Resources.Cores, req.Retry.Task = 4, 1
+	submit(t, f.s, req)
+	f.tick(t)
+	first := mustJob(t, f.s, "whole").Attempts[0]
+	f.h.exit(first.ID, 1)
+	f.tick(t)
+	if j := mustJob(t, f.s, "whole"); j.State != Queued || j.Attempts[0].Failure != TaskFailure {
+		t.Fatalf("failed task not requeued: %+v", j)
+	}
+	f.tick(t)
+	if j := mustJob(t, f.s, "whole"); j.State != Running || len(j.Attempts) != 2 {
+		t.Fatalf("the finished attempt still holds the worker: %+v", j)
+	}
+}
+
+func TestFailedCollectionBlocksOnce(t *testing.T) {
+	f := newFixture(t)
+	submit(t, f.s, request(t, "job"))
+	f.tick(t)
+	at := mustJob(t, f.s, "job").Attempts[0]
+	f.h.exit(at.ID, 0)
+	f.h.broken = errors.New("archive links and special files are unsupported")
+	f.tick(t)
+	f.tick(t)
+	if j := mustJob(t, f.s, "job"); j.State != Blocked || f.h.collects != 1 || !strings.Contains(j.Error, "special files") {
+		t.Fatalf("collection retried or not blocked: %d collects, %+v", f.h.collects, j)
+	}
+	if err := f.s.Cancel("job", false, "bad outputs"); err != nil {
+		t.Fatal(err)
+	}
+	f.tick(t)
+	if j := mustJob(t, f.s, "job"); j.State != Cancelled || len(f.h.containers) != 0 {
+		t.Fatalf("cancel must release the job and remove its container: %+v", j)
+	}
+}
+
+func TestTagsSelectWorkers(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Open(filepath.Join(root, "bad"), []worker.Config{testWorker("a", "l40s", "l40s")}, nil, image.Tools{}); err == nil {
+		t.Fatal("accepted a duplicate worker tag")
+	}
+	workers := []worker.Config{testWorker("plain"), testWorker("a", "l40s"), testWorker("b", "fast")}
+	s := open(t, filepath.Join(root, "state"), workers, nil)
+	defer func() { _ = s.Close() }()
+	req := request(t, "tagged")
+	req.Match = &spec.Match{Tags: []string{"l40s", "fast"}}
+	if _, err := s.Submit(context.Background(), req); err == nil {
 		t.Fatal("accepted tags that no single worker has")
 	}
-	j, err := s.Submit(ctx, req)
-	if err != nil {
+	req.Match = &spec.Match{Tags: []string{"l40s"}}
+	submit(t, s, req)
+	for _, cfg := range workers {
+		h := newFakeHost(s.id)
+		mustTick(t, s, cfg, h)
+		want := 0
+		if cfg.Host == "a" {
+			want = 1
+		}
+		if len(h.launches) != want {
+			t.Fatalf("worker %s launched %d, want %d", cfg.Host, len(h.launches), want)
+		}
+	}
+}
+
+func TestSecretsServicesAndStop(t *testing.T) {
+	ctx := context.Background()
+	state := filepath.Join(t.TempDir(), "state")
+	workers := []worker.Config{testWorker("worker")}
+	services := map[string]string{"model": "127.0.0.1:8317"}
+	s := open(t, state, workers, services)
+	req := request(t, "agent")
+	req.Sandbox = spec.Sandbox{Env: map[string]string{"MODE": "eval"}, Network: spec.Egress, CapAdd: []string{"NET_ADMIN"}}
+	req.Secrets, req.Services, req.Retry = map[string]string{"TOKEN": "hunter2"}, []string{"model"}, RetryPolicy{Task: 2}
+	unknown := req
+	unknown.Services = []string{"other"}
+	if _, err := s.Submit(ctx, unknown); err == nil {
+		t.Fatal("accepted an unconfigured service")
+	}
+	huge := req
+	huge.Args = []string{strings.Repeat("x", ssh.MaxCommand)}
+	if _, err := s.Submit(ctx, huge); err == nil {
+		t.Fatal("accepted a launch command beyond the remote argument limit")
+	}
+	submit(t, s, req)
+	resubmitted := req
+	resubmitted.Secrets = map[string]string{"TOKEN": "rotated"}
+	if _, err := s.Submit(ctx, resubmitted); err != nil {
+		t.Fatal("secret values must not change job identity:", err)
+	}
+	listed, _ := json.Marshal(s.List())
+	if strings.Contains(string(listed), "hunter2") || strings.Contains(string(listed), "rotated") || !slices.Equal(mustJob(t, s, "agent").Spec.Secrets, []string{"TOKEN"}) {
+		t.Fatalf("jobs must name secrets without values: %s", listed)
+	}
+
+	h := newFakeHost(s.id)
+	mustTick(t, s, workers[0], h)
+	launched := h.launches[0]
+	if launched.Secrets["TOKEN"] != "hunter2" || !slices.Equal(launched.Spec.Services, []string{"model"}) || launched.Spec.Network != spec.Egress {
+		t.Fatalf("launch lost the sandbox or original secret: %+v", launched)
+	}
+
+	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	contacted := false
-	client := fakeWorker(t, func(w http.ResponseWriter, r *http.Request) {
-		contacted = true
-		http.NotFound(w, r)
-	})
-	info := worker.Info{ID: "agent", Hardware: worker.Hardware{Cores: [][]int{{0}}, MemoryMiB: 128}}
-	for _, remote := range workers {
-		contacted = false
-		_ = s.reconcile(ctx, j, remote, &info, client)
-		if want := remote.Host == "a"; contacted != want {
-			t.Fatalf("worker %s contacted = %v, want %v", remote.Host, contacted, want)
+	if other, err := Open(state, workers, nil, image.Tools{}); err == nil {
+		_ = other.Close()
+		t.Fatal("dropped a service an unfinished job uses")
+	}
+	s = open(t, state, workers, services)
+	stale := mustJob(t, s, "agent")
+	if err := s.Stop("agent", "budget spent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.save(stale); err != nil {
+		t.Fatal(err)
+	}
+	if !mustJob(t, s, "agent").StopRequested {
+		t.Fatal("a stale copy dropped the stop")
+	}
+	mustTick(t, s, workers[0], h)
+	if !slices.Equal(h.stops, []string{launched.Attempt}) {
+		t.Fatalf("stop not delivered: %q", h.stops)
+	}
+	mustTick(t, s, workers[0], h)
+	j := mustJob(t, s, "agent")
+	if at := j.Attempts[0]; j.State != Failed || j.StopReason != "budget spent" || at.StopRequested != Stop || at.Result == nil || at.Result.ExitCode != 137 {
+		t.Fatalf("stopped job retried or lost its reason: %+v", j)
+	}
+	var values map[string]string
+	if err := s.store.Get("secret", "agent", &values); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("terminal job kept its secrets: %v", err)
+	}
+
+	queued := req
+	queued.ID = "queued"
+	submit(t, s, queued)
+	if err := s.Stop("queued", ""); err != nil {
+		t.Fatal(err)
+	}
+	if j := mustJob(t, s, "queued"); j.State != Cancelled {
+		t.Fatalf("stopping an unstarted job must cancel it: %s", j.State)
+	}
+
+	live := req
+	live.ID = "live"
+	submit(t, s, live)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open(t, state, workers, services)
+	defer func() { _ = s.Close() }()
+	if err := s.store.Get("secret", "live", &values); err != nil || values["TOKEN"] != "hunter2" {
+		t.Fatalf("restart dropped a live job's secret: %v", err)
+	}
+}
+
+func TestTimeoutsCountAgainstTheTask(t *testing.T) {
+	f := newFixture(t)
+	f.h.skew = -time.Hour
+	for _, id := range []string{"stopped", "backstop"} {
+		req := request(t, id)
+		req.TimeoutSeconds = 60
+		submit(t, f.s, req)
+	}
+	f.tick(t)
+	f.tick(t)
+	if len(f.h.stops) != 0 {
+		t.Fatalf("a worker clock behind the server's stopped tasks early: %q", f.h.stops)
+	}
+	for _, c := range f.h.containers {
+		c.StartedAt.Time = c.StartedAt.Add(-61 * time.Second)
+	}
+	backstop := mustJob(t, f.s, "backstop").Attempts[0].ID
+	f.h.exit(backstop, 137)
+	f.h.containers[backstop].finished = f.h.now()
+	f.tick(t)
+	stopped := mustJob(t, f.s, "stopped").Attempts[0]
+	if !slices.Equal(f.h.stops, []string{stopped.ID}) || stopped.StopRequested != Timeout {
+		t.Fatalf("expired task not stopped: %q %+v", f.h.stops, stopped)
+	}
+	f.tick(t)
+	for _, id := range []string{"stopped", "backstop"} {
+		j := mustJob(t, f.s, id)
+		if at := j.Attempts[0]; j.State != Failed || at.StopRequested != Timeout || at.Failure != TaskFailure {
+			t.Fatalf("%s: timeout not charged to the task: %+v", id, j)
 		}
+	}
+}
+
+func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
+	f := newFixture(t)
+	f.h.add("foreign", "other", podman.Running)
+	submit(t, f.s, request(t, "job"))
+	f.tick(t)
+	if info := f.s.Workers()[0].Info; len(f.h.launches) != 0 || info == nil || !strings.Contains(info.Error, "another server") {
+		t.Fatalf("dispatched beside another server's containers: %+v", info)
+	}
+	delete(f.h.containers, "foreign")
+
+	f.tick(t)
+	first := mustJob(t, f.s, "job").Attempts[0]
+	f.h.boot = "boot-2"
+	f.tick(t)
+	j := mustJob(t, f.s, "job")
+	if j.State != Queued || j.Attempts[0].Failure != InfrastructureFailure || !slices.Contains(f.h.removed, first.ID) {
+		t.Fatalf("reboot must fail the attempt as infrastructure: %+v", j)
+	}
+
+	f.tick(t)
+	delete(f.h.containers, mustJob(t, f.s, "job").Attempts[1].ID)
+	f.tick(t)
+	if j = mustJob(t, f.s, "job"); j.State != Blocked {
+		t.Fatalf("lost container must block the job: %+v", j)
+	}
+	if err := f.s.Cancel("job", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.tick(t)
+	if j = mustJob(t, f.s, "job"); j.State != Cancelled {
+		t.Fatalf("cancel must release a blocked job: %+v", j)
+	}
+
+	f.h.add(first.ID, f.s.id, podman.Exited)
+	f.tick(t)
+	if len(f.h.containers) != 0 {
+		t.Fatalf("finished attempt's container not swept: %v", f.h.containers)
 	}
 }

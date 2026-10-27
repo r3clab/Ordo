@@ -6,50 +6,61 @@ host=${1:?}; gpu=${2:?}
 work=$(mktemp -d /tmp/ordo-gpu-evidence.XXXXXX)
 ssh "$host" 'nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv,noheader,nounits; nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits; nvidia-smi pmon -c 1' > "$work/availability.txt"
 root=$(ssh "$host" 'umask 077; mktemp -d /tmp/ordo-gpu-test.XXXXXX')
-unit="ordo-agent-$(printf %s "$root" | sha256sum | cut -c1-16)"
 passed=false
+pid=
 cleanup(){
- ssh "$host" "systemctl --user stop '$unit'" || return 1
- rsync -a --exclude=bin --exclude=blobs "$host:$root/" "$work/remote/"
+ if [[ -n $pid ]]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
  if $passed; then
-  ssh "$host" "set -eu; test ! -s /run/user/\$(id -u)/ordo-worker.lock; if test -f '$root/image-introduced'; then podman image rm '$ORDO_TEST_IMAGE'; fi; rm -rf -- '$root'"
+  ssh "$host" "set -eu; test -z \"\$(ls -A '$root/runs')\"; if test -f '$root/image-introduced'; then podman image rm '$ORDO_TEST_IMAGE'; fi; rm -rf -- '$root'"
  else printf 'Retained %s:%s\n' "$host" "$root" >&2; fi
  printf 'Evidence: %s\n' "$work"
 }
 trap cleanup EXIT
-base=(--host "$host" --state "$root" --cpus 62,63,126,127 --memory-mib 512 --gpus "$gpu")
 ssh "$host" "if ! podman image exists '$ORDO_TEST_IMAGE'; then touch '$root/image-introduced'; fi"
-"$ORDO_TEST_BINARY" worker start "${base[@]}" --binary "$ORDO_TEST_BINARY" > "$work/start.json"
-"$ORDO_TEST_BINARY" worker put-image "${base[@]}" --archive "$ORDO_TEST_ARCHIVE" --image "$ORDO_TEST_IMAGE" > "$work/image.json"
-cpu_model=$(jq -r .hardware.cpu_model "$work/start.json")
-gpu_model=$(jq -r '.hardware.gpus[0].model' "$work/start.json")
-gpu_driver=$(jq -r '.hardware.gpus[0].driver' "$work/start.json")
-status=0
-"$ORDO_TEST_BINARY" worker submit "${base[@]}" --id mismatch --image "$ORDO_TEST_IMAGE" --cores 1 --task-memory-mib 128 --cpu-model not-this-hardware > "$work/mismatch.stdout" 2> "$work/mismatch.stderr" || status=$?
-test "$status" = 2
-grep -F 'insufficient unreserved resources' "$work/mismatch.stderr"
-"$ORDO_TEST_BINARY" worker submit "${base[@]}" --id gpu --image "$ORDO_TEST_IMAGE" --cores 1 --task-memory-mib 256 --task-gpus 1 --arch amd64 --cpu-model "$cpu_model" --gpu-model "$gpu_model" --gpu-driver "$gpu_driver" --min-gpu-memory-mib 40000 --timeout-seconds 30 -- -c 'timeout --kill-after=2 10 ordo-gpu-probe || exit $?; sleep 12' > "$work/submitted.json"
-status=0
-"$ORDO_TEST_BINARY" worker submit "${base[@]}" --id overlap --image "$ORDO_TEST_IMAGE" --cores 1 --task-memory-mib 128 --task-gpus 1 > "$work/overlap.stdout" 2> "$work/overlap.stderr" || status=$?
-test "$status" = 2
-grep -F 'insufficient unreserved resources' "$work/overlap.stderr"
-for ((i=0;i<30;i++)); do
- if ssh "$host" "jq -e '.container_id != null' '$root/runs/gpu/run.json'" >/dev/null 2>&1; then break; fi
- sleep 0.2
-done
-ssh "$host" "jq -e '.container_id != null' '$root/runs/gpu/run.json'" >/dev/null
-ssh "$host" "pid=\$(systemctl --user show '$unit' -p MainPID --value); test \"\$pid\" -gt 1; kill -KILL \"\$pid\""
-"$ORDO_TEST_BINARY" worker info "${base[@]}" > "$work/restored.json"
-jq -e --arg gpu "$gpu" '(.held|length)==1 and .held[0].gpus==[$gpu]' "$work/restored.json" >/dev/null
+ssh "$host" "nvidia-smi --id='$gpu' --query-gpu=name,driver_version --format=csv,noheader; grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2-" > "$work/hardware.txt"
+gpu_model=$(sed -n 1p "$work/hardware.txt" | cut -d, -f1 | xargs)
+gpu_driver=$(sed -n 1p "$work/hardware.txt" | cut -d, -f2 | xargs)
+cpu_model=$(sed -n 2p "$work/hardware.txt" | xargs)
+jq -n --arg host "$host" --arg root "$root" --arg gpu "$gpu" '[{host:$host,state_dir:$root,cpus:"62,63,126,127",memory_mib:512,gpus:[$gpu]}]' > "$work/workers.json"
+start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/workers.json" --listen 127.0.0.1:0 >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > /dev/null 2>&1; then return; fi; sleep 0.2; done; return 1; }
+submit() { jq -nc --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" "$1" | "$ORDO_TEST_BINARY" submit --state "$work/server" >> "$work/submitted.json"; }
+job() { "$ORDO_TEST_BINARY" queue get --state "$work/server" --id "$1"; }
+start
+submit '{id:"mismatch",image:{archive:$archive,id:$image},resources:{cores:1,memory_mib:128},match:{cpu_model:"not-this-hardware"}}'
+jq -nc --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" --arg cpu "$cpu_model" --arg model "$gpu_model" --arg driver "$gpu_driver" \
+ '{id:"gpu",image:{archive:$archive,id:$image},resources:{cores:1,memory_mib:256,gpus:1},match:{arch:"amd64",cpu_model:$cpu,gpu_model:$model,gpu_driver:$driver,min_gpu_memory_mib:40000},timeout_seconds:30,args:["-c","timeout --kill-after=2 10 ordo-gpu-probe || exit $?; sleep 12"]}' |
+ "$ORDO_TEST_BINARY" submit --state "$work/server" >> "$work/submitted.json"
 for ((i=0;i<60;i++)); do
- "$ORDO_TEST_BINARY" worker get "${base[@]}" --id gpu > "$work/final.json"
- if jq -e '.state=="finished"' "$work/final.json" >/dev/null; then break; fi
+ job gpu > "$work/gpu.json"
+ if jq -e '.state=="running" and .attempts[-1].container_id != null' "$work/gpu.json" >/dev/null; then break; fi
  sleep 1
 done
-jq -e --arg gpu "$gpu" '.state=="finished" and .result.exit_code==0 and .result.container_removed and .allocation.gpus==[$gpu]' "$work/final.json" >/dev/null
-"$ORDO_TEST_BINARY" worker fetch "${base[@]}" --id gpu --output "$work/result" > "$work/fetch.json"
-grep -Fx "uuid=$gpu" "$work/result/stdout.log"
-grep -Fx count=1 "$work/result/stdout.log"
-grep -Fx value=42 "$work/result/stdout.log"
+jq -e --arg gpu "$gpu" '.state=="running" and .attempts[-1].allocation.gpus==[$gpu]' "$work/gpu.json" >/dev/null
+submit '{id:"overlap",image:{archive:$archive,id:$image},resources:{cores:1,memory_mib:128,gpus:1}}'
+kill -KILL "$pid"; wait "$pid" 2>/dev/null || true; pid=
+start
+sleep 3
+job overlap > "$work/overlap.json"
+jq -e '.state=="queued" and (.attempts//[]|length)==0' "$work/overlap.json" >/dev/null
+for ((i=0;i<60;i++)); do
+ job gpu > "$work/final.json"
+ if jq -e '.state=="succeeded" or .state=="failed"' "$work/final.json" >/dev/null; then break; fi
+ sleep 1
+done
+jq -e --arg gpu "$gpu" '.state=="succeeded" and (.attempts|length)==1 and .attempts[0].result.exit_code==0 and .attempts[0].allocation.gpus==[$gpu]' "$work/final.json" >/dev/null
+job mismatch > "$work/mismatch.json"
+jq -e '.state=="queued" and (.attempts//[]|length)==0' "$work/mismatch.json" >/dev/null
+"$ORDO_TEST_BINARY" queue cancel --state "$work/server" --id mismatch > /dev/null
+"$ORDO_TEST_BINARY" queue cancel --state "$work/server" --id overlap > /dev/null
+for ((i=0;i<60;i++)); do
+ job overlap > "$work/overlap.json"
+ if jq -e '.state=="cancelled"' "$work/overlap.json" >/dev/null; then break; fi
+ sleep 1
+done
+jq -e '.state=="cancelled"' "$work/overlap.json" >/dev/null
+"$ORDO_TEST_BINARY" fetch --state "$work/server" --into "$work/results" --id gpu > "$work/fetch.txt"
+grep -Fx "uuid=$gpu" "$work/results/gpu/stdout.log"
+grep -Fx count=1 "$work/results/gpu/stdout.log"
+grep -Fx value=42 "$work/results/gpu/stdout.log"
 passed=true
-printf 'PASS: one visible UUID, CUDA allocation/copy, exclusive reservation, restart recovery\n'
+printf 'PASS: one visible UUID, CUDA allocation/copy, exclusive reservation, hardware matching, server restart recovery\n'

@@ -15,10 +15,10 @@ Every task runs in rootless Podman using a [nix2container](https://github.com/nl
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/figures/overview-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="assets/figures/overview-light.svg">
-  <img src="assets/figures/overview-light.svg" alt="Ordo's managed flow: submit jobs to a durable server, dispatch over SSH to persistent agents and rootless Podman, verify returned results, then fetch succeeded jobs." width="960">
+  <img src="assets/figures/overview-light.svg" alt="Ordo's managed flow: submit jobs to a durable server, start containers in rootless Podman on workers over SSH, verify returned results, then fetch succeeded jobs." width="960">
 </picture>
 
-`ordo server` bootstraps the workers and manages scheduling, dispatch, and result collection.
+`ordo server` drives the workers over SSH and manages scheduling, dispatch, and result collection; nothing of Ordo is installed on a worker.
 Submit jobs or workflows, then use `ordo fetch` to retrieve succeeded runs.
 
 [Command reference](https://github.com/r3clab/Ordo/wiki/Command-map) · [Figure notes and source](assets/figures/README.md).
@@ -26,7 +26,7 @@ Submit jobs or workflows, then use `ordo fetch` to retrieve succeeded runs.
 ## Direction
 
 Build a focused, single-user evaluation runner for an initial pool of **1–10 workers**, not a general-purpose orchestration platform.
-Use **Go** for the server, worker agents, and CLI.
+Use **Go** for the server and CLI.
 
 Learn from and selectively adapt:
 
@@ -40,8 +40,8 @@ Prefer a small Go implementation over importing Nomad's full control plane or ma
 ## Deployment
 
 - **Server:** has Nix and Podman installed; owns the queue, scheduling decisions, and durable run records.
-- **Workers:** each has Nix and Podman installed.
-  SSH launches persistent worker agents; agent communication uses SSH tunnels.
+- **Workers:** each has rootless Podman installed and runs no Ordo process.
+  The server runs each step as a short shell script over one SSH connection per worker.
 - **Tasks:** declare a container image, command, inputs, resource requirements, and outputs.
   Every task runs in **rootless Podman**, never directly on the host.
 - **Nix:** provides reproducible tooling and environment builds; Podman remains the task runtime.
@@ -67,142 +67,45 @@ Exclusive cores and GPUs do not isolate shared caches, memory bandwidth, or unre
 - Provide a CLI, declarative workflow files, and a web UI for your own trusted workloads.
 - Support independent tasks, parameter sweeps, and dependency graphs.
 - Manage input transfers and output collection over SSH, caching reusable inputs.
-- Keep tasks running through server restarts or tunnel disconnects.
-  Workers retain execution state and results locally, then reconcile with the server before retries or downstream scheduling.
+- Keep tasks running through server restarts or SSH disconnects.
+  Containers carry their attempt ID, so the server finds and collects them after reconnecting, before retries or downstream scheduling.
 - Support infrastructure-failure retries and user-defined task retry policies, with bounded attempts.
   A disconnect alone is not proof that a task failed.
 
-## Run a local task
+## Workers
 
-Load an image from your evaluation's Nix flake, then use the image reference printed by `copyToPodman`:
+Workers require Linux, rootless Podman with delegated cgroup v2 `cpuset` and `memory` controllers, OpenSSH, a POSIX login shell, GNU `tar` and `find`, a user systemd manager with `systemd-run`, and lingering enabled for the worker user (`loginctl enable-linger`).
+Nothing of Ordo is installed there: the server runs each step as a short shell script over one SSH connection per worker, and Podman's own `conmon` keeps tasks running between steps.
+Use a worker-local filesystem for the state directory, not a shared network filesystem; it must be mode 0700.
 
-```sh
-nix run /path/to/evaluation#image.copyToPodman
-nix run . -- run --image evaluation:BUILD_TAG \
-  --cpus 0,1 --memory-mib 512 --output ./run-001
-```
-
-Ordo resolves the local image reference to an immutable image ID and never pulls from a registry.
-The image's ENTRYPOINT/CMD runs by default; trailing `-- COMMAND ARGS...` replaces CMD while preserving ENTRYPOINT, without invoking a host shell.
-
-- Requires local Linux, rootless Podman, and cgroup v2 with delegated `cpuset` and `memory` controllers; unsupported hosts fail preflight.
-- Pins logical CPU IDs and limits memory with swap disabled.
-  Standalone `run` is **unmanaged**: pinning does not reserve CPUs and can overlap agent-managed tasks or other processes.
-- The output directory must not exist.
-  `run.json` records the request, image/container identity, timestamps, exit status, and infrastructure errors; `stdout.log` and `stderr.log` are collected after exit.
-- Removes the container only after logs and final metadata have been saved.
-  On interruption or collection failure, it is retained and **may still be running**; use `ordo recover --output DIR` to collect it, or `container_name` from `run.json` with `podman inspect`, `podman logs`, or `podman stop` for manual management.
-- Only logs and metadata are exported; container filesystem changes are discarded on cleanup.
-  Networking, file mounts/artifact export, GPUs, retries, and automatic reconnection are not included in this slice.
-
-Task exit codes are propagated; CLI/infrastructure errors return 2 and interruption returns 130.
-For an opt-in live test, use a preloaded nix2container image whose default command exits successfully:
-
-```sh
-ORDO_TEST_IMAGE=evaluation:BUILD_TAG ORDO_TEST_CPUS=0 \
-  go test -v ./internal/task -run TestPodmanIntegration
-```
-
-## Recover a retained local task
-
-On the same host, as the same user and using the same local Podman storage:
-
-```sh
-nix run . -- recover --output ./run-001
-```
-
-Recovery never creates, starts, restarts, or retries a task.
-It verifies the saved container and image identity, waits if the container is still running, and uses the same collection and cleanup path as `run`.
-If launch was interrupted before the container ID was saved, an Ordo container label proves ownership; older unlabeled containers without a saved ID require manual inspection.
-
-- Logs are retrieved into temporary files and synced before publication; each destination is replaced atomically.
-  Retrieval failures leave previous logs untouched.
-  The container is retained until both logs and final result metadata are saved.
-- A durable `finished` record marks saved results independently of cleanup errors.
-  Recovery can retry cleanup or reconcile removal that succeeded before its metadata update.
-- Repeating recovery after successful cleanup returns the saved task exit code without contacting Podman.
-- Missing containers without committed results, inconsistent metadata, and unsupported container states cause errors, not automatic reruns.
-  Finished records must still have their saved log files.
-- An advisory lock serializes Ordo processes using the same local run directory; it is released when the process exits, including crashes.
-  Do not delete `.lock` or modify the directory while Ordo is using it.
-  Stop the original CLI before recovering a run from an older Ordo version that did not acquire this lock.
-
-Recovery does not require resource controllers to remain delegated because it makes no new allocation.
-It is explicit, local reconciliation—not an SSH worker, automatic reconnect, or retry policy.
-
-## Managed workers
-
-Workers require Linux, rootless Podman with delegated cgroup v2 controls, OpenSSH, a user systemd manager, and existing user lingering.
-`worker start` uploads a checksum-verified, content-addressed static Linux executable and starts a transient user service; it does not enable a permanent service or change host configuration.
-Use a worker-local filesystem for state, not a shared network filesystem.
-
-```sh
-# Replace the host, remote path, and logical CPU pool for your worker's topology.
-ordo worker start --host WORKER --state /home/worker/.local/state/ordo \
-  --cpus 0,1,64,65 --memory-mib 512 --binary ./ordo-linux-amd64
-
-# Transfer a local nix2container image; use the immutable ID returned in JSON.
-ordo worker put-image --host WORKER --state /home/worker/.local/state/ordo \
-  --cpus 0,1,64,65 --memory-mib 512 --image localhost/evaluation:BUILD_TAG
-
-# Alternatively supply --archive OCI_ARCHIVE --image sha256:IMAGE_ID.
-# Named inputs mount read-only at /inputs/NAME; write artifacts under /outputs.
-ordo worker submit --host WORKER --state /home/worker/.local/state/ordo \
-  --cpus 0,1,64,65 --memory-mib 512 \
-  --id evaluation-001 --image sha256:IMAGE_ID --cores 1 --task-memory-mib 256
-
-ordo worker get --host WORKER --state /home/worker/.local/state/ordo \
-  --cpus 0,1,64,65 --memory-mib 512 --id evaluation-001
-```
-
+- The server reaches each worker by its SSH alias, so set `User`, `Port`, and `IdentityFile` in the server's `~/.ssh/config`.
+  Authentication must not prompt.
+- Each Podman command runs in its own transient user scope (`systemd-run --user --scope`), and a stop runs as a transient user service, so neither ends with the SSH session that started it.
 - The CPU pool must contain every online SMT sibling of each selected physical core.
   Requests count **physical cores**, not logical CPUs.
-- Agent-managed attempts cannot overlap physical cores; their memory limits must fit the configured aggregate budget.
-  Standalone runs and unrelated host processes are outside this guarantee.
-- An attempt ID identifies one immutable specification.
-  Repeating the same submission returns that attempt; changing its specification is rejected.
-- SQLite commits the attempt and its reservation before launch.
-  Restart restores reservations before admission.
-  Unknown outcomes remain blocked with resources held, never silently retried.
-- The agent owns a private mode-0600 Unix socket, reached through a separately owned SSH tunnel.
-  Closing the client/tunnel does not cancel work.
-- Podman operations launched from a systemd service use independent transient runtime scopes.
-  Container monitors and FUSE mounts survive agent service cleanup; the service retains `KillMode=control-group`.
-- Only one agent may run per host/user.
-  `/run/user/UID/ordo-worker.lock` also binds unfinished attempts to their original state directory across agent stops.
-  Never delete this lock or the state directory to bypass reconciliation.
-  A clean stop with no unfinished attempts clears the binding, but retains the lock inode.
-- Reconnect reuses the service and state.
-  A different executable requires explicitly stopping the old service before bootstrap; stopped agents leave tasks alive.
-  Transient services need bootstrap after a host reboot.
-- Worker commands return JSON.
-  `worker get` reports status rather than propagating the task exit code.
-- `worker submit --input NAME=DIR` snapshots each named input and mounts it read-only at `/inputs/NAME`.
-  Identical snapshots reuse the content-addressed cache.
-  Links and special files are rejected.
-- Agent tasks write artifacts under `/outputs`.
-  These are archived and synced before container cleanup.
-  `worker fetch --id ID --output NEW_DIR` downloads verified logs, metadata, and extracted outputs.
-  Worker results remain available for repeated downloads.
-- Transfers are streamed with SHA-256 verification and atomic publication.
-  Each archive is limited to 64 GiB; output files must be readable by the worker user.
-  No automatic cache/result deletion is performed.
+- Ordo's attempts cannot overlap physical cores; their memory limits must fit the configured aggregate budget.
+  Unrelated host processes are outside this guarantee.
+- Each container is named `ordo-ATTEMPT` and labeled with its attempt and the server's ID.
+  The server records an attempt before launching it, and the name allows one container per attempt, so a lost response or a server restart never starts a task twice.
+- One server must own each worker account.
+  Ordo containers labeled by another server stop the worker from taking new jobs.
+- Images are loaded once into the worker user's Podman storage, and inputs are unpacked once under the state directory by content digest.
+  Inputs mount read-only at `/inputs/NAME`; links and special files are rejected.
+- Tasks write artifacts under `/outputs`.
+  After exit, the server streams logs and outputs back, writes `run.json`, and only then removes the container and its run directory.
+  Outputs may contain only regular files and directories; anything else blocks the job until it is cancelled.
+- A worker reboot fails a running attempt as an infrastructure failure.
+  A changed `/etc/machine-id` blocks the attempt instead of adopting another machine's state.
+- Cached images and inputs are never deleted automatically.
 
-The Nix package builds with `CGO_ENABLED=0`.
-For a macOS controller or different worker architecture, supply a cross-compiled Linux artifact:
-
-```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ordo-linux-amd64 ./cmd/ordo
-```
-
-The opt-in [worker smoke test](tests/README.md) checks real crash/stop/reconnect behavior without enabling services permanently.
+The opt-in [live checks](tests/README.md) cover server restarts, workflows, and GPU allocation on real workers.
 
 ## Durable queue
 
 Start `ordo server --state SERVER_DIR --workers workers.json` with 1–10 worker entries:
 
 ```json
-[{"host":"WORKER","state_dir":"/home/worker/.local/state/ordo","cpus":"0,1,64,65","memory_mib":512,"binary":"/absolute/path/ordo-linux-amd64"}]
+[{"host":"WORKER","state_dir":"/home/worker/.local/state/ordo","cpus":"0,1,64,65","memory_mib":512}]
 ```
 
 `ordo submit --state SERVER_DIR` reads one job request per line from stdin (or `--file JOBS.jsonl`):
@@ -232,9 +135,10 @@ An output named `run.json`, `stdout.log`, or `stderr.log` would collide, so such
 
 `ordo queue list` and `ordo queue get --id ID` accept the same `--state` argument.
 The control socket is private.
-Server shutdown/disconnection never cancels attempts; dispatch IDs are committed before submission, and worker identity must match before reconciliation.
-A worker losing an acknowledged attempt or changing identity blocks that job rather than rerunning it.
-Results must be downloaded and validated before the server marks success.
+Server shutdown or disconnection never stops containers; attempts are committed before launch, and the worker's machine ID must match before reconciliation.
+A container that disappears or cannot be collected, or a worker whose identity changed, blocks that job rather than rerunning it.
+A blocked job keeps its reservation and is never retried; cancel it to release it.
+Results must be collected and recorded before the server marks success.
 
 ## Web UI
 
@@ -273,20 +177,20 @@ After changing `ui/package-lock.json`, update `npmDepsHash` in `nix/checks/ui.ni
 
 ## GPU workers
 
-Configure a worker's optional `gpus` array with full NVIDIA GPU UUIDs, or pass `--gpus UUID,UUID` to `worker start` and subsequent worker commands.
-Request `resources.gpus` in queue/workflow JSON or `--task-gpus N` with `worker submit`.
+Configure a worker's optional `gpus` array with full NVIDIA GPU UUIDs.
+Request `resources.gpus` in queue/workflow JSON.
 An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, and unsupported device controls are rejected.
 
-- Agents discover UUID/model/memory/driver information and generate a private CDI specification under `STATE/cdi`, using `nvidia-ctk`.
+- The server reads UUID/model/memory/driver information with `nvidia-smi` and generates a private CDI specification under `STATE/cdi` with `nvidia-ctk` on the worker.
   No global CDI registration or host configuration change is needed.
 - GPU reservations are exclusive and durable.
-  Restart rejects missing/changed reserved hardware or drivers.
+  A configured GPU missing from the worker keeps that worker offline.
   Admission checks compute/graphics processes, not merely utilization; unrelated processes starting afterward remain outside Ordo's guarantee.
 - Podman receives only allocated CDI devices, with legacy NVIDIA hook visibility disabled.
   No privileged mode or device-isolation fallback is used.
 - GPU images must work with the injected driver libraries; NVIDIA CDI supplies `NVIDIA_CTK_LIBCUDA_DIR`.
   The nix2container GPU fixture uses this directory to load `libcuda.so.1`.
-- `tests/gpu-smoke.sh` verifies exactly one visible GPU UUID, a tiny CUDA allocation/set/copy, overlap rejection, and agent-crash recovery.
+- `tests/gpu-smoke.sh` verifies exactly one visible GPU UUID, a tiny CUDA allocation/set/copy, exclusive allocation, hardware matching, and server-restart recovery.
   Run it only against a GPU confirmed free of existing processes.
 
 ## Hardware matching
@@ -300,8 +204,6 @@ Queue/workflow tasks accept an optional `match` object:
 Omitted fields are relaxed.
 Model/driver strings match exactly; architecture is `amd64` or `arm64`.
 GPU constraints require a positive GPU count and filter the devices actually allocated, not merely the host inventory.
-Direct worker submissions support equivalent `--arch`, `--cpu-model`, `--gpu-model`, `--min-gpu-memory-mib`, and `--gpu-driver` flags.
-The agent independently enforces these constraints, including after restart.
 A job with no eligible worker remains queued; it never falls back to weaker hardware.
 Matching uses the worker's reported inventory and does not control clocks, thermal state, shared memory bandwidth, or unrelated host activity.
 
@@ -317,8 +219,7 @@ Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-cl
 - A job runs only on workers carrying every tag it lists; jobs without tags still run on any worker.
 - Tags combine with the hardware fields above.
 - Submission rejects tags that no single configured worker carries together.
-- Tags are server policy: agents do not know their own tags, so only the server enforces them, and direct worker submissions take no tags.
-  Changing a worker's tags needs a server restart, not an agent restart.
+- Tags are server policy kept in `workers.json`; changing them needs a server restart.
 
 ## Task environment
 
@@ -330,8 +231,8 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
 
 - `env` values are part of the job's specification and appear in job records, `run.json`, and the web UI.
   Names starting with `NVIDIA_` are reserved, since NVIDIA's container hooks read them to inject devices.
-- `secrets` values are stored apart from jobs in the server's and worker's private state, deleted once the job or attempt ends, and never returned by the API or written to `run.json`, which lists only their names.
-  They reach Podman through a mode-0600 env file removed right after container creation, never through argv.
+- `secrets` values are stored apart from jobs in the server's private state, deleted once the job ends, and never returned by the API or written to `run.json`, which lists only their names.
+  At launch they travel over SSH standard input into a mode-0600 env file on the worker, removed as soon as `podman run` returns, never through argv.
   Values cannot contain NUL or line breaks.
   Secret values are not part of a job's identity: resubmitting an existing ID keeps the original values.
   `podman inspect` on the worker shows them while the container exists.
@@ -339,13 +240,12 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
   Domain filtering belongs in the image, for example with nftables under `NET_ADMIN`.
 - `cap_add` accepts only `NET_ADMIN`, which acts on the container's own network namespace under rootless Podman.
 - `services` names endpoints configured on the server with repeated `--service NAME=HOST:PORT`, resolved from the server.
-  The server's SSH tunnel to each worker forwards each one to a Unix socket, and the task sees it at `/services/NAME/socket`, even with `network` set to `none`.
-  The directory is mounted rather than the socket, so a task keeps reaching the service after a tunnel reconnect; while the server is disconnected, connections fail and the task must retry.
+  The server's SSH connection to each worker forwards each one to a Unix socket, and the task sees it at `/services/NAME/socket`, even with `network` set to `none`.
+  The directory is mounted rather than the socket, so a task keeps reaching the service after a reconnect; while the server is disconnected, connections fail and the task must retry.
   Only the container's root user (the worker user) can connect.
   Clients that need TCP bridge inside the image, for example `socat TCP-LISTEN:8317,bind=127.0.0.1,fork UNIX-CONNECT:/services/model/socket`.
   Workers' sshd must allow stream-local forwarding (`AllowStreamLocalForwarding`, the default).
   The server refuses a configuration that drops a service an unfinished job uses.
-- Direct worker submissions support `--env NAME=VALUE`, `--secret NAME` (value read from the CLI's own environment), `--network`, and `--cap-add`, but not services, since their tunnel closes when the command exits.
 
 ## Workflows
 
@@ -371,16 +271,16 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
   Each count is bounded to 0–10.
   Every executed attempt remains visible.
   Unknown/disconnected executions do not consume retries.
-- `timeout_seconds` is a per-attempt wall-clock limit from worker acceptance, enforced by the worker even when the controller is unavailable.
+- `timeout_seconds` is a per-attempt wall-clock limit from container start.
+  The server stops an expired container; while the server is unreachable, Podman kills it 60 seconds past the limit.
+  Either way the attempt counts as a task failure.
   Zero disables it; the maximum is one year.
 - `ordo queue cancel --id JOB_ID` and `ordo queue cancel-workflow --id WORKFLOW_ID` persist cancellation intent.
   A cancelled job ends `cancelled` and its dependents are skipped.
-  Unknown outcomes stay pending/blocked until reconciled.
-  `ordo worker cancel --id ATTEMPT_ID` also supports direct worker control.
+  Unknown outcomes stay blocked until cancelled.
 - `ordo queue stop --id JOB_ID` ends a running job early, for example when an external budget runs out, but keeps its result.
   The container gets SIGTERM, then SIGKILL after 10 seconds, and the attempt is collected and classified by its exit status like any other exit, so a task that traps SIGTERM and exits zero succeeds and its dependents run.
   A stopped job is never retried; stopping a job before it starts cancels it.
-  `ordo worker stop --id ATTEMPT_ID` stops one attempt directly.
 - Every stop and cancel accepts `--reason TEXT` (up to 1 KiB), recorded as `stop_reason` on the job and attempt.
   Attempts also record `stop_requested`: `cancel`, `stop`, or `timeout`.
   The first request reaching an attempt wins, but a later cancel still marks the job `cancelled`.

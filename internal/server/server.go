@@ -7,11 +7,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/image"
-	"github.com/r3clab/Ordo/internal/state"
-	"github.com/r3clab/Ordo/internal/task"
-	"github.com/r3clab/Ordo/internal/worker"
 	"maps"
 	"net/http"
 	"os"
@@ -20,6 +15,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/pool"
+	"github.com/r3clab/Ordo/internal/spec"
+	"github.com/r3clab/Ordo/internal/state"
+	"github.com/r3clab/Ordo/internal/worker"
 )
 
 type Request struct {
@@ -27,13 +29,13 @@ type Request struct {
 	Image     image.Source      `json:"image"`
 	Inputs    map[string]string `json:"inputs,omitempty"`
 	Args      []string          `json:"args,omitempty"`
-	Resources worker.Resources  `json:"resources"`
-	task.Sandbox
+	Resources spec.Resources    `json:"resources"`
+	spec.Sandbox
 	Secrets        map[string]string `json:"secrets,omitempty"`
 	Services       []string          `json:"services,omitempty"`
 	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`
 	Retry          RetryPolicy       `json:"retry,omitempty"`
-	Match          *worker.Match     `json:"match,omitempty"`
+	Match          *spec.Match       `json:"match,omitempty"`
 }
 
 type Failure string
@@ -44,13 +46,37 @@ const (
 	CancelFailure         Failure = "cancel"
 )
 
+type StopKind string
+
+const (
+	Cancel  StopKind = "cancel"
+	Stop    StopKind = "stop"
+	Timeout StopKind = "timeout"
+)
+
+type Result struct {
+	ExitCode      int       `json:"exit_code"`
+	OOMKilled     bool      `json:"oom_killed,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	FinishedAt    time.Time `json:"finished_at"`
+	OutputsSHA256 string    `json:"outputs_sha256"`
+}
+
+// Attempt is durable before its container is launched, so a restarted server finds the container by
+// its ID instead of launching a second one.
 type Attempt struct {
-	ID        string          `json:"id"`
-	Worker    string          `json:"worker"`
-	AgentID   string          `json:"agent_id"`
-	Remote    *worker.Attempt `json:"remote,omitempty"`
-	ResultDir string          `json:"result_dir,omitempty"`
-	Failure   Failure         `json:"failure,omitempty"`
+	ID            string          `json:"id"`
+	Worker        string          `json:"worker"`
+	MachineID     string          `json:"machine_id"`
+	BootID        string          `json:"boot_id"`
+	Allocation    pool.Allocation `json:"allocation"`
+	CreatedAt     time.Time       `json:"created_at"`
+	ContainerID   string          `json:"container_id,omitempty"`
+	StopRequested StopKind        `json:"stop_requested,omitempty"`
+	StopReason    string          `json:"stop_reason,omitempty"`
+	Result        *Result         `json:"result,omitempty"`
+	ResultDir     string          `json:"result_dir,omitempty"`
+	Failure       Failure         `json:"failure,omitempty"`
 }
 
 type State string
@@ -73,7 +99,7 @@ func (s State) Terminal() bool {
 
 type Job struct {
 	ID              string            `json:"id"`
-	Spec            worker.Spec       `json:"spec"`
+	Spec            spec.Spec         `json:"spec"`
 	Archive         string            `json:"archive"`
 	State           State             `json:"state"`
 	Error           string            `json:"error,omitempty"`
@@ -95,7 +121,8 @@ type Server struct {
 	mu       sync.Mutex
 	Root     string
 	store    *state.Store
-	workers  []worker.Remote
+	id       string
+	workers  []worker.Config
 	services map[string]string
 	jobs     map[string]Job
 	busy     map[string]bool
@@ -114,17 +141,17 @@ const (
 
 var ErrNixUntrusted = errors.New("nix images require the local API socket")
 
-func Open(root string, workers []worker.Remote, services map[string]string, tools image.Tools) (_ *Server, err error) {
+func Open(root string, workers []worker.Config, services map[string]string, tools image.Tools) (_ *Server, err error) {
 	if len(workers) == 0 || len(workers) > 10 {
 		return nil, errors.New("configure 1-10 workers")
 	}
 	seen := map[string]bool{}
 	for _, w := range workers {
-		if seen[w.Host] || w.Host == "" {
+		if seen[w.Host] {
 			return nil, errors.New("worker SSH aliases must be unique")
 		}
-		if !worker.ValidNameSet(w.Tags) {
-			return nil, fmt.Errorf("worker %s: tags must be distinct names", w.Host)
+		if err := w.Validate(); err != nil {
+			return nil, fmt.Errorf("worker %s: %w", w.Host, err)
 		}
 		seen[w.Host] = true
 		for name, address := range services {
@@ -147,16 +174,25 @@ func Open(root string, workers []worker.Remote, services map[string]string, tool
 		}
 	}()
 	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(services), jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	// Containers carry this ID, so a worker account shared with another server is detected.
+	err = db.Get("meta", "server", &s.id)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.id = strings.ToLower(rand.Text())
+		err = db.Put("meta", "server", s.id)
+	}
+	if err != nil {
+		return nil, err
+	}
 	jobs, err := state.List[Job](db, "job")
 	if err != nil {
 		return nil, err
 	}
 	for _, j := range jobs {
-		if !worker.ValidName(j.ID) {
+		if !spec.ValidName(j.ID) {
 			return nil, errors.New("invalid saved job ID")
 		}
 		if !j.State.Terminal() {
-			if len(j.Attempts) > 0 && !seen[j.Attempts[len(j.Attempts)-1].Worker] {
+			if n := len(j.Attempts); n > 0 && j.live(n-1) && !seen[j.current().Worker] {
 				return nil, errors.New("configuration removes a worker with unfinished attempts")
 			}
 			for _, name := range j.Spec.Services {
@@ -187,6 +223,14 @@ func (c imageCache) Load(key string) (image.Entry, bool, error) {
 	return e, err == nil, err
 }
 func (c imageCache) Save(key string, e image.Entry) error { return c.store.Put("image", key, e) }
+func (j *Job) current() *Attempt                          { return &j.Attempts[len(j.Attempts)-1] }
+
+// live reports whether attempt i may still run. A requeued job's last attempt is over: dispatch
+// replaces it in the same write that leaves the queued state.
+func (j Job) live(i int) bool {
+	return i == len(j.Attempts)-1 && !j.State.Terminal() && j.State != Queued
+}
+
 func (j Job) clone() Job {
 	j.Attempts = slices.Clone(j.Attempts)
 	return j
@@ -247,12 +291,12 @@ func (s *Server) refreshLocked(j *Job) {
 	}
 }
 
-func (j Job) stopKind() worker.StopKind {
+func (j Job) stopKind() StopKind {
 	switch {
 	case j.CancelRequested:
-		return worker.Cancel
+		return Cancel
 	case j.StopRequested:
-		return worker.Stop
+		return Stop
 	}
 	return ""
 }
@@ -331,18 +375,18 @@ func (st *staging) image(ctx context.Context, src image.Source) (image.Resolved,
 	return staged.Resolved, staged.err
 }
 
-func (r Request) Check(services map[string]string, workers []worker.Remote) error {
+func (r Request) Check(services map[string]string, workers []worker.Config) error {
 	if err := r.Image.Validate(); err != nil {
 		return err
 	}
 	if err := r.Retry.validate(); err != nil {
 		return err
 	}
-	if r.ID != "" && !worker.ValidName(r.ID) {
+	if r.ID != "" && !spec.ValidName(r.ID) {
 		return errors.New("invalid job ID")
 	}
 	for name := range r.Inputs {
-		if !worker.ValidName(name) {
+		if !spec.ValidName(name) {
 			return errors.New("invalid input name")
 		}
 	}
@@ -354,23 +398,24 @@ func (r Request) Check(services map[string]string, workers []worker.Remote) erro
 			return fmt.Errorf("service %q is unknown; configure it with ordo server --service", name)
 		}
 	}
-	if r.Match != nil && !slices.ContainsFunc(workers, func(w worker.Remote) bool { return carriesTags(w, r.Match) }) {
+	if r.Match != nil && !slices.ContainsFunc(workers, func(w worker.Config) bool { return carriesTags(w, r.Match) }) {
 		return fmt.Errorf("no configured worker has all match tags %q; add them to a worker's \"tags\" in the ordo server --workers file", r.Match.Tags)
 	}
 	return nil
 }
 
-func carriesTags(w worker.Remote, m *worker.Match) bool {
+func carriesTags(w worker.Config, m *spec.Match) bool {
 	return m == nil || !slices.ContainsFunc(m.Tags, func(tag string) bool { return !slices.Contains(w.Tags, tag) })
 }
 
 func (r Request) nix() bool { return r.Image.IsNix() }
 
-func (r Request) spec() worker.Spec {
-	return worker.Spec{Args: r.Args, Resources: r.Resources, Sandbox: r.Sandbox, Secrets: slices.Collect(maps.Keys(r.Secrets)), Services: r.Services, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}.Normalize()
+func (r Request) spec() spec.Spec {
+	return spec.Spec{Args: r.Args, Resources: r.Resources, Sandbox: r.Sandbox, Secrets: slices.Collect(maps.Keys(r.Secrets)), Services: r.Services, TimeoutSeconds: r.TimeoutSeconds, Match: r.Match}.Normalize()
 }
 
-func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, error) {
+// prepare also takes the workflow inputs a job will import, so the launch size check counts them.
+func (s *Server) prepare(ctx context.Context, r Request, from map[string]string, st *staging) (Job, error) {
 	if err := r.Check(s.services, s.workers); err != nil {
 		return Job{}, err
 	}
@@ -381,10 +426,10 @@ func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, erro
 	if err != nil {
 		return Job{}, err
 	}
-	spec := r.spec()
-	spec.Image = img.ID
+	j := Job{ID: r.ID, Spec: r.spec(), Archive: img.Blob, ImageOrigin: img.Origin, State: Queued, CreatedAt: time.Now().UTC(), From: from, Retry: r.Retry}
+	j.Spec.Image = img.ID
 	if len(r.Inputs) > 0 {
-		spec.Inputs = map[string]string{}
+		j.Spec.Inputs = map[string]string{}
 		for name, source := range r.Inputs {
 			hash, ok := st.inputs[source]
 			if !ok {
@@ -393,13 +438,29 @@ func (s *Server) prepare(ctx context.Context, r Request, st *staging) (Job, erro
 				}
 				st.inputs[source] = hash
 			}
-			spec.Inputs[name] = hash
+			j.Spec.Inputs[name] = hash
 		}
 	}
-	return Job{ID: r.ID, Spec: spec, Archive: img.Blob, ImageOrigin: img.Origin, State: Queued, CreatedAt: time.Now().UTC(), Retry: r.Retry}, nil
+	worst := j.Spec
+	worst.Inputs = maps.Clone(worst.Inputs)
+	for name := range from {
+		if worst.Inputs == nil {
+			worst.Inputs = map[string]string{}
+		}
+		// Imported outputs are known only at dispatch, by their SHA-256 hex digest.
+		worst.Inputs[name] = strings.Repeat("0", 64)
+	}
+	for _, w := range s.workers {
+		if carriesTags(w, j.Spec.Match) {
+			if err := w.CheckLaunch(worst, r.Secrets); err != nil {
+				return Job{}, err
+			}
+		}
+	}
+	return j, nil
 }
 func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
-	j, err := s.prepare(ctx, r, s.stage(ctx, r))
+	j, err := s.prepare(ctx, r, nil, s.stage(ctx, r))
 	if err != nil {
 		return Job{}, err
 	}
@@ -459,7 +520,7 @@ func (s *Server) Run(ctx context.Context, address string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Web UI: http://%s (token file: %s)\n", web.Addr().String(), filepath.Join(s.Root, "token"))
-	listener, err := worker.ListenUnix(Socket(s.Root))
+	listener, err := ListenUnix(Socket(s.Root))
 	if err != nil {
 		return err
 	}
@@ -489,245 +550,6 @@ func (s *Server) Run(ctx context.Context, address string) error {
 	return err
 }
 
-func (s *Server) work(ctx context.Context, remote worker.Remote) {
-	var tunnel *worker.Tunnel
-	defer func() {
-		if tunnel != nil {
-			_ = tunnel.Close()
-		}
-	}()
-	// Bootstrap hashes the agent binary and opens several SSH sessions, so it runs only until it
-	// succeeds and again after a connection to the running agent fails.
-	bootstrapped := false
-	for ctx.Err() == nil {
-		if tunnel == nil {
-			var err error
-			tunnel, err = s.connect(ctx, remote, !bootstrapped)
-			bootstrapped = err == nil
-			if err != nil {
-				s.workerStatus(remote.Host, nil, err)
-				if !sleep(ctx, 2*time.Second) {
-					return
-				}
-				continue
-			}
-		}
-		var info worker.Info
-		err := worker.Call(ctx, tunnel.Client, http.MethodGet, "/v1/info", nil, &info)
-		if err == nil {
-			s.workerStatus(remote.Host, &info, nil)
-			err = s.reconcileAll(ctx, remote, info, tunnel.Client)
-		}
-		if err != nil {
-			s.workerStatus(remote.Host, nil, err)
-			_ = tunnel.Close()
-			tunnel = nil
-		}
-		if !sleep(ctx, time.Second) {
-			return
-		}
-	}
-}
-
-func (s *Server) connect(ctx context.Context, remote worker.Remote, bootstrap bool) (*worker.Tunnel, error) {
-	if bootstrap {
-		probe, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-		if err := worker.Bootstrap(probe, remote); err != nil {
-			return nil, err
-		}
-	}
-	return worker.Connect(ctx, remote, s.services)
-}
-
-func sleep(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
-}
-
-func (s *Server) reconcileAll(ctx context.Context, remote worker.Remote, info worker.Info, client *http.Client) error {
-	for _, id := range s.unfinished() {
-		s.mu.Lock()
-		j := s.jobs[id].clone()
-		available := !s.busy[id] && s.fault == nil && !j.State.Terminal()
-		if available {
-			s.busy[id] = true
-		}
-		s.mu.Unlock()
-		if !available {
-			continue
-		}
-		err := s.reconcile(ctx, j, remote, &info, client)
-		s.mu.Lock()
-		delete(s.busy, id)
-		s.mu.Unlock()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// reconcile records each new reservation in info.Held so later queued jobs in the same pass see the reduced capacity.
-func (s *Server) reconcile(ctx context.Context, j Job, remote worker.Remote, info *worker.Info, client *http.Client) error {
-	if j.State == Queued {
-		if j.stopKind() != "" {
-			j.State = Cancelled
-			return s.save(j)
-		}
-		ready, err := s.dependencies(&j)
-		if err != nil || !ready {
-			return err
-		}
-		if info.Error != "" || !carriesTags(remote, j.Spec.Match) || !worker.FitsSpec(info.Hardware, j.Spec, info.Held) {
-			return nil
-		}
-		if err := s.importOutputs(&j); err != nil {
-			return err
-		}
-		if err := worker.EnsureImage(ctx, client, filepath.Join(s.images.Blobs, j.Archive), j.Archive, j.Spec.Image); err != nil {
-			return err
-		}
-		for _, hash := range j.Spec.Inputs {
-			if err := worker.EnsureInput(ctx, client, filepath.Join(s.images.Blobs, hash), hash); err != nil {
-				return err
-			}
-		}
-		j.Attempts = append(j.Attempts, Attempt{ID: strings.ToLower(rand.Text()), Worker: remote.Host, AgentID: info.ID})
-		j.State = Dispatching
-		if err := s.save(j); err != nil {
-			return err
-		}
-	}
-	at := &j.Attempts[len(j.Attempts)-1]
-	if at.Worker != remote.Host {
-		return nil
-	}
-	if at.AgentID != info.ID {
-		j.State = Blocked
-		j.Error = "worker identity changed; reconcile the original attempt before retrying"
-		return s.save(j)
-	}
-	var run worker.Attempt
-	err := worker.Call(ctx, client, http.MethodGet, "/v1/attempts/"+at.ID, nil, &run)
-	var api *worker.HTTPError
-	if errors.As(err, &api) && api.Status == http.StatusNotFound {
-		if at.Remote != nil {
-			j.State = Blocked
-			j.Error = "worker lost an acknowledged attempt"
-			return s.save(j)
-		}
-		s.refresh(&j)
-		if j.stopKind() != "" {
-			if err := worker.StopAttempt(ctx, client, at.ID, worker.Cancel, j.StopReason); err != nil {
-				return err
-			}
-			return s.finish(j, CancelFailure)
-		}
-		submission := worker.Submission{Spec: j.Spec}
-		if len(j.Spec.Secrets) > 0 {
-			err := s.store.Get("secret", j.ID, &submission.Secrets)
-			if errors.Is(err, sql.ErrNoRows) {
-				at.Failure = InfrastructureFailure
-				j.State = Failed
-				j.Error = "job secrets are missing; resubmit it under a new ID"
-				return s.save(j)
-			}
-			if err != nil {
-				return err
-			}
-		}
-		err = worker.Call(ctx, client, http.MethodPut, "/v1/attempts/"+at.ID, submission, &run)
-		if errors.As(err, &api) && api.Status == http.StatusTooManyRequests {
-			j.Attempts = j.Attempts[:len(j.Attempts)-1]
-			j.State = Queued
-			return s.save(j)
-		}
-		if err == nil {
-			info.Held = append(info.Held, run.Allocation)
-		}
-	}
-	if err != nil {
-		return err
-	}
-	unchanged := at.Remote != nil && at.Remote.State == run.State && at.Remote.UpdatedAt.Equal(run.UpdatedAt) && j.Error == run.Error
-	at.Remote = &run
-	j.Error = run.Error
-	// A stop sent to the worker directly still ends the job, as a server-side stop does.
-	if run.StopRequested == worker.Stop {
-		j.StopRequested = true
-		j.StopReason = cmp.Or(j.StopReason, run.StopReason)
-	}
-	if !run.State.Terminal() {
-		if kind := j.stopKind(); kind != "" && run.StopRequested == "" {
-			if err := worker.StopAttempt(ctx, client, at.ID, kind, j.StopReason); err != nil {
-				return err
-			}
-		}
-		state := Running
-		if run.State == worker.Blocked {
-			state = Blocked
-		}
-		if unchanged && j.State == state {
-			return nil
-		}
-		j.State = state
-		return s.save(j)
-	}
-	if run.Collectable() {
-		if err := s.collect(ctx, &j, at, run, info.ID, client); err != nil {
-			return err
-		}
-	}
-	return s.finish(j, failure(run))
-}
-
-func (s *Server) collect(ctx context.Context, j *Job, at *Attempt, run worker.Attempt, agent string, client *http.Client) error {
-	if run.Result.ExitCode == nil {
-		return errors.New("worker finished without an exit code")
-	}
-	j.State = Collecting
-	if err := s.save(*j); err != nil {
-		return err
-	}
-	dest := filepath.Join(s.Root, "results", j.ID, at.ID)
-	if _, err := os.Stat(dest); errors.Is(err, os.ErrNotExist) {
-		if err := worker.FetchResult(ctx, client, at.ID, dest); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
-	result, err := task.ReadResult(dest)
-	if err != nil {
-		return err
-	}
-	if result.Request.ReservationID != worker.ReservationID(agent, at.ID) || result.ContainerID != run.Result.ContainerID || result.ImageID != j.Spec.Image || result.ExitCode == nil || *result.ExitCode != *run.Result.ExitCode {
-		return errors.New("downloaded result does not match the dispatched attempt")
-	}
-	at.ResultDir = dest
-	return nil
-}
-
-// failure counts a timeout against the task, although the worker is what stopped it.
-func failure(run worker.Attempt) Failure {
-	switch {
-	case run.StopRequested == worker.Timeout:
-		return TaskFailure
-	case run.State == worker.Cancelled:
-		return CancelFailure
-	case !run.Collectable():
-		return InfrastructureFailure
-	case *run.Result.ExitCode != 0:
-		return TaskFailure
-	}
-	return ""
-}
-
 func (s *Server) Handler() http.Handler { return s.handler(Local) }
 
 func submitError(w http.ResponseWriter, err error) {
@@ -741,7 +563,7 @@ func submitError(w http.ResponseWriter, err error) {
 func submitRoute[T interface{ nix() bool }, R any](caller Caller, limit int64, submit func(context.Context, T) (R, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req T
-		if err := worker.DecodeJSON(http.MaxBytesReader(w, r.Body, limit), &req); err != nil {
+		if err := DecodeJSON(http.MaxBytesReader(w, r.Body, limit), &req); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -754,7 +576,7 @@ func submitRoute[T interface{ nix() bool }, R any](caller Caller, limit int64, s
 			submitError(w, err)
 			return
 		}
-		worker.WriteJSON(w, http.StatusOK, result)
+		WriteJSON(w, http.StatusOK, result)
 	}
 }
 
@@ -762,20 +584,20 @@ func (s *Server) handler(caller Caller) http.Handler {
 	mux := http.NewServeMux()
 	s.webRoutes(mux)
 	cancel := func(workflow bool) http.HandlerFunc {
-		return worker.StopHandler(func(id, reason string) error { return s.Cancel(id, workflow, reason) }, 500)
+		return StopHandler(func(id, reason string) error { return s.Cancel(id, workflow, reason) })
 	}
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", cancel(false))
 	mux.HandleFunc("POST /v1/workflows/{id}/cancel", cancel(true))
-	mux.HandleFunc("POST /v1/jobs/{id}/stop", worker.StopHandler(s.Stop, 500))
+	mux.HandleFunc("POST /v1/jobs/{id}/stop", StopHandler(s.Stop))
 	mux.HandleFunc("POST /v1/workflows", submitRoute(caller, 8<<20, s.SubmitWorkflow))
-	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) { worker.WriteJSON(w, http.StatusOK, s.List()) })
+	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) { WriteJSON(w, http.StatusOK, s.List()) })
 	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		j, ok := s.job(r.PathValue("id"))
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-		worker.WriteJSON(w, http.StatusOK, j)
+		WriteJSON(w, http.StatusOK, j)
 	})
 	mux.HandleFunc("POST /v1/jobs", submitRoute(caller, 1<<20, s.Submit))
 	if caller == Local {

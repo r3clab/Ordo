@@ -1,4 +1,4 @@
-package worker
+package spec
 
 import (
 	"errors"
@@ -32,29 +32,4 @@ func (m Match) Validate(resources Resources) error {
 		return errors.New("match.tags must be distinct names")
 	}
 	return nil
-}
-
-func matchedHardware(h Hardware, m *Match) (Hardware, bool) {
-	if m == nil {
-		return h, true
-	}
-	if (m.Arch != "" && h.Arch != m.Arch) || (m.CPUModel != "" && h.CPUModel != m.CPUModel) {
-		return h, false
-	}
-	all := h.GPUs
-	h.GPUs = nil
-	for _, gpu := range all {
-		if (m.GPUModel == "" || gpu.Model == m.GPUModel) && gpu.MemoryMiB >= m.MinGPUMemoryMiB && (m.GPUDriver == "" || gpu.Driver == m.GPUDriver) {
-			h.GPUs = append(h.GPUs, gpu)
-		}
-	}
-	return h, true
-}
-func FitsSpec(h Hardware, spec Spec, held []Allocation) bool {
-	filtered, ok := matchedHardware(h, spec.Match)
-	if !ok {
-		return false
-	}
-	_, err := allocate(filtered, spec.Resources, held)
-	return err == nil
 }

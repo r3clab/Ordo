@@ -88,18 +88,16 @@
       {:else}
         <ol class="space-y-2">
           {#each attempts as attempt, i (attempt.id)}
-            {@const result = attempt.remote?.result}
+            {@const result = attempt.result}
             <li class="rounded-lg border border-zinc-200 p-3 text-sm dark:border-zinc-800">
               <div class="flex flex-wrap items-center justify-between gap-2">
                 <span class="font-medium">#{i + 1} on {attempt.worker}</span>
-                {#if attempt.remote}<StateBadge state={attempt.remote.state} />{/if}
               </div>
               <p class="mt-1 text-xs muted">
-                {#if result?.exit_code !== undefined}Exit {result.exit_code}{result.oom_killed ? " (out of memory)" : ""} · {duration(result.started_at, result.finished_at)}{:else if attempt.remote}Updated {relative(attempt.remote.updated_at)}{:else}Dispatching{/if}{#if attempt.failure}
-                  · {attempt.failure} failure{/if}{#if attempt.remote?.stop_requested}
-                  · stop: {attempt.remote.stop_requested}{/if}
+                {#if result?.exit_code !== undefined}Exit {result.exit_code}{result.oom_killed ? " (out of memory)" : ""} · {duration(result.started_at, result.finished_at)}{:else}Dispatched {relative(attempt.created_at)}{/if}{#if attempt.failure}
+                  · {attempt.failure} failure{/if}{#if attempt.stop_requested}
+                  · stop: {attempt.stop_requested}{attempt.stop_reason ? ` (${attempt.stop_reason})` : ""}{/if}
               </p>
-              {#if attempt.remote?.error}<p class="mt-1 text-xs break-words text-rose-600 dark:text-rose-400">{attempt.remote.error}</p>{/if}
             </li>
           {/each}
         </ol>

@@ -10,8 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/r3clab/Ordo/internal/task"
 )
 
 func main() {
@@ -19,10 +17,6 @@ func main() {
 	defer stop()
 	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		var taskExit *task.ExitError
-		if errors.As(err, &taskExit) {
-			os.Exit(taskExit.Code)
-		}
 		if errors.Is(err, context.Canceled) {
 			os.Exit(130)
 		}
@@ -38,15 +32,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 }
 
 var commands = map[string]func(context.Context, []string, io.Writer) error{
-	"run":     runTask,
-	"recover": recoverTask,
-	"agent":   agentCommand,
-	"server":  serverCommand,
-	"submit":  submitCommand,
-	"fetch":   fetchCommand,
-	"schema":  schemaCommand,
-	"queue":   queueCommand,
-	"worker":  workerCommand,
+	"server": serverCommand,
+	"submit": submitCommand,
+	"fetch":  fetchCommand,
+	"schema": schemaCommand,
+	"queue":  queueCommand,
 }
 
 func dispatch(ctx context.Context, args []string, output io.Writer) error {
@@ -63,7 +53,7 @@ func dispatch(ctx context.Context, args []string, output io.Writer) error {
 		return command(ctx, flags.Args()[1:], output)
 	}
 
-	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  run      Run one local task in rootless Podman (run --help for options)\n  recover  Recover a retained local task (recover --help for options)\n  agent    Serve a persistent worker (agent --help for options)\n  worker   Bootstrap or contact a worker through SSH (worker --help for options)\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests from stdin (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Submit workflows, inspect, stop or cancel queued jobs\n  schema   Print the JSON Schema for job requests and workflows")
+	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL job requests from stdin (submit --help for options)\n  fetch    Download finished job results into a directory (fetch --help for options)\n  queue    Submit workflows, inspect, stop or cancel queued jobs\n  schema   Print the JSON Schema for job requests and workflows")
 	return err
 }
 

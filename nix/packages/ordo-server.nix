@@ -1,5 +1,3 @@
-# `ordo worker start` uploads os.Executable(), which resolves past the wrapper
-# script to the static Go binary that wrapProgram keeps as .ordo-wrapped.
 { pkgs, perSystem, ... }:
 pkgs.symlinkJoin {
   name = "ordo-server";

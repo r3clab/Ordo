@@ -1,20 +1,14 @@
-package task
+package spec
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 )
 
 const Egress = "egress"
-
-const secretsFile = ".secrets.env"
 
 // Podman's env-file reader rejects lines over 64 KiB, and Linux rejects argv strings over 128 KiB.
 const MaxValueBytes = 32 << 10
@@ -48,7 +42,7 @@ type Sandbox struct {
 	CapAdd  []string          `json:"cap_add,omitempty"`
 }
 
-func (s Sandbox) Validate(secrets Secrets) error {
+func (s Sandbox) Validate(secrets map[string]string) error {
 	if s.Network != "" && !slices.Contains(networks, s.Network) {
 		return errors.New(`network must be "none" or "egress"`)
 	}
@@ -91,52 +85,4 @@ func checkVariable(name, value string) error {
 		return fmt.Errorf("variable %s must be at most %d bytes without NUL", name, MaxValueBytes)
 	}
 	return nil
-}
-
-// Secrets holds launch-time values but serializes as its sorted names, so values never reach a record.
-type Secrets map[string]string
-
-func (s Secrets) Names() []string { return slices.Sorted(maps.Keys(s)) }
-
-func (s Secrets) MarshalJSON() ([]byte, error) { return json.Marshal(s.Names()) }
-
-func (s *Secrets) UnmarshalJSON(data []byte) error {
-	var names []string
-	if err := json.Unmarshal(data, &names); err != nil {
-		return err
-	}
-	*s = Secrets{}
-	for _, name := range names {
-		(*s)[name] = ""
-	}
-	return nil
-}
-
-func writeSecrets(dir string, secrets Secrets) error {
-	var text strings.Builder
-	for _, name := range secrets.Names() {
-		text.WriteString(name + "=" + secrets[name] + "\n")
-	}
-	return os.WriteFile(filepath.Join(dir, secretsFile), []byte(text.String()), 0o600)
-}
-
-func removeSecrets(dir string) error {
-	if err := os.Remove(filepath.Join(dir, secretsFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-func (s Sandbox) podmanArgs() []string {
-	args := []string{"--network=none"}
-	if s.Network == Egress {
-		args = []string{"--network=pasta"}
-	}
-	for _, capability := range s.CapAdd {
-		args = append(args, "--cap-add="+capability)
-	}
-	for _, name := range slices.Sorted(maps.Keys(s.Env)) {
-		args = append(args, "--env", name+"="+s.Env[name])
-	}
-	return args
 }

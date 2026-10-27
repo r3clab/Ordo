@@ -32,7 +32,7 @@ func validator(t *testing.T, name string) func(string) error {
 func TestRequestSchemaMatchesValidation(t *testing.T) {
 	validate := validator(t, "request")
 	base := `"id":"grep-1","resources":{"cores":2,"memory_mib":4096}`
-	tagged := []worker.Remote{{Tags: []string{"l40s"}}}
+	tagged := []worker.Config{{Tags: []string{"l40s"}}}
 	for _, valid := range []string{
 		`{` + base + `,"image":"localhost/klee:1"}`,
 		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"match":{"arch":"amd64","tags":["l40s"]}}`,
@@ -77,7 +77,7 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 			t.Errorf("accepted %s", invalid)
 		}
 		var r server.Request
-		if err := worker.DecodeJSON(strings.NewReader(invalid), &r); err == nil && r.Check(nil, tagged) == nil {
+		if err := server.DecodeJSON(strings.NewReader(invalid), &r); err == nil && r.Check(nil, tagged) == nil {
 			t.Errorf("Go accepts what the schema rejects: %s", invalid)
 		}
 	}

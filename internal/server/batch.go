@@ -12,8 +12,6 @@ import (
 	"iter"
 	"net/http"
 	"slices"
-
-	"github.com/r3clab/Ordo/internal/worker"
 )
 
 const maxBatch = 10000
@@ -49,7 +47,7 @@ func ParseBatch(r io.Reader) ([]BatchEntry, error) {
 			return nil, fmt.Errorf("batch exceeds %d jobs", maxBatch)
 		}
 		e := BatchEntry{Line: line}
-		e.Err = worker.DecodeJSON(bytes.NewReader(data), &e.Request)
+		e.Err = DecodeJSON(bytes.NewReader(data), &e.Request)
 		if e.Err == nil && e.Request.ID == "" {
 			e.Err = errors.New("batch jobs need an id so resubmission stays idempotent")
 		}
@@ -77,7 +75,7 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 				err := cmp.Or(e.Err, ctx.Err())
 				var j Job
 				if err == nil {
-					j, err = s.prepare(ctx, e.Request, st)
+					j, err = s.prepare(ctx, e.Request, nil, st)
 				}
 				if err != nil {
 					results[i].Error = err.Error()

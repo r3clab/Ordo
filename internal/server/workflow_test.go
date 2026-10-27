@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/spec"
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
@@ -39,12 +40,12 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(filepath.Join(root, "state"), []worker.Remote{{Host: "worker"}}, nil, image.Tools{})
+	s, err := Open(filepath.Join(root, "state"), []worker.Config{testWorker("worker")}, nil, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	req := Request{Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: worker.Resources{Cores: 1, MemoryMiB: 128}}
+	req := Request{Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}
 	a := Step{Request: req}
 	a.ID = "a"
 	a.Retry.Task = 1

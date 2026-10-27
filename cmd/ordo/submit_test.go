@@ -22,7 +22,7 @@ import (
 
 func serveSocket(t *testing.T, root string, handler http.Handler) {
 	t.Helper()
-	listener, err := worker.ListenUnix(server.Socket(root))
+	listener, err := server.ListenUnix(server.Socket(root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func decodeLines[T any](t *testing.T, data []byte) []T {
 
 func TestSubmitStreamsResultsAndIsIdempotent(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "server")
-	s, err := server.Open(root, []worker.Remote{{Host: "worker"}}, nil, image.Tools{})
+	s, err := server.Open(root, []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024}}, nil, image.Tools{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestFetchWaitsAndSkipsExistingDirectories(t *testing.T) {
 		if polls.Add(1) > 1 {
 			state = server.Succeeded
 		}
-		worker.WriteJSON(w, 200, []server.Job{{ID: "a", State: state}, {ID: "b", State: "succeeded"}, {ID: "c", State: "failed"}})
+		server.WriteJSON(w, 200, []server.Job{{ID: "a", State: state}, {ID: "b", State: "succeeded"}, {ID: "c", State: "failed"}})
 	})
 	mux.HandleFunc("GET /v1/jobs/{id}/result", func(w http.ResponseWriter, r *http.Request) {
 		var tar bytes.Buffer
@@ -101,7 +101,7 @@ func TestFetchWaitsAndSkipsExistingDirectories(t *testing.T) {
 			t.Error(err)
 		}
 		sum := sha256.Sum256(tar.Bytes())
-		w.Header().Set(worker.ChecksumHeader, hex.EncodeToString(sum[:]))
+		w.Header().Set(server.ChecksumHeader, hex.EncodeToString(sum[:]))
 		_, _ = w.Write(tar.Bytes())
 	})
 	root := t.TempDir()

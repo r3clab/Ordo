@@ -10,7 +10,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/r3clab/Ordo/internal/task"
+	"github.com/r3clab/Ordo/internal/spec"
 )
 
 const maxMetadataBytes = 1 << 20
@@ -42,7 +42,7 @@ func ArchiveID(archive string) (string, error) {
 	if err := readJSON(f, blobPath(index.Manifests[0].Digest), &manifest); err != nil {
 		return "", err
 	}
-	if !task.ValidImageID(manifest.Config.Digest) {
+	if !spec.ValidImageID(manifest.Config.Digest) {
 		return "", errors.New("OCI manifest has an invalid config digest")
 	}
 	return manifest.Config.Digest, nil

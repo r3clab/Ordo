@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/task"
+	"github.com/r3clab/Ordo/internal/podman"
 )
 
 type Origin struct {
@@ -45,7 +45,7 @@ type Resolver struct {
 
 func NewResolver(blobs, scratch string, tools Tools, cache Cache) *Resolver {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Resolver{Blobs: blobs, Scratch: scratch, Tools: tools, Cache: cache, imageID: task.ImageID, save: task.SaveImage, ctx: ctx, cancel: cancel, builds: make(chan struct{}, builds)}
+	return &Resolver{Blobs: blobs, Scratch: scratch, Tools: tools, Cache: cache, imageID: podman.ImageID, save: podman.SaveImage, ctx: ctx, cancel: cancel, builds: make(chan struct{}, builds)}
 }
 
 func (r *Resolver) Close() {

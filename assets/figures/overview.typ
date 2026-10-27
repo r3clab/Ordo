@@ -65,7 +65,7 @@
 #rect(654, 70, 266, 276)
 #number(670, 88, "03")
 #words(704, 91, "Execute")
-#command(670, 130, "ordo agent")
+#command(670, 130, "podman run")
 #put(787, 174, line(length: 40pt, angle: 90deg, stroke: ink + 1.5pt))
 #put(783, 207, polygon((0pt, 0pt), (8pt, 0pt), (4pt, 7pt), fill: ink, stroke: none))
 #rect(670, 220, 234, 106, fill: plane, radius: 7)

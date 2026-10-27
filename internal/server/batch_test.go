@@ -21,7 +21,7 @@ var nixImageID = "sha256:" + strings.Repeat("c", 64)
 func nixServer(t *testing.T) (*Server, *imagetest.Nix) {
 	t.Helper()
 	fake := &imagetest.Nix{Output: "/nix/store/aaaa-image.json", Config: nixImageID}
-	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Remote{{Host: "worker"}}, nil, image.Tools{Exec: fake.Exec})
+	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil, image.Tools{Exec: fake.Exec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,9 +114,9 @@ func TestResultIsOutputsBesideLogs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	client := fakeWorker(t, s.Handler().ServeHTTP)
+	client := handlerClient(t, s.Handler())
 	into := t.TempDir()
-	if err := worker.Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "done"), nil); err != nil {
+	if err := Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "done")); err != nil {
 		t.Fatal(err)
 	}
 	var got []string
@@ -132,14 +132,14 @@ func TestResultIsOutputsBesideLogs(t *testing.T) {
 	if !slices.Equal(got, []string{"klee/info", "run.json", "stderr.log", "stdout.log"}) {
 		t.Fatalf("fetched %q", got)
 	}
-	var api *worker.HTTPError
-	if err := worker.Download(context.Background(), client, "/v1/jobs/running/result", filepath.Join(into, "running"), nil); !errors.As(err, &api) || api.Status != http.StatusConflict {
+	var api *HTTPError
+	if err := Download(context.Background(), client, "/v1/jobs/running/result", filepath.Join(into, "running")); !errors.As(err, &api) || api.Status != http.StatusConflict {
 		t.Fatalf("unfinished job: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "outputs", "stdout.log"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "again"), nil); !errors.As(err, &api) || api.Status != http.StatusConflict {
+	if err := Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "again")); !errors.As(err, &api) || api.Status != http.StatusConflict {
 		t.Fatalf("colliding output: %v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "outputs", "stdout.log")); err != nil {
@@ -148,7 +148,7 @@ func TestResultIsOutputsBesideLogs(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "outputs", "a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "linked"), nil); !errors.As(err, &api) || api.Status != http.StatusInternalServerError {
+	if err := Download(context.Background(), client, "/v1/jobs/done/result", filepath.Join(into, "linked")); !errors.As(err, &api) || api.Status != http.StatusInternalServerError {
 		t.Fatalf("an output the archive refuses must fail with an error response: %v", err)
 	}
 }

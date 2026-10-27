@@ -6,48 +6,46 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/task"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/r3clab/Ordo/internal/pool"
+	"github.com/r3clab/Ordo/internal/ssh"
 )
 
-type GPU struct {
-	UUID      string `json:"uuid"`
-	Index     int    `json:"index"`
-	Model     string `json:"model"`
-	MemoryMiB int64  `json:"memory_mib"`
-	Driver    string `json:"driver"`
-}
-
-func GPUList(text string) ([]string, error) {
-	if text == "" {
-		return nil, nil
-	}
-	return task.CheckGPUs(strings.Split(text, ","))
-}
-func discoverGPUs(ctx context.Context, ids []string, root string) ([]GPU, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	if _, err := task.CheckGPUs(ids); err != nil {
+// gpus installs a private CDI specification for exactly the configured devices, so Podman can hand a
+// task only the GPUs it was allocated without a global CDI registration.
+func (h *Host) gpus(ctx context.Context) ([]pool.GPU, error) {
+	data, err := h.output(ctx, "nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version,mig.mode.current --format=csv,noheader,nounits", nil)
+	if err != nil {
 		return nil, err
 	}
-	data, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,memory.total,driver_version,mig.mode.current", "--format=csv,noheader,nounits").Output()
+	gpus, err := parseGPUs(data, h.GPUs)
 	if err != nil {
-		return nil, fmt.Errorf("GPU discovery: %w", err)
+		return nil, err
 	}
+	generate := "nvidia-ctk cdi generate --format=json --device-name-strategy=uuid --no-all-device"
+	for _, id := range h.GPUs {
+		generate += " --device-id " + ssh.Quote(id)
+	}
+	cdi, err := h.output(ctx, generate, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkCDI(cdi, h.GPUs); err != nil {
+		return nil, err
+	}
+	install := "set -eu; umask 077; d=" + ssh.Quote(h.cdiDir()) + "; cat > \"$d/.nvidia.json.tmp\"; mv -f -- \"$d/.nvidia.json.tmp\" \"$d/nvidia.json\""
+	return gpus, h.run.Run(ctx, install, bytes.NewReader(cdi), nil, nil)
+}
+
+func parseGPUs(data []byte, ids []string) ([]pool.GPU, error) {
 	rows, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
 	if err != nil {
 		return nil, err
 	}
-	gpus := []GPU{}
+	gpus := []pool.GPU{}
 	for _, row := range rows {
 		if len(row) != 6 {
 			return nil, errors.New("unexpected NVIDIA inventory format")
@@ -69,23 +67,15 @@ func discoverGPUs(ctx context.Context, ids []string, root string) ([]GPU, error)
 		if err != nil {
 			return nil, err
 		}
-		gpus = append(gpus, GPU{UUID: row[1], Index: index, Model: row[2], MemoryMiB: memory, Driver: row[4]})
+		gpus = append(gpus, pool.GPU{UUID: row[1], Index: index, Model: row[2], MemoryMiB: memory, Driver: row[4]})
 	}
 	if len(gpus) != len(ids) {
 		return nil, errors.New("configured GPU UUID is missing")
 	}
-	dir := filepath.Join(root, "cdi")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	args := []string{"cdi", "generate", "--format=json", "--device-name-strategy=uuid", "--no-all-device"}
-	for _, id := range ids {
-		args = append(args, "--device-id", id)
-	}
-	data, err = exec.CommandContext(ctx, "nvidia-ctk", args...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("private NVIDIA CDI generation: %w", err)
-	}
+	return gpus, nil
+}
+
+func checkCDI(data []byte, ids []string) error {
 	var spec struct {
 		Kind    string `json:"kind"`
 		Devices []struct {
@@ -93,32 +83,31 @@ func discoverGPUs(ctx context.Context, ids []string, root string) ([]GPU, error)
 		} `json:"devices"`
 	}
 	if err := json.Unmarshal(data, &spec); err != nil {
-		return nil, err
+		return err
 	}
 	if spec.Kind != "nvidia.com/gpu" || len(spec.Devices) != len(ids) {
-		return nil, errors.New("CDI specification contains unexpected devices")
+		return errors.New("CDI specification contains unexpected devices")
 	}
 	seen := map[string]bool{}
 	for _, device := range spec.Devices {
 		if !slices.Contains(ids, device.Name) || seen[device.Name] {
-			return nil, errors.New("CDI device identity mismatch")
+			return errors.New("CDI device identity mismatch")
 		}
 		seen[device.Name] = true
 	}
-	err = content.WriteAtomic(filepath.Join(dir, "nvidia.json"), func(w io.Writer) error {
-		_, err := w.Write(data)
-		return err
-	})
+	return nil
+}
+
+// GPUBusy lists configured GPUs that run any compute or graphics process, Ordo's or not.
+func (h *Host) GPUBusy(ctx context.Context, gpus []pool.GPU) ([]string, error) {
+	data, err := h.output(ctx, "nvidia-smi pmon -c 1", nil)
 	if err != nil {
 		return nil, err
 	}
-	return gpus, nil
+	return parseBusy(data, gpus)
 }
-func busyGPUs(ctx context.Context, gpus []GPU) ([]string, error) {
-	data, err := exec.CommandContext(ctx, "nvidia-smi", "pmon", "-c", "1").Output()
-	if err != nil {
-		return nil, fmt.Errorf("check GPU processes: %w", err)
-	}
+
+func parseBusy(data []byte, gpus []pool.GPU) ([]string, error) {
 	seen := map[int]bool{}
 	busy := map[int]bool{}
 	for line := range strings.SplitSeq(string(data), "\n") {

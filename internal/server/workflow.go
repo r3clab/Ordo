@@ -8,14 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/image"
-	"github.com/r3clab/Ordo/internal/task"
-	"github.com/r3clab/Ordo/internal/worker"
 	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/image"
+	"github.com/r3clab/Ordo/internal/spec"
 )
 
 type RetryPolicy struct {
@@ -65,14 +65,14 @@ func (w Workflow) nix() bool {
 }
 
 func expand(w Workflow) ([]Step, error) {
-	if !worker.ValidName(w.ID) || len(w.ID) > MaxWorkflowID || len(w.Tasks) == 0 || len(w.Tasks) > MaxWorkflowTasks {
+	if !spec.ValidName(w.ID) || len(w.ID) > MaxWorkflowID || len(w.Tasks) == 0 || len(w.Tasks) > MaxWorkflowTasks {
 		return nil, fmt.Errorf("workflow needs an ID (1..%d characters) and 1..%d tasks", MaxWorkflowID, MaxWorkflowTasks)
 	}
 	groups := map[string][]string{}
 	ids := map[string]bool{}
 	var expanded []Step
 	for _, step := range w.Tasks {
-		if !worker.ValidName(step.ID) || len(step.ID) > MaxStepID || groups[step.ID] != nil {
+		if !spec.ValidName(step.ID) || len(step.ID) > MaxStepID || groups[step.ID] != nil {
 			return nil, fmt.Errorf("task IDs must be unique and 1..%d characters", MaxStepID)
 		}
 		instances, err := step.instances()
@@ -113,7 +113,7 @@ func (step Step) instances() ([]Step, error) {
 	combos := []map[string]string{{}}
 	for _, key := range slices.Sorted(maps.Keys(step.Matrix)) {
 		values := step.Matrix[key]
-		if !worker.ValidName(key) || len(values) == 0 || len(values) > MaxWorkflowTasks || len(combos) > MaxWorkflowTasks/len(values) {
+		if !spec.ValidName(key) || len(values) == 0 || len(values) > MaxWorkflowTasks || len(combos) > MaxWorkflowTasks/len(values) {
 			return nil, errors.New("invalid or oversized parameter matrix")
 		}
 		var next []map[string]string
@@ -172,7 +172,7 @@ func link(workflow string, tasks []Step, resolve func(id string) []string) (map[
 			deps = append(deps, targets...)
 		}
 		for name, from := range step.From {
-			if !worker.ValidName(name) {
+			if !spec.ValidName(name) {
 				return nil, errors.New("invalid dependency input name")
 			}
 			if _, ok := step.Inputs[name]; ok {
@@ -251,7 +251,7 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 	}
 	st := s.stage(ctx, requests...)
 	for _, step := range steps {
-		j, err := s.prepare(ctx, step.Request, st)
+		j, err := s.prepare(ctx, step.Request, step.From, st)
 		if err != nil {
 			return nil, err
 		}
@@ -260,7 +260,6 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		}
 		j.Workflow = w.ID
 		j.Depends = step.Depends
-		j.From = step.From
 		j.Parameters = step.Parameters
 		j.Key = jobKey(j)
 		jobs = append(jobs, j)
@@ -341,13 +340,13 @@ func (s *Server) importOutputs(j *Job) error {
 	}
 	for name, id := range j.From {
 		dep := deps[id]
-		at := dep.Attempts[len(dep.Attempts)-1]
-		if at.Remote == nil || at.Remote.Result == nil {
+		at := dep.current()
+		if at.Result == nil {
 			return errors.New("dependency has no output identity")
 		}
-		hash := at.Remote.Result.OutputsSHA256
+		hash := at.Result.OutputsSHA256
 		// Collection verified the archive against this digest, and nothing rewrites a result directory.
-		if err := content.Link(s.images.Blobs, filepath.Join(at.ResultDir, task.OutputsArchive), hash); err != nil {
+		if err := content.Link(s.images.Blobs, filepath.Join(at.ResultDir, OutputsArchive), hash); err != nil {
 			return err
 		}
 		j.Spec.Inputs[name] = hash
@@ -363,9 +362,6 @@ func (s *Server) Stop(id, reason string) error {
 }
 
 func (s *Server) requestStop(id string, workflow bool, reason string, mark func(*Job)) error {
-	if len(reason) > worker.MaxReasonBytes {
-		return fmt.Errorf("reason exceeds %d bytes", worker.MaxReasonBytes)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fault != nil {
@@ -390,7 +386,7 @@ func (s *Server) requestStop(id string, workflow bool, reason string, mark func(
 }
 func (s *Server) finish(j Job, class Failure) error {
 	s.refresh(&j)
-	j.Attempts[len(j.Attempts)-1].Failure = class
+	j.current().Failure = class
 	count := 0
 	for _, at := range j.Attempts {
 		if at.Failure == class {

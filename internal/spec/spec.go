@@ -1,0 +1,95 @@
+// Package spec defines what a job asks a worker to run and validates it.
+package spec
+
+import (
+	"errors"
+	"fmt"
+	"maps"
+	"math"
+	"regexp"
+	"slices"
+	"time"
+)
+
+const NamePattern = `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
+
+var identifier = regexp.MustCompile(NamePattern)
+
+const ImageIDPattern = `^sha256:[0-9a-f]{64}$`
+
+var imageID = regexp.MustCompile(ImageIDPattern)
+
+const MaxTimeoutSeconds = 365 * 24 * 60 * 60
+
+func ValidName(name string) bool { return identifier.MatchString(name) }
+
+func ValidNameSet(names []string) bool {
+	sorted := slices.Sorted(slices.Values(names))
+	for i, name := range sorted {
+		if !ValidName(name) || (i > 0 && sorted[i-1] == name) {
+			return false
+		}
+	}
+	return true
+}
+
+func ValidImageID(id string) bool { return imageID.MatchString(id) }
+
+type Resources struct {
+	Cores     int   `json:"cores"`
+	MemoryMiB int64 `json:"memory_mib"`
+	GPUs      int   `json:"gpus,omitempty"`
+}
+
+type Spec struct {
+	Image     string            `json:"image"`
+	Args      []string          `json:"args,omitempty"`
+	Resources Resources         `json:"resources"`
+	Inputs    map[string]string `json:"inputs,omitempty"`
+	Sandbox
+	Secrets        []string `json:"secrets,omitempty"`
+	Services       []string `json:"services,omitempty"`
+	TimeoutSeconds int64    `json:"timeout_seconds,omitempty"`
+	Match          *Match   `json:"match,omitempty"`
+}
+
+func (s Spec) Normalize() Spec {
+	if s.Match != nil {
+		match := *s.Match
+		match.Tags = slices.Sorted(slices.Values(match.Tags))
+		s.Match = &match
+	}
+	s.Args = slices.Clone(s.Args)
+	s.Inputs = maps.Clone(s.Inputs)
+	s.Env = maps.Clone(s.Env)
+	s.CapAdd = slices.Sorted(slices.Values(s.CapAdd))
+	s.Secrets = slices.Sorted(slices.Values(s.Secrets))
+	s.Services = slices.Sorted(slices.Values(s.Services))
+	return s
+}
+
+func (s Spec) Validate(secrets map[string]string) error {
+	if s.Resources.Cores <= 0 || s.Resources.MemoryMiB <= 0 || s.Resources.MemoryMiB > math.MaxInt64>>20 || s.Resources.GPUs < 0 {
+		return errors.New("positive cores/memory and a non-negative GPU count are required")
+	}
+	if s.TimeoutSeconds < 0 || s.TimeoutSeconds > MaxTimeoutSeconds {
+		return fmt.Errorf("timeout must be 0..%d seconds", MaxTimeoutSeconds)
+	}
+	if s.Match != nil {
+		if err := s.Match.Validate(s.Resources); err != nil {
+			return err
+		}
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(s.Secrets)), slices.Sorted(maps.Keys(secrets))) {
+		return errors.New("secret values must match the declared secret names")
+	}
+	if err := s.Sandbox.Validate(secrets); err != nil {
+		return err
+	}
+	if !ValidNameSet(s.Services) {
+		return errors.New("invalid or duplicate service name")
+	}
+	return nil
+}
+
+func (s Spec) Timeout() time.Duration { return time.Duration(s.TimeoutSeconds) * time.Second }

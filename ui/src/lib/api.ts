@@ -38,32 +38,24 @@ export interface Spec {
   match?: { tags?: string[] };
 }
 
-export interface TaskRecord {
-  container_id?: string;
-  state: string;
+export interface Result {
+  exit_code: number;
+  oom_killed?: boolean;
   started_at: string;
   finished_at: string;
-  exit_code?: number;
-  oom_killed: boolean;
-  error?: string;
-}
-
-export interface RemoteAttempt {
-  id: string;
-  state: string;
-  error?: string;
-  allocation: Allocation;
-  created_at: string;
-  updated_at: string;
-  result?: TaskRecord;
-  stop_requested?: string;
+  outputs_sha256: string;
 }
 
 export interface Attempt {
   id: string;
   worker: string;
-  agent_id: string;
-  remote?: RemoteAttempt;
+  machine_id: string;
+  allocation: Allocation;
+  created_at: string;
+  container_id?: string;
+  stop_requested?: string;
+  stop_reason?: string;
+  result?: Result;
   result_dir?: string;
   failure?: string;
 }
@@ -88,7 +80,7 @@ export interface WorkerStatus {
   connected: boolean;
   last_seen: string;
   error?: string;
-  info?: { id: string; hardware: Hardware; held: Allocation[] | null; error?: string };
+  info?: { boot_id: string; hardware: Hardware; held: Allocation[] | null; error?: string };
   tags?: string[];
 }
 

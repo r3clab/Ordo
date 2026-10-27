@@ -10,7 +10,6 @@ import (
 	"os"
 
 	"github.com/r3clab/Ordo/internal/server"
-	"github.com/r3clab/Ordo/internal/worker"
 )
 
 var stdin io.Reader = os.Stdin
@@ -39,7 +38,7 @@ func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 	}
 	client := serverClient(root)
 	defer client.CloseIdleConnections()
-	resp, err := worker.Send(ctx, client, http.MethodPost, "/v1/batches", "application/x-ndjson", body)
+	resp, err := server.Send(ctx, client, http.MethodPost, "/v1/batches", "application/x-ndjson", body)
 	if err != nil {
 		return err
 	}

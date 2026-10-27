@@ -7,7 +7,7 @@ import (
 	"errors"
 	"regexp"
 
-	"github.com/r3clab/Ordo/internal/task"
+	"github.com/r3clab/Ordo/internal/spec"
 )
 
 // Source is exactly one of a local Podman reference, an OCI archive with the image ID inside it, or a
@@ -49,7 +49,7 @@ func (s Source) Validate() error {
 			return errors.New("invalid nix installable")
 		}
 	case Source{Archive: s.Archive, ID: s.ID}:
-		if s.Archive == "" || !task.ValidImageID(s.ID) {
+		if s.Archive == "" || !spec.ValidImageID(s.ID) {
 			return errors.New("an OCI archive needs its path and immutable sha256 image ID")
 		}
 	default:

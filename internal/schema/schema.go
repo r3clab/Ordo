@@ -13,8 +13,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/server"
-	"github.com/r3clab/Ordo/internal/task"
-	"github.com/r3clab/Ordo/internal/worker"
+	"github.com/r3clab/Ordo/internal/spec"
 )
 
 const draft = "https://json-schema.org/draft/2020-12/schema"
@@ -83,7 +82,7 @@ func imageSchema() *jsonschema.Schema {
 		OneOf: []*jsonschema.Schema{
 			{Type: "string", MinLength: jsonschema.Ptr(1)},
 			closed(map[string]*jsonschema.Schema{"nix": {Type: "string", MaxLength: jsonschema.Ptr(image.MaxInstallableBytes), Pattern: image.InstallablePattern}}),
-			closed(map[string]*jsonschema.Schema{"archive": {Type: "string", MinLength: jsonschema.Ptr(1)}, "id": {Type: "string", Pattern: task.ImageIDPattern}}),
+			closed(map[string]*jsonschema.Schema{"archive": {Type: "string", MinLength: jsonschema.Ptr(1)}, "id": {Type: "string", Pattern: spec.ImageIDPattern}}),
 		},
 	}
 }
@@ -106,11 +105,11 @@ func at(s *jsonschema.Schema, path ...string) *jsonschema.Schema {
 }
 
 func names() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "string", Pattern: worker.NamePattern}
+	return &jsonschema.Schema{Type: "string", Pattern: spec.NamePattern}
 }
 
 func variables() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "string", Pattern: task.EnvNamePattern, Not: &jsonschema.Schema{Pattern: "^" + task.ReservedEnvPrefix}}
+	return &jsonschema.Schema{Type: "string", Pattern: spec.EnvNamePattern, Not: &jsonschema.Schema{Pattern: "^" + spec.ReservedEnvPrefix}}
 }
 
 func enum(values []string) []any {
@@ -122,37 +121,37 @@ func enum(values []string) []any {
 }
 
 func refineRequest(s *jsonschema.Schema) {
-	at(s, "id").Pattern = worker.NamePattern
+	at(s, "id").Pattern = spec.NamePattern
 	at(s, "inputs").PropertyNames = names()
 	resources := at(s, "resources")
 	at(resources, "cores").Minimum = jsonschema.Ptr(1.0)
 	at(resources, "memory_mib").Minimum = jsonschema.Ptr(1.0)
 	at(resources, "gpus").Minimum = jsonschema.Ptr(0.0)
 	at(s, "env").PropertyNames = variables()
-	at(s, "env", "{}").MaxLength = jsonschema.Ptr(task.MaxValueBytes)
-	at(s, "env", "{}").Pattern = task.EnvValuePattern
+	at(s, "env", "{}").MaxLength = jsonschema.Ptr(spec.MaxValueBytes)
+	at(s, "env", "{}").Pattern = spec.EnvValuePattern
 	at(s, "secrets").PropertyNames = variables()
-	at(s, "secrets", "{}").MaxLength = jsonschema.Ptr(task.MaxValueBytes)
-	at(s, "secrets", "{}").Pattern = task.SecretValuePattern
-	at(s, "network").Enum = enum(task.Networks())
+	at(s, "secrets", "{}").MaxLength = jsonschema.Ptr(spec.MaxValueBytes)
+	at(s, "secrets", "{}").Pattern = spec.SecretValuePattern
+	at(s, "network").Enum = enum(spec.Networks())
 	at(s, "cap_add").UniqueItems = true
-	at(s, "cap_add", "[]").Enum = enum(task.Capabilities())
+	at(s, "cap_add", "[]").Enum = enum(spec.Capabilities())
 	at(s, "services").UniqueItems = true
-	at(s, "services", "[]").Pattern = worker.NamePattern
+	at(s, "services", "[]").Pattern = spec.NamePattern
 	at(s, "timeout_seconds").Minimum = jsonschema.Ptr(0.0)
-	at(s, "timeout_seconds").Maximum = jsonschema.Ptr(float64(worker.MaxTimeoutSeconds))
+	at(s, "timeout_seconds").Maximum = jsonschema.Ptr(float64(spec.MaxTimeoutSeconds))
 	for _, field := range []string{"task", "infrastructure"} {
 		at(s, "retry", field).Minimum = jsonschema.Ptr(0.0)
 		at(s, "retry", field).Maximum = jsonschema.Ptr(float64(server.MaxRetry))
 	}
-	at(s, "match", "arch").Enum = enum(worker.Architectures())
+	at(s, "match", "arch").Enum = enum(spec.Architectures())
 	at(s, "match", "min_gpu_memory_mib").Minimum = jsonschema.Ptr(0.0)
 	at(s, "match", "tags").UniqueItems = true
-	at(s, "match", "tags", "[]").Pattern = worker.NamePattern
+	at(s, "match", "tags", "[]").Pattern = spec.NamePattern
 }
 
 func refineWorkflow(s *jsonschema.Schema) {
-	at(s, "id").Pattern = worker.NamePattern
+	at(s, "id").Pattern = spec.NamePattern
 	at(s, "id").MaxLength = jsonschema.Ptr(server.MaxWorkflowID)
 	tasks := at(s, "tasks")
 	tasks.Type, tasks.Types = "array", nil

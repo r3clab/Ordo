@@ -1,7 +1,6 @@
-package task
+package spec
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -47,12 +46,11 @@ func FormatCPUs(cpus []int) string {
 	return strings.Join(parts, ",")
 }
 
-func CheckGPUs(ids []string) ([]string, error) {
-	ids = slices.Sorted(slices.Values(ids))
+func ValidGPUSet(ids []string) bool {
 	for i, id := range ids {
-		if !gpuUUID.MatchString(id) || (i > 0 && ids[i-1] == id) {
-			return nil, errors.New("GPUs must be unique full NVIDIA GPU UUIDs")
+		if !gpuUUID.MatchString(id) || slices.Contains(ids[:i], id) {
+			return false
 		}
 	}
-	return ids, nil
+	return true
 }

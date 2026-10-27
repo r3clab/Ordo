@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/r3clab/Ordo/internal/server"
-	"github.com/r3clab/Ordo/internal/worker"
+	"github.com/r3clab/Ordo/internal/spec"
 )
 
 var pollInterval = 2 * time.Second
@@ -34,7 +34,7 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 	f.StringVar(&root, "state", "", "server state directory")
 	f.StringVar(&into, "into", "", "directory that receives one subdirectory per job")
 	f.Func("id", "job to fetch (repeatable; default all)", func(id string) error {
-		if !worker.ValidName(id) {
+		if !spec.ValidName(id) {
 			return fmt.Errorf("invalid job ID %q", id)
 		}
 		ids = append(ids, id)
@@ -55,7 +55,7 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 	jobs := map[string]server.Job{}
 	poll := func() ([]server.Job, error) {
 		var list []server.Job
-		err := worker.Call(ctx, client, http.MethodGet, "/v1/jobs", nil, &list)
+		err := server.Call(ctx, client, http.MethodGet, "/v1/jobs", nil, &list)
 		for _, j := range list {
 			jobs[j.ID] = j
 		}
@@ -127,7 +127,7 @@ func fetchJob(ctx context.Context, client *http.Client, id, dest string) (string
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "failed", err
 	}
-	if err := worker.Download(ctx, client, "/v1/jobs/"+id+"/result", dest, nil); err != nil {
+	if err := server.Download(ctx, client, "/v1/jobs/"+id+"/result", dest); err != nil {
 		return "failed", err
 	}
 	return "fetched", nil
