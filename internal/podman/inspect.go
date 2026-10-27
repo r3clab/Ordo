@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
+	"github.com/r3clab/Ordo/internal/spec"
 )
 
 const (
@@ -74,7 +75,9 @@ func ParseInspect(data []byte) (Inspection, error) {
 	if len(containers) != 1 || !content.Valid(containers[0].ID) {
 		return Inspection{}, errors.New("expected exactly one container")
 	}
-	return containers[0], nil
+	c := containers[0]
+	c.Image = imageID(c.Image)
+	return c, nil
 }
 
 func ParseImageID(data []byte) (string, error) {
@@ -82,11 +85,14 @@ func ParseImageID(data []byte) (string, error) {
 	if err := json.Unmarshal(data, &images); err != nil {
 		return "", err
 	}
-	if len(images) != 1 || !content.Valid(strings.TrimPrefix(images[0].ID, "sha256:")) {
+	if len(images) != 1 || !spec.ValidImageID(imageID(images[0].ID)) {
 		return "", errors.New("expected one immutable local image")
 	}
-	return "sha256:" + strings.TrimPrefix(images[0].ID, "sha256:"), nil
+	return imageID(images[0].ID), nil
 }
+
+// imageID adds the algorithm prefix that Podman omits from some image IDs.
+func imageID(id string) string { return "sha256:" + strings.TrimPrefix(id, "sha256:") }
 
 // CheckInfo requires the rootless cgroup v2 controllers that CPU pinning and memory limits depend on.
 func CheckInfo(data []byte) error {

@@ -136,7 +136,7 @@ func (f *fakeHost) Inspect(_ context.Context, attempt string) (podman.Inspection
 	if !ok {
 		return in, errors.New("no such container")
 	}
-	in.ID, in.Name, in.Image = c.ID, podman.Name(attempt), strings.TrimPrefix(testImageID, "sha256:")
+	in.ID, in.Name, in.Image = c.ID, podman.Name(attempt), testImageID
 	in.Config.Labels = c.Labels
 	in.State.Status, in.State.ExitCode, in.State.StartedAt, in.State.FinishedAt = c.State, &c.exit, c.StartedAt.Time, c.finished
 	return in, nil

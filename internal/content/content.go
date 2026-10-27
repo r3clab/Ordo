@@ -53,6 +53,9 @@ func Put(dir string, r io.Reader, want string) (string, error) {
 	if want != "" && id != want {
 		return "", errors.New("content checksum mismatch")
 	}
+	if Has(dir, id) {
+		return id, nil
+	}
 	if err := f.Sync(); err != nil {
 		return "", err
 	}
@@ -131,18 +134,6 @@ func WriteAtomic(path string, write func(io.Writer) error) error {
 		return err
 	}
 	return SyncDir(dir)
-}
-func Hash(file string) (string, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Archive publishes only a complete, synced tar. Only directories and regular files are supported.
@@ -225,30 +216,7 @@ func writeTree(tw *tar.Writer, part Part, seen map[string]bool) error {
 	})
 }
 
-func Extract(archive, dest string) error {
-	if info, err := os.Lstat(dest); err == nil {
-		if !info.IsDir() {
-			return errors.New("snapshot destination is not a directory")
-		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	f, err := os.Open(archive)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	if err := Unpack(f, dest, nil); err != nil {
-		if info, e := os.Stat(dest); e == nil && info.IsDir() {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-func Unpack(r io.Reader, dest string, check func(dir, digest string) error) error {
+func Unpack(r io.Reader, dest string, check func(digest string) error) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
@@ -267,7 +235,7 @@ func Unpack(r io.Reader, dest string, check func(dir, digest string) error) erro
 		return err
 	}
 	if check != nil {
-		if err := check(dir, hex.EncodeToString(hash.Sum(nil))); err != nil {
+		if err := check(hex.EncodeToString(hash.Sum(nil))); err != nil {
 			return err
 		}
 	}

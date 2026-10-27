@@ -44,13 +44,13 @@ func (s Sandbox) Validate() error {
 	if s.Network != "" && !slices.Contains(networks, s.Network) {
 		return errors.New(`network must be "none" or "egress"`)
 	}
-	for i, capability := range s.CapAdd {
+	for _, capability := range s.CapAdd {
 		if !slices.Contains(capabilities, capability) {
 			return fmt.Errorf("capability %q is not allowed; allowed: %s", capability, strings.Join(capabilities, ", "))
 		}
-		if slices.Contains(s.CapAdd[:i], capability) {
-			return fmt.Errorf("capability %s is repeated", capability)
-		}
+	}
+	if capability, dup := repeated(s.CapAdd); dup {
+		return fmt.Errorf("capability %s is repeated", capability)
 	}
 	for name, value := range s.Env {
 		if err := checkVariable(name, value); err != nil {

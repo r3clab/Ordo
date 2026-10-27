@@ -112,11 +112,15 @@ func listenWeb(address string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
+	if !loopback(host) {
 		return nil, errors.New("web listen address must be a literal loopback IP")
 	}
 	return net.Listen("tcp", address)
+}
+
+func loopback(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 func (s *Server) WebHandler(token string) http.Handler {
 	api := s.routes()
@@ -130,8 +134,7 @@ func (s *Server) WebHandler(token string) http.Handler {
 			http.Error(w, "invalid host", 400)
 			return
 		}
-		ip := net.ParseIP(host)
-		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		if host != "localhost" && !loopback(host) {
 			http.Error(w, "loopback host required", http.StatusForbidden)
 			return
 		}

@@ -3,7 +3,6 @@ package server
 import (
 	"cmp"
 	"context"
-	"crypto/rand"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -42,6 +41,20 @@ type view struct {
 	containers map[string]podman.Container
 	held       []pool.Allocation
 	fault      string
+	gpusBusy   []string
+	gpusPolled bool
+}
+
+// busyGPUs samples once per pass: each sample is an SSH round trip and about a second of nvidia-smi.
+func (v *view) busyGPUs(ctx context.Context) ([]string, error) {
+	if !v.gpusPolled {
+		busy, err := v.host.GPUBusy(ctx, v.probe.Hardware.GPUs)
+		if err != nil {
+			return nil, err
+		}
+		v.gpusBusy, v.gpusPolled = busy, true
+	}
+	return v.gpusBusy, nil
 }
 
 func (s *Server) work(ctx context.Context, cfg worker.Config) {
@@ -70,8 +83,8 @@ func (s *Server) session(ctx context.Context, cfg worker.Config) error {
 	}
 	for {
 		err := s.pass(ctx, cfg, h, &probe)
-		if errors.Is(err, ssh.ErrTransport) || ctx.Err() != nil {
-			return cmp.Or(ctx.Err(), err)
+		if end := fatal(ctx, err); end != nil {
+			return end
 		}
 		if err != nil {
 			s.workerStatus(cfg.Host, nil, err)
@@ -80,6 +93,13 @@ func (s *Server) session(ctx context.Context, cfg worker.Config) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func fatal(ctx context.Context, err error) error {
+	if errors.Is(err, ssh.ErrTransport) || ctx.Err() != nil {
+		return cmp.Or(ctx.Err(), err)
+	}
+	return nil
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {
@@ -134,8 +154,8 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 		s.mu.Lock()
 		delete(s.busy, id)
 		s.mu.Unlock()
-		if errors.Is(err, ssh.ErrTransport) || ctx.Err() != nil {
-			return cmp.Or(ctx.Err(), err)
+		if end := fatal(ctx, err); end != nil {
+			return end
 		}
 		if err != nil {
 			s.note(id, err)
@@ -251,7 +271,7 @@ func (j Job) stop(started, now time.Time) (StopKind, string) {
 	if kind := j.stopKind(); kind != "" {
 		return kind, j.StopReason
 	}
-	if timeout := j.Spec.Timeout(); timeout > 0 && !started.IsZero() && now.Sub(started) >= timeout {
+	if !started.IsZero() && j.Spec.TimedOut(started, now) {
 		return Timeout, ""
 	}
 	return "", ""
@@ -266,7 +286,7 @@ func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
 	if err == nil && j.Spec.Resources.GPUs > 0 {
 		// A device busy outside Ordo would break the exclusive allocation the job asks for.
 		var busy []string
-		if busy, err = v.host.GPUBusy(ctx, hw.GPUs); err != nil {
+		if busy, err = v.busyGPUs(ctx); err != nil {
 			return false, err
 		}
 		allocation, err = pool.Plan(hw, j.Spec.Resources, append(slices.Clone(v.held), pool.Allocation{GPUs: busy}))
@@ -288,7 +308,7 @@ func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
 			return false, err
 		}
 	}
-	j.Attempts = append(j.Attempts, Attempt{ID: strings.ToLower(rand.Text()), Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
+	j.Attempts = append(j.Attempts, Attempt{ID: newID(), Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
 	j.State = Dispatching
 	if err := s.save(*j); err != nil {
 		return false, err
@@ -309,8 +329,8 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 		secrets[name] = s.secrets[name]
 	}
 	id, err := v.host.Launch(ctx, worker.Launch{Attempt: at.ID, Spec: j.Spec, Allocation: at.Allocation, Secrets: secrets})
-	if errors.Is(err, ssh.ErrTransport) || ctx.Err() != nil {
-		return cmp.Or(ctx.Err(), err)
+	if end := fatal(ctx, err); end != nil {
+		return end
 	}
 	if err != nil {
 		// The name is taken when an earlier launch whose response was lost created the container.

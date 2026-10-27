@@ -1,7 +1,6 @@
 package server
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,13 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/podman"
 	"github.com/r3clab/Ordo/internal/pool"
 	"github.com/r3clab/Ordo/internal/spec"
-	"github.com/r3clab/Ordo/internal/ssh"
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
@@ -68,15 +65,15 @@ func (s *Server) collect(ctx context.Context, j Job, v *view) error {
 		return s.abandon(ctx, j, v, "container ended without a recorded finish time")
 	}
 	result := Result{ExitCode: *state.ExitCode, StartedAt: state.StartedAt, FinishedAt: state.FinishedAt, OOMKilled: state.OOMKilled}
-	if timeout := j.Spec.Timeout(); at.StopRequested == "" && timeout > 0 && result.FinishedAt.Sub(result.StartedAt) >= timeout {
+	if at.StopRequested == "" && j.Spec.TimedOut(result.StartedAt, result.FinishedAt) {
 		at.StopRequested = Timeout
 	}
 	dest := filepath.Join(s.Root, "results", j.ID, at.ID)
 	if _, err := os.Stat(dest); errors.Is(err, os.ErrNotExist) {
 		record := Record{Job: j.ID, Attempt: at.ID, Worker: at.Worker, MachineID: at.MachineID, ContainerID: at.ContainerID, Spec: j.Spec, Allocation: at.Allocation, StopRequested: at.StopRequested, StopReason: at.StopReason, Result: result}
 		err := s.receive(ctx, v.host, &record, dest)
-		if errors.Is(err, ssh.ErrTransport) || ctx.Err() != nil {
-			return cmp.Or(ctx.Err(), err)
+		if end := fatal(ctx, err); end != nil {
+			return end
 		}
 		if err != nil {
 			return s.block(j, "collect results: "+err.Error())
@@ -103,7 +100,7 @@ func (s *Server) collect(ctx context.Context, j Job, v *view) error {
 func (s *Server) owns(j Job, c podman.Inspection) bool {
 	at := j.current()
 	labels := c.Config.Labels
-	return c.ID == at.ContainerID && c.Name == podman.Name(at.ID) && strings.TrimPrefix(c.Image, "sha256:") == strings.TrimPrefix(j.Spec.Image, "sha256:") && labels[podman.AttemptLabel] == at.ID && labels[podman.ServerLabel] == s.id
+	return c.ID == at.ContainerID && c.Name == podman.Name(at.ID) && c.Image == j.Spec.Image && labels[podman.AttemptLabel] == at.ID && labels[podman.ServerLabel] == s.id
 }
 
 func (s *Server) receive(ctx context.Context, h host, record *Record, dest string) error {

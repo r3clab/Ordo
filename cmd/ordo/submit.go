@@ -36,7 +36,7 @@ func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 		defer func() { _ = jobs.Close() }()
 		body = jobs
 	}
-	client := serverClient(root)
+	client := server.Client(server.Socket(root))
 	defer client.CloseIdleConnections()
 	resp, err := server.Send(ctx, client, http.MethodPost, "/v1/batches", "application/x-ndjson", body)
 	if err != nil {

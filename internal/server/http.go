@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -89,8 +90,10 @@ func decodeReason(w http.ResponseWriter, r *http.Request) (string, error) {
 	return request.Reason, nil
 }
 
+// Client sets no timeout: the queue API is a local socket, and nix builds behind a submit can take
+// minutes.
 func Client(socket string) *http.Client {
-	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}}
 }
@@ -190,17 +193,17 @@ func (w *sentWriter) Write(p []byte) (int, error) {
 }
 
 func Download(ctx context.Context, client *http.Client, endpoint, dest string) error {
+	if _, err := os.Lstat(dest); err == nil {
+		return fmt.Errorf("result destination: %w", fs.ErrExist)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	resp, err := Send(ctx, client, http.MethodGet, endpoint, "", nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if _, err := os.Lstat(dest); err == nil {
-		return errors.New("result destination already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return content.Unpack(resp.Body, dest, func(_, digest string) error {
+	return content.Unpack(resp.Body, dest, func(digest string) error {
 		if want := cmp.Or(resp.Header.Get(ChecksumHeader), resp.Trailer.Get(ChecksumHeader)); !content.Valid(want) {
 			return errors.New("result missing checksum")
 		} else if want != digest {

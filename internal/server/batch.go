@@ -59,7 +59,9 @@ func ParseBatch(r io.Reader) ([]BatchEntry, error) {
 func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq[BatchResult] {
 	return func(yield func(BatchResult) bool) {
 		var requests []Request
-		for _, e := range entries {
+		for i := range entries {
+			e := &entries[i]
+			e.Err = cmp.Or(e.Err, s.check(e.Request))
 			if e.Err == nil {
 				requests = append(requests, e.Request)
 			}
@@ -74,7 +76,7 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 				err := cmp.Or(e.Err, ctx.Err())
 				var j Job
 				if err == nil {
-					j, err = s.prepare(ctx, e.Request, nil, st)
+					j, err = s.prepare(e.Request, nil, st)
 				}
 				if err != nil {
 					results[i].Error = err.Error()

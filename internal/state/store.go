@@ -16,6 +16,8 @@ import (
 
 const upsert = "INSERT INTO records(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body"
 
+var ErrNotFound = errors.New("record not found")
+
 type Store struct {
 	db   *sql.DB
 	lock *os.File
@@ -60,7 +62,7 @@ func openDB(file string) (_ *sql.DB, err error) {
 	}
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)", "foreign_keys(ON)"} {
+	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)"} {
 		q.Add("_pragma", pragma)
 	}
 	u.RawQuery = q.Encode()
@@ -122,7 +124,11 @@ func (t *Tx) Put(kind, id string, value any) error {
 
 func (s *Store) Get(kind, id string, value any) error {
 	var data []byte
-	if err := s.db.QueryRow("SELECT body FROM records WHERE kind=? AND id=?", kind, id).Scan(&data); err != nil {
+	err := s.db.QueryRow("SELECT body FROM records WHERE kind=? AND id=?", kind, id).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
 		return err
 	}
 	return json.Unmarshal(data, value)

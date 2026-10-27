@@ -41,8 +41,11 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if _, err := PutTree(filepath.Join(root, "blobs"), filepath.Join(src, "data")); err == nil {
 		t.Fatal("stored a file as a tree")
 	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
 	dest := filepath.Join(root, "tree")
-	if err := Extract(archive, dest); err != nil {
+	if err := Unpack(f, dest, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dest, "data"))
@@ -56,7 +59,6 @@ func TestSnapshotRoundTrip(t *testing.T) {
 func TestRejectArchiveEscapes(t *testing.T) {
 	for _, header := range []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg}, {Name: "/absolute", Typeflag: tar.TypeReg}, {Name: "link", Typeflag: tar.TypeSymlink, Linkname: "/tmp"}, {Name: "hard", Typeflag: tar.TypeLink, Linkname: "../escape"}, {Name: "device", Typeflag: tar.TypeChar}} {
 		root := t.TempDir()
-		file := filepath.Join(root, "bad.tar")
 		var data bytes.Buffer
 		tw := tar.NewWriter(&data)
 		if err := tw.WriteHeader(&header); err != nil {
@@ -65,10 +67,7 @@ func TestRejectArchiveEscapes(t *testing.T) {
 		if err := tw.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(file, data.Bytes(), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := Extract(file, filepath.Join(root, "out")); err == nil {
+		if err := Unpack(&data, filepath.Join(root, "out"), nil); err == nil {
 			t.Fatalf("accepted %+v", header)
 		}
 	}

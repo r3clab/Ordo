@@ -159,11 +159,14 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 	jobs := make([]Job, 0, len(steps))
 	requests := make([]Request, len(steps))
 	for i, step := range steps {
+		if err := s.check(step.Request); err != nil {
+			return nil, err
+		}
 		requests[i] = step.Request
 	}
 	st := s.stage(ctx, requests...)
 	for _, step := range steps {
-		j, err := s.prepare(ctx, step.Request, step.From, st)
+		j, err := s.prepare(step.Request, step.From, st)
 		if err != nil {
 			return nil, err
 		}
@@ -272,20 +275,26 @@ func (s *Server) Stop(id, reason string) error {
 func (s *Server) requestStop(id string, workflow bool, reason string, mark func(*Job)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.fault != nil {
-		return s.fault
+	var targets []Job
+	if !workflow {
+		if j, ok := s.jobs[id]; ok {
+			targets = append(targets, j)
+		}
+	} else {
+		for _, j := range s.jobs {
+			if j.Workflow == id {
+				targets = append(targets, j)
+			}
+		}
 	}
 	var changed []Job
-	for key, j := range s.jobs {
-		if (!workflow && key != id) || (workflow && j.Workflow != id) {
-			continue
-		}
+	for _, j := range targets {
 		if j.State.Terminal() {
 			continue
 		}
 		mark(&j)
 		j.StopReason = cmp.Or(j.StopReason, reason)
-		if j.State == Queued && !s.busy[key] {
+		if j.State == Queued && !s.busy[j.ID] {
 			j.State = Cancelled
 		}
 		changed = append(changed, j)

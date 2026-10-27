@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,7 +51,7 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err := os.MkdirAll(into, 0o700); err != nil {
 		return err
 	}
-	client := serverClient(root)
+	client := server.Client(server.Socket(root))
 	defer client.CloseIdleConnections()
 	jobs := map[string]server.Job{}
 	poll := func() ([]server.Job, error) {
@@ -122,12 +123,11 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 }
 
 func fetchJob(ctx context.Context, client *http.Client, id, dest string) (string, error) {
-	if _, err := os.Lstat(dest); err == nil {
+	err := server.Download(ctx, client, "/v1/jobs/"+id+"/result", dest)
+	switch {
+	case errors.Is(err, fs.ErrExist):
 		return "exists", nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "failed", err
-	}
-	if err := server.Download(ctx, client, "/v1/jobs/"+id+"/result", dest); err != nil {
+	case err != nil:
 		return "failed", err
 	}
 	return "fetched", nil

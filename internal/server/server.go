@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"errors"
 	"fmt"
 	"maps"
@@ -179,8 +178,8 @@ func Open(c Config) (_ *Server, err error) {
 	s := &Server{Root: root, store: db, workers: c.Workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)
-	if errors.Is(err, sql.ErrNoRows) {
-		s.id = strings.ToLower(rand.Text())
+	if errors.Is(err, state.ErrNotFound) {
+		s.id = newID()
 		err = db.Put("meta", "server", s.id)
 	}
 	if err != nil {
@@ -218,13 +217,14 @@ type imageCache struct{ store *state.Store }
 func (c imageCache) Load(key string) (image.Entry, bool, error) {
 	var e image.Entry
 	err := c.store.Get("image", key, &e)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, state.ErrNotFound) {
 		return e, false, nil
 	}
 	return e, err == nil, err
 }
 func (c imageCache) Save(key string, e image.Entry) error { return c.store.Put("image", key, e) }
 func (j *Job) current() *Attempt                          { return &j.Attempts[len(j.Attempts)-1] }
+func newID() string                                       { return strings.ToLower(rand.Text()) }
 
 // live reports whether attempt i may still run. A requeued job's last attempt is over: dispatch
 // replaces it in the same write that leaves the queued state.
@@ -332,37 +332,30 @@ type stagedImage struct {
 }
 
 type staging struct {
-	resolver *image.Resolver
-	mu       sync.Mutex
-	images   map[image.Source]stagedImage
-	inputs   map[string]string
+	images map[image.Source]stagedImage
+	inputs map[string]string
 }
 
+// stage takes only requests that passed check.
 func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
-	st := &staging{resolver: s.images, images: map[image.Source]stagedImage{}, inputs: map[string]string{}}
-	seen := map[image.Source]bool{}
-	var wg sync.WaitGroup
+	st := &staging{images: map[image.Source]stagedImage{}, inputs: map[string]string{}}
+	var sources []image.Source
 	for _, r := range requests {
-		if !seen[r.Image] && s.check(r) == nil {
-			seen[r.Image] = true
-			wg.Go(func() { _, _ = st.image(ctx, r.Image) })
+		if _, seen := st.images[r.Image]; !seen {
+			st.images[r.Image] = stagedImage{}
+			sources = append(sources, r.Image)
 		}
 	}
-	wg.Wait()
-	return st
-}
-
-func (st *staging) image(ctx context.Context, src image.Source) (image.Resolved, error) {
-	st.mu.Lock()
-	staged, ok := st.images[src]
-	st.mu.Unlock()
-	if !ok {
-		staged.Resolved, staged.err = st.resolver.Resolve(ctx, src)
-		st.mu.Lock()
-		st.images[src] = staged
-		st.mu.Unlock()
+	staged := make([]stagedImage, len(sources))
+	var wg sync.WaitGroup
+	for i, src := range sources {
+		wg.Go(func() { staged[i].Resolved, staged[i].err = s.images.Resolve(ctx, src) })
 	}
-	return staged.Resolved, staged.err
+	wg.Wait()
+	for i, src := range sources {
+		st.images[src] = staged[i]
+	}
+	return st
 }
 
 func (r Request) Validate() error {
@@ -411,18 +404,17 @@ func (r Request) spec() spec.Spec {
 	return spec.Spec{Args: r.Args, Resources: r.Resources, Sandbox: r.Sandbox, Secrets: r.Secrets, Services: r.Services, TimeoutSeconds: r.TimeoutSeconds, Tags: r.Tags}.Normalize()
 }
 
-// prepare also takes the workflow inputs a job will import, so the launch size check counts them.
-func (s *Server) prepare(ctx context.Context, r Request, from map[string]string, st *staging) (Job, error) {
-	if err := s.check(r); err != nil {
-		return Job{}, err
-	}
+// prepare takes a request that passed check and was staged. It also takes the workflow inputs a job
+// will import, so the launch size check counts them.
+func (s *Server) prepare(r Request, from map[string]string, st *staging) (Job, error) {
 	if r.ID == "" {
-		r.ID = strings.ToLower(rand.Text())
+		r.ID = newID()
 	}
-	img, err := st.image(ctx, r.Image)
-	if err != nil {
-		return Job{}, err
+	img := st.images[r.Image]
+	if img.err != nil {
+		return Job{}, img.err
 	}
+	var err error
 	j := Job{ID: r.ID, Spec: r.spec(), Archive: img.Blob, ImageOrigin: img.Origin, State: Queued, CreatedAt: time.Now().UTC(), From: from, Retry: r.Retry}
 	j.Spec.Image = img.ID
 	if len(r.Inputs) > 0 {
@@ -457,7 +449,10 @@ func (s *Server) prepare(ctx context.Context, r Request, from map[string]string,
 	return j, nil
 }
 func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
-	j, err := s.prepare(ctx, r, nil, s.stage(ctx, r))
+	if err := s.check(r); err != nil {
+		return Job{}, err
+	}
+	j, err := s.prepare(r, nil, s.stage(ctx, r))
 	if err != nil {
 		return Job{}, err
 	}
@@ -488,13 +483,13 @@ func (s *Server) admit(jobs []Job) []admission {
 			pending[j.ID] = j
 			fresh = append(fresh, j)
 			out[i].job = j
-		case cmp.Or(old.Key, jobKey(old)) != j.Key:
+		case old.Key != j.Key:
 			out[i].err = errors.New("job ID already has a different immutable specification")
 		default:
 			out[i] = admission{job: old, existing: true}
 		}
 	}
-	if err := cmp.Or(s.fault, s.commitLocked(fresh...)); err != nil {
+	if err := s.commitLocked(fresh...); err != nil {
 		for i := range out {
 			out[i].err = cmp.Or(out[i].err, err)
 		}

@@ -57,13 +57,6 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	return errors.Join(err, s.Close())
 }
 
-// The queue API is a local socket, and nix builds behind a submit can take minutes.
-func serverClient(root string) *http.Client {
-	client := server.Client(server.Socket(root))
-	client.Timeout = 0
-	return client
-}
-
 func keyValue(values map[string]string, kind, shape string) func(string) error {
 	return func(value string) error {
 		name, text, ok := strings.Cut(value, "=")
@@ -121,7 +114,7 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	default:
 		return errors.New("unknown queue command")
 	}
-	client := serverClient(root)
+	client := server.Client(server.Socket(root))
 	defer client.CloseIdleConnections()
 	var result any
 	if err := server.Call(ctx, client, method, endpoint, body, &result); err != nil {

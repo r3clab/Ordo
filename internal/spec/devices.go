@@ -47,10 +47,6 @@ func FormatCPUs(cpus []int) string {
 }
 
 func ValidGPUSet(ids []string) bool {
-	for i, id := range ids {
-		if !gpuUUID.MatchString(id) || slices.Contains(ids[:i], id) {
-			return false
-		}
-	}
-	return true
+	_, dup := repeated(ids)
+	return !dup && !slices.ContainsFunc(ids, func(id string) bool { return !gpuUUID.MatchString(id) })
 }

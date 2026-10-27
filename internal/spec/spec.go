@@ -22,13 +22,18 @@ const MaxTimeoutSeconds = 365 * 24 * 60 * 60
 func ValidName(name string) bool { return identifier.MatchString(name) }
 
 func ValidNameSet(names []string) bool {
-	sorted := slices.Sorted(slices.Values(names))
-	for i, name := range sorted {
-		if !ValidName(name) || (i > 0 && sorted[i-1] == name) {
-			return false
+	_, dup := repeated(names)
+	return !dup && !slices.ContainsFunc(names, func(name string) bool { return !ValidName(name) })
+}
+
+func repeated[T comparable](values []T) (T, bool) {
+	for i, v := range values {
+		if slices.Contains(values[:i], v) {
+			return v, true
 		}
 	}
-	return true
+	var zero T
+	return zero, false
 }
 
 func ValidImageID(id string) bool { return imageID.MatchString(id) }
@@ -72,12 +77,12 @@ func (s Spec) Validate() error {
 	if err := s.Sandbox.Validate(); err != nil {
 		return err
 	}
-	for i, name := range s.Secrets {
+	if name, dup := repeated(s.Secrets); dup {
+		return fmt.Errorf("secret %s is repeated", name)
+	}
+	for _, name := range s.Secrets {
 		if err := checkName(name); err != nil {
 			return err
-		}
-		if slices.Contains(s.Secrets[:i], name) {
-			return fmt.Errorf("secret %s is repeated", name)
 		}
 		if _, ok := s.Env[name]; ok {
 			return fmt.Errorf("variable %s is both env and a secret", name)
@@ -93,3 +98,8 @@ func (s Spec) Validate() error {
 }
 
 func (s Spec) Timeout() time.Duration { return time.Duration(s.TimeoutSeconds) * time.Second }
+
+func (s Spec) TimedOut(start, end time.Time) bool {
+	timeout := s.Timeout()
+	return timeout > 0 && end.Sub(start) >= timeout
+}
