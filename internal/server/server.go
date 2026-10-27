@@ -213,8 +213,8 @@ type Config struct {
 }
 
 func Open(c Config) (_ *Server, err error) {
-	if len(c.Workers) == 0 || len(c.Workers) > 10 {
-		return nil, errors.New("configure 1-10 workers")
+	if len(c.Workers) == 0 {
+		return nil, errors.New("configure at least one worker")
 	}
 	for name, value := range c.Secrets {
 		if err := spec.CheckSecret(name, value); err != nil {
