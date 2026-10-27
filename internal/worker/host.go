@@ -318,7 +318,7 @@ func (h *Host) Collect(ctx context.Context, attempt, dir string) error {
 	reader, writer := io.Pipe()
 	unpacked := make(chan error, 1)
 	go func() {
-		err := content.Unpack(reader, filepath.Join(dir, OutputsDir), nil)
+		err := content.Unpack(reader, filepath.Join(dir, OutputsDir))
 		_ = reader.CloseWithError(err)
 		unpacked <- err
 	}()
@@ -347,11 +347,15 @@ func writeFiles(first, second string, write func(a, b io.Writer) error) error {
 
 // Callers remove only finished attempts, so a container that still runs is killed.
 func (h *Host) Remove(ctx context.Context, attempt string) error {
-	return h.run.Run(ctx, prelude()+"pm rm --force --ignore --time=0 -- "+ssh.Quote(podman.Name(attempt))+"; rm -rf -- "+ssh.Quote(h.runDir(attempt)), nil, nil, nil)
+	return h.run.Run(ctx, removeContainer(attempt)+"; rm -rf -- "+ssh.Quote(h.runDir(attempt)), nil, nil, nil)
 }
 
 // Release removes a finished attempt's container but keeps its run directory, whose outputs the job's
 // next step starts from.
 func (h *Host) Release(ctx context.Context, attempt string) error {
-	return h.run.Run(ctx, prelude()+"pm rm --force --ignore --time=0 -- "+ssh.Quote(podman.Name(attempt)), nil, nil, nil)
+	return h.run.Run(ctx, removeContainer(attempt), nil, nil, nil)
+}
+
+func removeContainer(attempt string) string {
+	return prelude() + "pm rm --force --ignore --time=0 -- " + ssh.Quote(podman.Name(attempt))
 }

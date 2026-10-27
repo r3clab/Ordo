@@ -55,7 +55,7 @@ func TestServerConfigDefaultsAndResolvesSecrets(t *testing.T) {
 	}
 	write(`{"workers":[{"host":"vegeta","cpus":"0-3","memory_mib":512}],"secrets":{"TOKEN":"token","ABS":"/run/abs"}}`)
 	c, err := loadServerConfig(file)
-	if err != nil || c.Listen != "127.0.0.1:7331" || c.Nix != "nix" || c.Skopeo != defaultSkopeo || len(c.Workers) != 1 || c.Workers[0].StateDir != "" {
+	if err != nil || c.Listen != "127.0.0.1:7331" || c.Nix != "" || c.Skopeo != defaultSkopeo || len(c.Workers) != 1 || c.Workers[0].StateDir != "" {
 		t.Fatalf("%+v %v", c, err)
 	}
 	if c.Secrets["TOKEN"] != filepath.Join(dir, "token") || c.Secrets["ABS"] != "/run/abs" {

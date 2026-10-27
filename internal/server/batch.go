@@ -16,6 +16,9 @@ import (
 
 const maxBatch = 10000
 
+// MaxBatchLine bounds one line of a batch, which the CLI reads before the server does.
+const MaxBatchLine = 8 << 20
+
 // A batch commits in chunks: one transaction per job would fsync per line, and one for the whole
 // batch would report nothing until the last job is prepared.
 const batchChunk = 256
@@ -41,7 +44,7 @@ type BatchResult struct {
 
 func ParseBatch(r io.Reader) ([]BatchEntry, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(nil, 8<<20)
+	scanner.Buffer(nil, MaxBatchLine)
 	var entries []BatchEntry
 	for line := 1; scanner.Scan(); line++ {
 		data := bytes.TrimSpace(scanner.Bytes())

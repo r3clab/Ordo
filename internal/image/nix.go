@@ -32,12 +32,13 @@ func (t Tools) Build(ctx context.Context, installable, link string) (string, err
 	return out, nil
 }
 
-func (t Tools) Export(ctx context.Context, out, dest string) error {
+// Copy needs no signature policy: src is a local nix: output or a digest-pinned reference.
+func (t Tools) Copy(ctx context.Context, src, dest string) error {
 	// skopeo reads a colon after oci-archive:PATH as the start of an image reference.
 	if strings.Contains(dest, ":") {
 		return fmt.Errorf("image export path %s must not contain ':'", dest)
 	}
-	_, err := t.run(ctx, cmp.Or(t.Skopeo, "skopeo"), "--insecure-policy", "copy", "nix:"+out, "oci-archive:"+dest)
+	_, err := t.run(ctx, cmp.Or(t.Skopeo, "skopeo"), "--insecure-policy", "copy", src, "oci-archive:"+dest)
 	return err
 }
 
@@ -58,13 +59,4 @@ func (t Tools) run(ctx context.Context, name string, args ...string) ([]byte, er
 		return nil, fmt.Errorf("%s: %w", filepath.Base(name), err)
 	}
 	return out, nil
-}
-
-// Pull needs no signature policy: the reference's digest already pins what it fetches.
-func (t Tools) Pull(ctx context.Context, reference, dest string) error {
-	if strings.Contains(dest, ":") {
-		return fmt.Errorf("image export path %s must not contain ':'", dest)
-	}
-	_, err := t.run(ctx, cmp.Or(t.Skopeo, "skopeo"), "--insecure-policy", "copy", reference, "oci-archive:"+dest)
-	return err
 }

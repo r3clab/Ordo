@@ -29,10 +29,7 @@ func SyncDir(dir string) error {
 	}
 	return errors.Join(f.Sync(), f.Close())
 }
-func Put(dir string, r io.Reader, want string) (string, error) {
-	if want != "" && !Valid(want) {
-		return "", errors.New("invalid content digest")
-	}
+func Put(dir string, r io.Reader) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -41,20 +38,9 @@ func Put(dir string, r io.Reader, want string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
-	hash := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, hash), io.LimitReader(r, MaxSize+1))
-	if err != nil {
-		return "", err
-	}
-	if n > MaxSize {
-		return "", errors.New("content exceeds 64 GiB limit")
-	}
-	id := hex.EncodeToString(hash.Sum(nil))
-	if want != "" && id != want {
-		return "", errors.New("content checksum mismatch")
-	}
-	if Has(dir, id) {
-		return id, nil
+	id, err := digest(io.TeeReader(r, f))
+	if err != nil || Has(dir, id) {
+		return id, err
 	}
 	if err := f.Sync(); err != nil {
 		return "", err
@@ -67,6 +53,18 @@ func Put(dir string, r io.Reader, want string) (string, error) {
 	}
 	return id, SyncDir(dir)
 }
+
+func digest(r io.Reader) (string, error) {
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(r, MaxSize+1))
+	if err != nil {
+		return "", err
+	}
+	if n > MaxSize {
+		return "", errors.New("content exceeds 64 GiB limit")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
 func Has(dir, id string) bool {
 	if !Valid(id) {
 		return false
@@ -74,16 +72,24 @@ func Has(dir, id string) bool {
 	info, err := os.Lstat(filepath.Join(dir, id))
 	return err == nil && info.Mode().IsRegular()
 }
-func PutFile(dir, file, want string) (string, error) {
-	if Has(dir, want) {
-		return want, nil
-	}
+
+// MoveFile renames file into dir rather than copying it, so both must be on one filesystem.
+func MoveFile(dir, file string) (string, error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return "", err
 	}
-	id, err := Put(dir, f, want)
-	return id, errors.Join(err, f.Close())
+	id, err := digest(f)
+	if err := errors.Join(err, f.Sync(), f.Close()); err != nil || Has(dir, id) {
+		return id, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Rename(file, filepath.Join(dir, id)); err != nil {
+		return "", err
+	}
+	return id, SyncDir(dir)
 }
 
 func PutTree(dir, tree string) (string, error) {
@@ -91,27 +97,12 @@ func PutTree(dir, tree string) (string, error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = w.CloseWithError(Tar(w, Part{Path: tree}))
+		_ = w.CloseWithError(Tar(w, tree, false))
 	}()
-	id, err := Put(dir, r, "")
+	id, err := Put(dir, r)
 	_ = r.Close()
 	<-done
 	return id, err
-}
-
-// Link may share file's inode with the blob, so the caller must have verified it and never modify it.
-func Link(dir, file, want string) error {
-	if Has(dir, want) {
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.Link(file, filepath.Join(dir, want)); err == nil {
-		return SyncDir(dir)
-	}
-	_, err := PutFile(dir, file, want)
-	return err
 }
 
 func WriteAtomic(path string, write func(io.Writer) error) error {
@@ -140,37 +131,21 @@ func WriteAtomic(path string, write func(io.Writer) error) error {
 // regular files are supported.
 func Archive(dir, dest string) (string, error) {
 	hash := sha256.New()
-	err := WriteAtomic(dest, func(f io.Writer) error { return Tar(io.MultiWriter(f, hash), Part{Path: dir, Times: true}) })
+	err := WriteAtomic(dest, func(f io.Writer) error { return Tar(io.MultiWriter(f, hash), dir, true) })
 	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// Part places Path in a tar at Name; an empty Name places a directory's contents at the root. Without
-// Times every entry gets the epoch, so a snapshot's digest depends on its content alone.
-type Part struct {
-	Path, Name string
-	Times      bool
-}
-
-func Tar(w io.Writer, parts ...Part) error {
+// Without times every entry gets the epoch, so a snapshot's digest depends on its content alone.
+func Tar(w io.Writer, dir string, times bool) error {
 	tw := tar.NewWriter(w)
-	seen := map[string]bool{}
-	for _, part := range parts {
-		if err := writeTree(tw, part, seen); err != nil {
-			return err
-		}
-	}
-	return tw.Close()
-}
-
-func writeTree(tw *tar.Writer, part Part, seen map[string]bool) error {
-	return filepath.WalkDir(part.Path, func(file string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if file == part.Path && part.Name == "" {
+		if file == dir {
 			if !entry.IsDir() {
 				return errors.New("snapshot source must be a directory")
 			}
@@ -183,17 +158,12 @@ func writeTree(tw *tar.Writer, part Part, seen map[string]bool) error {
 		if !info.IsDir() && !info.Mode().IsRegular() {
 			return fmt.Errorf("unsupported snapshot entry: %s", file)
 		}
-		rel, err := filepath.Rel(part.Path, file)
+		rel, err := filepath.Rel(dir, file)
 		if err != nil {
 			return err
 		}
-		name := path.Join(part.Name, filepath.ToSlash(rel))
-		if seen[name] {
-			return fmt.Errorf("duplicate snapshot entry: %s", name)
-		}
-		seen[name] = true
-		header := &tar.Header{Name: name, Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg, Size: info.Size()}
-		if part.Times {
+		header := &tar.Header{Name: filepath.ToSlash(rel), Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg, Size: info.Size()}
+		if times {
 			// Only PAX keeps the sub-second part, which results such as test timings rely on.
 			header.ModTime, header.Format = info.ModTime(), tar.FormatPAX
 		}
@@ -223,9 +193,10 @@ func writeTree(tw *tar.Writer, part Part, seen map[string]bool) error {
 		_, copyErr := io.Copy(tw, in)
 		return errors.Join(copyErr, in.Close())
 	})
+	return errors.Join(err, tw.Close())
 }
 
-func Unpack(r io.Reader, dest string, check func(digest string) error) error {
+func Unpack(r io.Reader, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
@@ -234,19 +205,13 @@ func Unpack(r io.Reader, dest string, check func(digest string) error) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	hash := sha256.New()
-	r = io.TeeReader(r, hash)
 	if err := untar(r, dir); err != nil {
 		return err
 	}
-	// The tar reader stops at the end-of-archive marker; the digest also covers the padding after it.
+	// The tar reader stops at the end-of-archive marker, and a writer on a pipe still has the padding
+	// after it to send.
 	if _, err := io.Copy(io.Discard, io.LimitReader(r, 1<<20)); err != nil {
 		return err
-	}
-	if check != nil {
-		if err := check(hex.EncodeToString(hash.Sum(nil))); err != nil {
-			return err
-		}
 	}
 	if err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil {

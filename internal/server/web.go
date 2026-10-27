@@ -52,7 +52,6 @@ func (s *Server) workerStatus(host string, info *WorkerInfo, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.nodes[host]
-	status.Host = host
 	status.Connected = err == nil
 	if err != nil {
 		status.Error = err.Error()
@@ -75,8 +74,10 @@ func (s *Server) Workers() []WorkerStatus {
 	}
 	return result
 }
+func (s *Server) tokenFile() string { return filepath.Join(s.Root, "token") }
+
 func (s *Server) Token() (string, error) {
-	file := filepath.Join(s.Root, "token")
+	file := s.tokenFile()
 	info, err := os.Lstat(file)
 	if err == nil {
 		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
@@ -184,8 +185,8 @@ func (s *Server) serveLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	dir, err := job.resultDir(index)
-	if err != nil {
+	dir, ok := job.resultDir(index)
+	if !ok {
 		http.Error(w, "logs are available after collection", http.StatusConflict)
 		return
 	}

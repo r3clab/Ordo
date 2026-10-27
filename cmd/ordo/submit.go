@@ -99,8 +99,8 @@ func await(ctx context.Context, client *http.Client, encoder *json.Encoder, queu
 		for id := range pending {
 			query.Add("id", id)
 		}
-		var jobs []server.Summary
-		if err := server.Call(ctx, client, http.MethodGet, "/v1/jobs?"+query.Encode(), nil, &jobs); err != nil {
+		jobs, err := listJobs(ctx, client, query)
+		if err != nil {
 			return err
 		}
 		for _, j := range jobs {
@@ -137,7 +137,7 @@ func await(ctx context.Context, client *http.Client, encoder *json.Encoder, queu
 // goes through unchanged for the server to report.
 func absolutize(r io.Reader) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(nil, 8<<20)
+	scanner.Buffer(nil, server.MaxBatchLine)
 	var body bytes.Buffer
 	for scanner.Scan() {
 		line := scanner.Bytes()

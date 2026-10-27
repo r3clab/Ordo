@@ -36,7 +36,7 @@ func TestArchiveKeepsModificationTimes(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 	dest := filepath.Join(root, "dest")
-	if err := Unpack(f, dest, nil); err != nil {
+	if err := Unpack(f, dest); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]time.Time{"dir/data": fileTime, "dir": dirTime} {
@@ -73,7 +73,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	id, err := Put(filepath.Join(root, "blobs"), f, first)
+	id, err := Put(filepath.Join(root, "blobs"), f)
 	if err != nil || id != first {
 		t.Fatal(err)
 	}
@@ -94,15 +94,12 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(root, "tree")
-	if err := Unpack(f, dest, nil); err != nil {
+	if err := Unpack(f, dest); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dest, "data"))
 	if err != nil || string(data) != "hello" {
 		t.Fatal(err)
-	}
-	if _, err := Put(filepath.Join(root, "blobs"), bytes.NewBufferString("bad"), id); err == nil {
-		t.Fatal("accepted wrong checksum")
 	}
 }
 func TestRejectArchiveEscapes(t *testing.T) {
@@ -116,7 +113,7 @@ func TestRejectArchiveEscapes(t *testing.T) {
 		if err := tw.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if err := Unpack(&data, filepath.Join(root, "out"), nil); err == nil {
+		if err := Unpack(&data, filepath.Join(root, "out")); err == nil {
 			t.Fatalf("accepted %+v", header)
 		}
 	}

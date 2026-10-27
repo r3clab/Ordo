@@ -149,13 +149,18 @@ func writeJSON(file string, value any) error {
 	})
 }
 
+func readJSON(file string, value any) error {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, value)
+}
+
 func readRecord(dir string) (Record, error) {
 	var r Record
-	data, err := os.ReadFile(filepath.Join(dir, RecordFile))
-	if err != nil {
-		return r, err
-	}
-	return r, json.Unmarshal(data, &r)
+	err := readJSON(filepath.Join(dir, RecordFile), &r)
+	return r, err
 }
 
 // failure counts a timeout against the task, although the server or conmon is what stopped it.
@@ -173,11 +178,11 @@ func failure(at Attempt) Failure {
 	return ""
 }
 
-func (j Job) resultDir(index int) (string, error) {
+func (j Job) resultDir(index int) (string, bool) {
 	if index < 0 || index >= len(j.Attempts) || j.Attempts[index].ResultDir == "" {
-		return "", errors.New("results are available after collection")
+		return "", false
 	}
-	return j.Attempts[index].ResultDir, nil
+	return j.Attempts[index].ResultDir, true
 }
 
 // deliver publishes the last attempt's outputs, with the job's record and each step's logs in MetaDir,
@@ -189,7 +194,7 @@ func (s *Server) deliver(j Job) error {
 		outcome = Failed
 	}
 	var published Job
-	if data, err := os.ReadFile(filepath.Join(j.Out, MetaDir, JobFile)); err == nil && json.Unmarshal(data, &published) == nil && published.ID == j.ID {
+	if readJSON(filepath.Join(j.Out, MetaDir, JobFile), &published) == nil && published.ID == j.ID {
 		return s.settle(j, outcome, "")
 	}
 	parent := filepath.Dir(j.Out)
@@ -215,8 +220,8 @@ func (s *Server) deliver(j Job) error {
 		if at.ResultDir == "" || (i+1 < len(j.Attempts) && j.Attempts[i+1].Step == at.Step) {
 			continue
 		}
-		for name, ext := range map[string]string{worker.StdoutFile: ".stdout", worker.StderrFile: ".stderr"} {
-			if err := copyFile(filepath.Join(at.ResultDir, name), filepath.Join(meta, j.label(at.Step)+ext)); err != nil {
+		for stream, name := range logStreams {
+			if err := copyFile(filepath.Join(at.ResultDir, name), filepath.Join(meta, j.label(at.Step)+"."+stream)); err != nil {
 				return err
 			}
 		}
@@ -251,7 +256,7 @@ func unpackFile(archive, dest string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	return content.Unpack(f, dest, nil)
+	return content.Unpack(f, dest)
 }
 
 func copyFile(src, dest string) error {

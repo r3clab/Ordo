@@ -66,16 +66,23 @@ type steps struct {
 
 func (b *steps) run(ctx context.Context, s *Server, id string, step func() error) {
 	b.wg.Go(func() {
-		err := step()
-		s.mu.Lock()
-		delete(s.busy, id)
-		s.mu.Unlock()
-		if end := fatal(ctx, err); end != nil {
+		if end := s.free(ctx, id, step()); end != nil {
 			b.cancel(end)
-		} else if err != nil {
-			s.note(id, err)
 		}
 	})
+}
+
+func (s *Server) free(ctx context.Context, id string, err error) error {
+	s.mu.Lock()
+	delete(s.busy, id)
+	s.mu.Unlock()
+	if end := fatal(ctx, err); end != nil {
+		return end
+	}
+	if err != nil {
+		s.note(id, err)
+	}
+	return nil
 }
 
 // busyGPUs samples once per pass: each sample is an SSH round trip and about a second of nvidia-smi.
@@ -197,14 +204,8 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 			bg.run(ctx, s, id, step)
 			continue
 		}
-		s.mu.Lock()
-		delete(s.busy, id)
-		s.mu.Unlock()
-		if end := fatal(ctx, err); end != nil {
+		if end := s.free(ctx, id, err); end != nil {
 			return end
-		}
-		if err != nil {
-			s.note(id, err)
 		}
 	}
 	return s.sweep(ctx, v)

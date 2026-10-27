@@ -69,7 +69,7 @@ func stateFlag(f *flag.FlagSet, root *string) {
 }
 
 func loadServerConfig(file string) (serverConfig, error) {
-	c := serverConfig{Listen: "127.0.0.1:7331", Nix: "nix", Skopeo: defaultSkopeo}
+	c := serverConfig{Listen: "127.0.0.1:7331", Skopeo: defaultSkopeo}
 	if err := decodeFile(file, &c); err != nil {
 		return c, fmt.Errorf("server config: %w", err)
 	}

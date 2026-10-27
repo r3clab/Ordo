@@ -66,41 +66,32 @@ func (r *Resolver) Resolve(ctx context.Context, src Source) (Resolved, error) {
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
 		if src.Registry() {
-			return r.pull(r.ctx, string(src), dir)
+			// The reference's digest makes it immutable, so it is its own cache key.
+			return r.archive(string(src), string(src), &Origin{Reference: string(src)}, dir)
 		}
-		return r.nix(r.ctx, string(src), dir)
+		// The out-link is a GC root that keeps the output alive until skopeo has read it.
+		out, err := r.Tools.Build(r.ctx, string(src), filepath.Join(dir, "result"))
+		if err != nil {
+			return Resolved{}, err
+		}
+		return r.archive(out, "nix:"+out, &Origin{Installable: string(src), Output: out}, dir)
 	})
 }
 
-func (r *Resolver) nix(ctx context.Context, installable, dir string) (Resolved, error) {
-	// The out-link is a GC root that keeps the output alive until skopeo has read it.
-	out, err := r.Tools.Build(ctx, installable, filepath.Join(dir, "result"))
-	if err != nil {
-		return Resolved{}, err
-	}
-	origin := &Origin{Installable: installable, Output: out}
-	return r.archive(out, origin, filepath.Join(dir, "image.tar"), func(file string) error { return r.Tools.Export(ctx, out, file) })
-}
-
-// pull caches by the reference itself, which its digest makes immutable.
-func (r *Resolver) pull(ctx context.Context, reference, dir string) (Resolved, error) {
-	origin := &Origin{Reference: reference}
-	return r.archive(reference, origin, filepath.Join(dir, "image.tar"), func(file string) error { return r.Tools.Pull(ctx, reference, file) })
-}
-
-// archive stores the OCI archive that export writes to file, unless the cache already holds key's.
-func (r *Resolver) archive(key string, origin *Origin, file string, export func(file string) error) (Resolved, error) {
+// archive stores the OCI archive of src, unless the cache already holds key's.
+func (r *Resolver) archive(key, src string, origin *Origin, dir string) (Resolved, error) {
 	e, ok, err := r.Cache.Load(key)
 	if err != nil || (ok && content.Has(r.Blobs, e.Blob)) {
 		return Resolved{Entry: e, Origin: origin}, err
 	}
-	if err := export(file); err != nil {
+	file := filepath.Join(dir, "image.tar")
+	if err := r.Tools.Copy(r.ctx, src, file); err != nil {
 		return Resolved{}, err
 	}
 	if e.ID, err = ArchiveID(file); err != nil {
 		return Resolved{}, err
 	}
-	if e.Blob, err = content.PutFile(r.Blobs, file, ""); err != nil {
+	if e.Blob, err = content.MoveFile(r.Blobs, file); err != nil {
 		return Resolved{}, err
 	}
 	return Resolved{Entry: e, Origin: origin}, r.Cache.Save(key, e)

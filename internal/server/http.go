@@ -16,13 +16,6 @@ import (
 
 const maxReasonBytes = 1024
 
-type HTTPError struct {
-	Status  int
-	Message string
-}
-
-func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Message) }
-
 func DecodeJSON(r io.Reader, value any) error {
 	d := json.NewDecoder(r)
 	d.DisallowUnknownFields()
@@ -50,7 +43,7 @@ type StopRequest struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-func StopHandler(request func(id, reason string) error) http.HandlerFunc {
+func stopHandler(request func(id, reason string) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reason, err := decodeReason(w, r)
 		if err != nil {
@@ -127,7 +120,7 @@ func Send(ctx context.Context, client *http.Client, method, endpoint, contentTyp
 	}
 	if response.StatusCode/100 != 2 {
 		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, errors.Join(&HTTPError{Status: response.StatusCode, Message: strings.TrimSpace(string(data))}, response.Body.Close())
+		return nil, errors.Join(fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(data))), response.Body.Close())
 	}
 	return response, nil
 }

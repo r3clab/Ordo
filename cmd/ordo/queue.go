@@ -98,6 +98,10 @@ func (sel selector) list(ctx context.Context, client *http.Client) ([]server.Sum
 	if sel.under != "" {
 		query.Set("under", sel.under)
 	}
+	return listJobs(ctx, client, query)
+}
+
+func listJobs(ctx context.Context, client *http.Client, query url.Values) ([]server.Summary, error) {
 	var jobs []server.Summary
 	err := server.Call(ctx, client, http.MethodGet, "/v1/jobs?"+query.Encode(), nil, &jobs)
 	return jobs, err

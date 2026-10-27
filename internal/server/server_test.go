@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http/httptest"
 	"os"
@@ -740,4 +741,16 @@ func (f *fakeHost) Release(_ context.Context, attempt string) error {
 type seeded struct {
 	attempt, prev string
 	moved         bool
+}
+
+func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
+	result := slices.Collect(s.SubmitBatch(ctx, []BatchEntry{{Line: 1, Request: r}}))[0]
+	switch {
+	case result.Error != "":
+		return Job{}, errors.New(result.Error)
+	case result.Done:
+		return Job{}, fmt.Errorf("%s already holds results", r.Out)
+	}
+	j, _, err := s.job(result.ID)
+	return j, err
 }

@@ -386,7 +386,6 @@ func (f Filter) keeps(r Summary) bool {
 
 func (s *Server) List(f Filter) []Summary {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	var jobs []Summary
 	add := func(r record) {
 		if f.keeps(r.Summary) {
@@ -404,6 +403,7 @@ func (s *Server) List(f Filter) []Summary {
 			add(r)
 		}
 	}
+	s.mu.Unlock()
 	slices.SortFunc(jobs, func(a, b Summary) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	return jobs
 }
@@ -668,6 +668,9 @@ func (s *Server) delivered(out string) (bool, error) {
 // waiting finds the inputs that lie in an unfinished job's Out or in one of outs, the earlier lines of
 // a batch: they are snapshotted once that job delivers, not now.
 func (s *Server) waiting(r Request, outs []string) map[string]string {
+	if len(r.Inputs) == 0 {
+		return nil
+	}
 	s.mu.Lock()
 	outs = slices.Concat(outs, slices.Collect(maps.Keys(s.outs)))
 	s.mu.Unlock()
@@ -720,18 +723,6 @@ func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job
 }
 
 // Submit queues one request as a batch of one would.
-func (s *Server) Submit(ctx context.Context, r Request) (Job, error) {
-	result := slices.Collect(s.SubmitBatch(ctx, []BatchEntry{{Line: 1, Request: r}}))[0]
-	switch {
-	case result.Error != "":
-		return Job{}, errors.New(result.Error)
-	case result.Done:
-		return Job{}, fmt.Errorf("%s already holds results", r.Out)
-	}
-	j, _, err := s.job(result.ID)
-	return j, err
-}
-
 type admission struct {
 	id       string
 	state    State
@@ -828,7 +819,7 @@ func (s *Server) Run(ctx context.Context, address string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Web UI: http://%s (token file: %s)\n", web.Addr().String(), filepath.Join(s.Root, "token"))
+	fmt.Fprintf(os.Stderr, "Web UI: http://%s (token file: %s)\n", web.Addr().String(), s.tokenFile())
 	listener, err := ListenUnix(Socket(s.Root))
 	if err != nil {
 		return err
@@ -871,8 +862,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { WriteJSON(w, http.StatusOK, s.Workers()) })
 	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", s.serveLogs)
-	mux.HandleFunc("POST /v1/jobs/{id}/cancel", StopHandler(s.Cancel))
-	mux.HandleFunc("POST /v1/jobs/{id}/stop", StopHandler(s.Stop))
+	mux.HandleFunc("POST /v1/jobs/{id}/cancel", stopHandler(s.Cancel))
+	mux.HandleFunc("POST /v1/jobs/{id}/stop", stopHandler(s.Stop))
 	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		f := Filter{IDs: query["id"], Outs: query["out"], Under: query["under"]}
