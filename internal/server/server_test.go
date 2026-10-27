@@ -44,7 +44,7 @@ type fakeContainer struct {
 	finished time.Time
 }
 
-// fakeHost is a worker with four single-thread cores whose containers run only when a test says so.
+// fakeHost is a worker with four CPUs whose containers run only when a test says so.
 // Its methods lock mu, as a pass runs launches and collections beside it; a test reads and changes it
 // only between ticks.
 type fakeHost struct {
@@ -82,7 +82,7 @@ func (f *fakeHost) add(attempt, server, state string) *fakeContainer {
 }
 
 func (f *fakeHost) Probe(context.Context) (worker.Probe, error) {
-	return worker.Probe{BootID: f.boot, Hardware: pool.Hardware{Hostname: "worker", MachineID: f.machine, Arch: "amd64", Cores: [][]int{{0}, {1}, {2}, {3}}, MemoryMiB: 1024}}, nil
+	return worker.Probe{BootID: f.boot, Hardware: pool.Hardware{Hostname: "worker", MachineID: f.machine, Arch: "amd64", CPUs: []int{0, 1, 2, 3}, MemoryMiB: 1024}}, nil
 }
 
 func (f *fakeHost) Poll(context.Context) (worker.Snapshot, error) {

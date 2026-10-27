@@ -36,7 +36,7 @@ start() { "$ORDO_TEST_BINARY" server --state "$work/server" --config "$work/serv
 start
 out=$work/out
 for name in first second; do
- jq -nc --arg out "$out/$name" --arg installable "$ORDO_TEST_INSTALLABLE" '{out:$out,image:$installable,resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$name.json"
+ jq -nc --arg out "$out/$name" --arg installable "$ORDO_TEST_INSTALLABLE" '{out:$out,image:$installable,resources:{cores:4,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$name.json"
  "$ORDO_TEST_BINARY" submit --state "$work/server" --file "$work/$name.json" > "$work/$name-submitted.json"
 done
 if ! "$ORDO_TEST_BINARY" queue get --state "$work/server" --out "$out/first" | jq -e --arg image "$ORDO_TEST_IMAGE" '.steps[0].spec.image==$image' >/dev/null; then echo "ORDO_TEST_IMAGE does not match the image built from ORDO_TEST_INSTALLABLE" >&2; exit 1; fi

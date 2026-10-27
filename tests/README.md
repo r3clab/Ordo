@@ -23,7 +23,7 @@ ORDO_TEST_IMAGE=sha256:868a72e2f666cf6a96edadfc5a339f2655865ab968babde2644c31d88
 bash tests/server-smoke.sh
 ```
 
-It uses the workers `vegeta` and `goku`, each with the verified pool `62,63,126,127` (two physical cores) and a 512 MiB aggregate admission budget.
+It uses the workers `vegeta` and `goku`, each with the verified pool `62,63,126,127` (four cores) and a 512 MiB aggregate admission budget.
 It checks server SIGKILL/restart without orphaned SSH processes or duplicate executions, delivery into each job's `out` (including `.ordo/`), a job waiting on an input in another job's `out`, a two-step job with different resources per step, bounded retries, skipped dependents, timeout, cancellation, and `ordo submit --wait`.
 Add `ORDO_TEST_CHROMIUM=/path/to/chromium` (and Node.js 22+ on PATH) to drive the real UI: status of jobs queued by `ordo submit`, running-job cancellation, and safe log rendering.
 Browser logs and a screenshot join the evidence directory.
@@ -35,7 +35,7 @@ Go tests separately cover cross-origin requests, hostile Host headers, and bound
 Set `ORDO_TEST_INSTALLABLE` to the dedicated `path:$PWD/tests#gpu-image` fixture and `ORDO_TEST_IMAGE` to its configuration digest.
 With the same environment variables, run `bash tests/gpu-smoke.sh HOST FULL_GPU_UUID` only after checking current compute and graphics processes.
 The script captures inventories; dispatch also refuses devices with existing processes.
-It uses one GPU, one physical core, and 256 MiB for a tiny CUDA allocation/set/copy and checks exactly one visible UUID.
+It uses one GPU, one core, and 256 MiB for a tiny CUDA allocation/set/copy and checks exactly one visible UUID.
 A second GPU job stays queued while the first holds the device, submission rejects a tag no worker carries, and a server SIGKILL/restart leaves the GPU job with one attempt.
 No sustained GPU workload or global CDI registration is used.
 

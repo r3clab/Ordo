@@ -8,7 +8,7 @@
 
 Ordo runs reproducible evaluations across SSH-accessible Linux workers.
 Submit jobs as JSONL, run them in rootless Podman, and collect results in local directories.
-Physical cores and GPUs are allocated exclusively among Ordo jobs.
+CPUs and GPUs are allocated exclusively among Ordo jobs.
 Running containers survive server restarts and SSH disconnects.
 
 ## Worker setup
@@ -37,7 +37,7 @@ Save a config to `~/.config/ordo/server.json`, replacing the example values:
 ```
 
 `host` is an SSH host or alias.
-`cpus` lists logical CPU IDs and must include every online SMT sibling of each selected core.
+`cpus` lists the logical CPU IDs jobs may use, and each counts as one core; list one SMT sibling per physical core to keep jobs off shared physical cores.
 `memory_mib` is the worker's total job memory budget.
 
 Start `ordo server` and run CLI commands on the same host.
@@ -75,7 +75,7 @@ It assumes `data/input.txt` exists and `/srv/eval#images.tools` provides a shell
 - `inputs` maps server-host directories to read-only mounts under `/inputs`.
 - `steps` runs containers in order, sharing `/outputs` between steps.
 - `image` accepts a [nix2container](https://github.com/nlewo/nix2container) installable or a registry image pinned as `docker://NAME@sha256:DIGEST`.
-- `resources` requests physical cores, memory in MiB, and an optional GPU count.
+- `resources` requests cores (CPUs from the worker's `cpus`), memory in MiB, and an optional GPU count.
 - `args` supplies arguments to the image's entrypoint.
 
 For a single step, put its fields at the top level instead of using `steps`.

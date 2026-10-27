@@ -326,26 +326,25 @@ func TestPollAndStop(t *testing.T) {
 
 func TestParseProbe(t *testing.T) {
 	info := `{"host":{"os":"linux","cgroupVersion":"v2","cgroupControllers":["cpuset","memory"],"security":{"rootless":true}}}`
-	text := "\n@@machine\nm1\n@@boot\nb1\n@@hostname\nvegeta\n@@arch\nx86_64\n@@online\n0-127\n@@siblings 0\n0,64\n@@siblings 64\n0,64\n" +
+	text := "\n@@machine\nm1\n@@boot\nb1\n@@hostname\nvegeta\n@@arch\nx86_64\n@@online\n0-127\n" +
 		"@@cpu\nmodel name\t: AMD EPYC 9554 64-Core Processor\n@@memory\nMemTotal:       1048576 kB\n@@linger\nyes\n@@podman\n" + info + "\n"
-	p, err := parseProbe(sections(text), []int{0, 64}, 512)
+	p, err := parseProbe(sections(text), []int{0}, 512)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := p.Hardware
-	if p.BootID != "b1" || h.MachineID != "m1" || h.Arch != "amd64" || h.CPUModel != "AMD EPYC 9554 64-Core Processor" || len(h.Cores) != 1 || !slices.Equal(h.Cores[0], []int{0, 64}) {
+	if p.BootID != "b1" || h.MachineID != "m1" || h.Arch != "amd64" || h.CPUModel != "AMD EPYC 9554 64-Core Processor" || !slices.Equal(h.CPUs, []int{0}) {
 		t.Fatalf("probe %+v", p)
 	}
-	pair := []int{0, 64}
+	cpu := []int{0}
 	for _, bad := range []struct {
 		name string
 		cpus []int
 		text string
 	}{
-		{"partial core", []int{0}, text},
-		{"linger", pair, strings.Replace(text, "@@linger\nyes", "@@linger\nno", 1)},
-		{"offline", pair, strings.Replace(text, "@@online\n0-127", "@@online\n1-127", 1)},
-		{"memory budget", pair, strings.Replace(text, "1048576 kB", "1024 kB", 1)},
+		{"linger", cpu, strings.Replace(text, "@@linger\nyes", "@@linger\nno", 1)},
+		{"offline", cpu, strings.Replace(text, "@@online\n0-127", "@@online\n1-127", 1)},
+		{"memory budget", cpu, strings.Replace(text, "1048576 kB", "1024 kB", 1)},
 	} {
 		if _, err := parseProbe(sections(bad.text), bad.cpus, 512); err == nil {
 			t.Fatalf("%s accepted", bad.name)

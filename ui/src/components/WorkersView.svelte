@@ -11,7 +11,7 @@
       return {
         ...w,
         hardware,
-        cpus: hardware?.cores?.flat().length ?? 0,
+        cpus: hardware?.cpus?.length ?? 0,
         heldCPUs: held.reduce((n, a) => n + (a.cpus?.length ?? 0), 0),
         heldMemory: held.reduce((n, a) => n + a.memory_mib, 0),
         heldGPUs: new Set(held.flatMap((a) => a.gpus ?? [])),
@@ -55,8 +55,6 @@
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 border-t border-zinc-100 pt-4 text-sm dark:border-zinc-800">
           <dt class="muted">CPU</dt>
           <dd class="truncate" title={w.hardware.cpu_model}>{w.hardware.cpu_model || "—"}</dd>
-          <dt class="muted">Cores</dt>
-          <dd>{w.hardware.cores?.length ?? 0} physical · {w.cpus} logical</dd>
           {#each w.hardware.gpus ?? [] as gpu (gpu.uuid)}
             <dt class="muted">GPU {gpu.index}</dt>
             <dd class="truncate" title={gpu.uuid}>{gpu.model} · {memory(gpu.memory_mib)}{w.heldGPUs.has(gpu.uuid) ? " · reserved" : ""}</dd>

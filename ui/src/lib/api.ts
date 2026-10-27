@@ -23,7 +23,7 @@ export interface Hardware {
   hostname: string;
   arch: string;
   cpu_model: string;
-  cores: number[][] | null;
+  cpus: number[] | null;
   memory_mib: number;
   gpus?: GPU[];
 }

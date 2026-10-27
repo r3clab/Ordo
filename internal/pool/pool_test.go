@@ -8,12 +8,12 @@ import (
 	"github.com/r3clab/Ordo/internal/spec"
 )
 
-func TestAllocationTakesWholeCoresAndRespectsHeld(t *testing.T) {
+func TestAllocationRespectsHeld(t *testing.T) {
 	gpu := "GPU-11111111-1111-1111-1111-111111111111"
-	h := Hardware{Cores: [][]int{{0, 64}, {1, 65}}, MemoryMiB: 512, GPUs: []GPU{{UUID: gpu}}}
+	h := Hardware{CPUs: []int{0, 64}, MemoryMiB: 512, GPUs: []GPU{{UUID: gpu}}}
 	req := spec.Resources{Cores: 1, MemoryMiB: 256, GPUs: 1}
 	first, err := Plan(h, req, nil)
-	if err != nil || !slices.Equal(first.CPUs, []int{0, 64}) || first.GPUs[0] != gpu {
+	if err != nil || !slices.Equal(first.CPUs, []int{0}) || first.GPUs[0] != gpu {
 		t.Fatal("first allocation", first, err)
 	}
 	if _, err := Plan(h, req, []Allocation{first}); !errors.Is(err, ErrCapacity) {
@@ -21,7 +21,7 @@ func TestAllocationTakesWholeCoresAndRespectsHeld(t *testing.T) {
 	}
 	req.GPUs = 0
 	second, err := Plan(h, req, []Allocation{first})
-	if err != nil || !slices.Equal(second.CPUs, []int{1, 65}) {
+	if err != nil || !slices.Equal(second.CPUs, []int{64}) {
 		t.Fatal("second allocation", second, err)
 	}
 	if _, err := Plan(h, spec.Resources{Cores: 1, MemoryMiB: 1}, []Allocation{first, second}); !errors.Is(err, ErrCapacity) {

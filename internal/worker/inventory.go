@@ -25,14 +25,10 @@ func (h *Host) Probe(ctx context.Context) (Probe, error) {
 	if err != nil {
 		return Probe{}, err
 	}
-	var siblings strings.Builder
-	for _, cpu := range cpus {
-		fmt.Fprintf(&siblings, "t 'siblings %d'; cat /sys/devices/system/cpu/cpu%d/topology/thread_siblings_list 2>/dev/null || true; ", cpu, cpu)
-	}
 	script := prelude() + "S=" + ssh.Quote(h.StateDir) + "; mkdir -p -- \"$S\"; if [ \"$(stat -c %a \"$S\")\" != 700 ]; then echo \"$S must be mode 700\" >&2; exit 1; fi; " +
 		"mkdir -p -- \"$S/runs\" \"$S/trees\" \"$S/cdi\"; t() { printf '\\n@@%s\\n' \"$1\"; }; " +
 		"t machine; cat /etc/machine-id; t boot; cat /proc/sys/kernel/random/boot_id; t hostname; uname -n; t arch; uname -m; " +
-		"t online; cat /sys/devices/system/cpu/online; " + siblings.String() +
+		"t online; cat /sys/devices/system/cpu/online; " +
 		"t cpu; grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo || true; t memory; grep -m1 '^MemTotal:' /proc/meminfo; " +
 		"t linger; loginctl show-user \"$(id -u)\" -p Linger --value; t podman; pm info --format=json"
 	data, err := h.output(ctx, script, nil)
@@ -80,26 +76,12 @@ func parseProbe(s map[string]string, cpus []int, memoryMiB int64) (Probe, error)
 	if err != nil {
 		return p, err
 	}
-	seen := map[int]bool{}
 	for _, cpu := range cpus {
-		if seen[cpu] {
-			continue
-		}
 		if !slices.Contains(online, cpu) {
 			return p, fmt.Errorf("CPU %d is not online", cpu)
 		}
-		core, err := spec.ParseCPUs(s[fmt.Sprintf("siblings %d", cpu)])
-		if err != nil {
-			return p, err
-		}
-		for _, n := range core {
-			if !slices.Contains(cpus, n) || !slices.Contains(online, n) {
-				return p, fmt.Errorf("CPU %d requires all online SMT siblings %s in the pool", cpu, spec.FormatCPUs(core))
-			}
-			seen[n] = true
-		}
-		p.Hardware.Cores = append(p.Hardware.Cores, core)
 	}
+	p.Hardware.CPUs = cpus
 	var totalKiB int64
 	if _, err := fmt.Sscanf(s["memory"], "MemTotal: %d kB", &totalKiB); err != nil {
 		return p, fmt.Errorf("read worker memory: %w", err)

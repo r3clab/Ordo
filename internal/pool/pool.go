@@ -1,9 +1,8 @@
-// Package pool allocates whole physical cores, memory and GPUs from a worker's configured hardware.
+// Package pool allocates CPUs, memory and GPUs from a worker's configured hardware.
 package pool
 
 import (
 	"errors"
-	"slices"
 
 	"github.com/r3clab/Ordo/internal/spec"
 )
@@ -11,13 +10,13 @@ import (
 var ErrCapacity = errors.New("worker has insufficient unreserved resources")
 
 type Hardware struct {
-	Hostname  string  `json:"hostname"`
-	MachineID string  `json:"machine_id"`
-	Arch      string  `json:"arch"`
-	CPUModel  string  `json:"cpu_model"`
-	Cores     [][]int `json:"cores"`
-	MemoryMiB int64   `json:"memory_mib"`
-	GPUs      []GPU   `json:"gpus,omitempty"`
+	Hostname  string `json:"hostname"`
+	MachineID string `json:"machine_id"`
+	Arch      string `json:"arch"`
+	CPUModel  string `json:"cpu_model"`
+	CPUs      []int  `json:"cpus"`
+	MemoryMiB int64  `json:"memory_mib"`
+	GPUs      []GPU  `json:"gpus,omitempty"`
 }
 
 type GPU struct {
@@ -33,7 +32,6 @@ type Allocation struct {
 	GPUs      []string `json:"gpus,omitempty"`
 }
 
-// Plan takes whole physical cores, so a task never shares an SMT sibling with another task.
 func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error) {
 	used := map[int]bool{}
 	gpuUsed := map[string]bool{}
@@ -54,18 +52,15 @@ func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error)
 		return Allocation{}, ErrCapacity
 	}
 	a := Allocation{MemoryMiB: req.MemoryMiB}
-	count := 0
-	for _, core := range h.Cores {
-		if slices.ContainsFunc(core, func(cpu int) bool { return used[cpu] }) {
-			continue
-		}
-		a.CPUs = append(a.CPUs, core...)
-		count++
-		if count == req.Cores {
+	for _, cpu := range h.CPUs {
+		if len(a.CPUs) == req.Cores {
 			break
 		}
+		if !used[cpu] {
+			a.CPUs = append(a.CPUs, cpu)
+		}
 	}
-	if count != req.Cores {
+	if len(a.CPUs) != req.Cores {
 		return Allocation{}, ErrCapacity
 	}
 	for _, gpu := range h.GPUs {
