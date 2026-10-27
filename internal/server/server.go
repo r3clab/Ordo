@@ -126,6 +126,7 @@ type Job struct {
 	Out             string      `json:"out"`
 	Steps           []Stage     `json:"steps"`
 	Step            int         `json:"step"`
+	ReadyAt         time.Time   `json:"ready_at,omitzero"`
 	State           State       `json:"state"`
 	Error           string      `json:"error,omitempty"`
 	CreatedAt       time.Time   `json:"created_at"`

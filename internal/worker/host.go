@@ -139,23 +139,26 @@ type Snapshot struct {
 	// Now is the worker's clock, which container start times also come from.
 	Now        time.Time
 	Containers []podman.Container
+	// Runs names the attempts that have a run directory.
+	Runs []string
 }
 
 func (h *Host) Poll(ctx context.Context) (Snapshot, error) {
-	data, err := h.output(ctx, prelude()+"cat /proc/sys/kernel/random/boot_id; date +%s; pm ps -a --filter label="+podman.AttemptLabel+" --format json", nil)
+	runs := ssh.Quote(path.Join(h.StateDir, "runs"))
+	data, err := h.output(ctx, prelude()+"cat /proc/sys/kernel/random/boot_id; date +%s; ls -A -- "+runs+" 2>/dev/null | tr '\\n' ' '; echo; pm ps -a --filter label="+podman.AttemptLabel+" --format json", nil)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	lines := strings.SplitN(string(data), "\n", 3)
-	if len(lines) != 3 {
+	lines := strings.SplitN(string(data), "\n", 4)
+	if len(lines) != 4 {
 		return Snapshot{}, errors.New("unexpected worker poll output")
 	}
 	now, err := strconv.ParseInt(lines[1], 10, 64)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read worker clock: %w", err)
 	}
-	containers, err := podman.ParsePS([]byte(lines[2]))
-	return Snapshot{BootID: strings.TrimSpace(lines[0]), Now: time.Unix(now, 0).UTC(), Containers: containers}, err
+	containers, err := podman.ParsePS([]byte(lines[3]))
+	return Snapshot{BootID: strings.TrimSpace(lines[0]), Now: time.Unix(now, 0).UTC(), Containers: containers, Runs: strings.Fields(lines[2])}, err
 }
 
 func (h *Host) EnsureImage(ctx context.Context, archive, id string) error {
@@ -214,7 +217,7 @@ func (h *Host) Seed(ctx context.Context, attempt, prev, archive string) error {
 	outputs := ssh.Quote(path.Join(run, OutputsDir))
 	kept := ssh.Quote(path.Join(h.runDir(prev), OutputsDir))
 	script := "set -eu; umask 077; test -d " + outputs + " && exit 0; mkdir -p -- " + ssh.Quote(run) + "; " +
-		"if test -d " + kept + "; then mv -T -- " + kept + " " + outputs + "; exit 0; fi; exit 3"
+		"if test -d " + kept + "; then mv -T -- " + kept + " " + outputs + "; rm -rf -- " + ssh.Quote(h.runDir(prev)) + "; exit 0; fi; exit 3"
 	err := h.run.Run(ctx, script, nil, nil, nil)
 	if exit := (*ssh.ExitError)(nil); !errors.As(err, &exit) || exit.Code != 3 {
 		return err
@@ -345,4 +348,10 @@ func writeFiles(first, second string, write func(a, b io.Writer) error) error {
 // Callers remove only finished attempts, so a container that still runs is killed.
 func (h *Host) Remove(ctx context.Context, attempt string) error {
 	return h.run.Run(ctx, prelude()+"pm rm --force --ignore --time=0 -- "+ssh.Quote(podman.Name(attempt))+"; rm -rf -- "+ssh.Quote(h.runDir(attempt)), nil, nil, nil)
+}
+
+// Release removes a finished attempt's container but keeps its run directory, whose outputs the job's
+// next step starts from.
+func (h *Host) Release(ctx context.Context, attempt string) error {
+	return h.run.Run(ctx, prelude()+"pm rm --force --ignore --time=0 -- "+ssh.Quote(podman.Name(attempt)), nil, nil, nil)
 }

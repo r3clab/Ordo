@@ -57,7 +57,8 @@ type fakeHost struct {
 	stops      []string
 	collects   int
 	removed    []string
-	seeds      [][2]string
+	seeds      []seeded
+	runs       map[string]bool
 	// lose is returned by the next launch after it creates the container; refuse, before.
 	lose, refuse error
 	broken       error
@@ -66,7 +67,7 @@ type fakeHost struct {
 }
 
 func newFakeHost(server string) *fakeHost {
-	return &fakeHost{server: server, boot: "boot-1", machine: "machine-1", containers: map[string]*fakeContainer{}}
+	return &fakeHost{server: server, boot: "boot-1", machine: "machine-1", containers: map[string]*fakeContainer{}, runs: map[string]bool{}}
 }
 
 func (f *fakeHost) now() time.Time { return time.Now().Add(f.skew) }
@@ -86,7 +87,7 @@ func (f *fakeHost) Probe(context.Context) (worker.Probe, error) {
 func (f *fakeHost) Poll(context.Context) (worker.Snapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	snap := worker.Snapshot{BootID: f.boot, Now: f.now()}
+	snap := worker.Snapshot{BootID: f.boot, Now: f.now(), Runs: slices.Sorted(maps.Keys(f.runs))}
 	for _, c := range f.containers {
 		snap.Containers = append(snap.Containers, c.Container)
 	}
@@ -109,7 +110,8 @@ func (f *fakeHost) Seed(_ context.Context, attempt, prev, archive string) error 
 	if _, err := os.Stat(archive); err != nil {
 		return err
 	}
-	f.seeds = append(f.seeds, [2]string{attempt, prev})
+	f.seeds = append(f.seeds, seeded{attempt, prev, f.runs[prev]})
+	delete(f.runs, prev)
 	return nil
 }
 
@@ -126,6 +128,7 @@ func (f *fakeHost) Launch(_ context.Context, l worker.Launch) (string, error) {
 		return "", &ssh.ExitError{Code: 125, Stderr: "name is already in use"}
 	}
 	f.launches = append(f.launches, l)
+	f.runs[l.Attempt] = true
 	c := f.add(l.Attempt, f.server, podman.Running)
 	err := f.lose
 	f.lose = nil
@@ -184,6 +187,7 @@ func (f *fakeHost) Remove(_ context.Context, attempt string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.containers, attempt)
+	delete(f.runs, attempt)
 	f.removed = append(f.removed, attempt)
 	return nil
 }
@@ -723,4 +727,17 @@ func TestDefaultWorkerStateDirCachesHome(t *testing.T) {
 	if _, err := Open(c); err == nil {
 		t.Fatal("accepted a relative home")
 	}
+}
+
+func (f *fakeHost) Release(_ context.Context, attempt string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.containers, attempt)
+	return nil
+}
+
+// seeded is one Seed call; moved tells whether prev's outputs were still on the worker.
+type seeded struct {
+	attempt, prev string
+	moved         bool
 }

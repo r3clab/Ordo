@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -28,6 +29,7 @@ type host interface {
 	Inspect(ctx context.Context, attempt string) (podman.Inspection, error)
 	Collect(ctx context.Context, attempt, dir string) error
 	Remove(ctx context.Context, attempt string) error
+	Release(ctx context.Context, attempt string) error
 }
 
 // neverStarted bounds how long a created container may wait for the start that its launch performs.
@@ -41,6 +43,7 @@ type view struct {
 	boot       string
 	now        time.Time
 	containers map[string]podman.Container
+	runs       []string
 	held       []pool.Allocation
 	fault      string
 	gpusBusy   []string
@@ -161,7 +164,7 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 		}
 		*probe = p
 	}
-	v := &view{cfg: cfg, host: h, probe: *probe, boot: snap.BootID, now: snap.Now, containers: map[string]podman.Container{}}
+	v := &view{cfg: cfg, host: h, probe: *probe, boot: snap.BootID, now: snap.Now, containers: map[string]podman.Container{}, runs: snap.Runs}
 	var foreign []string
 	for _, c := range snap.Containers {
 		if c.Server() != s.id {
@@ -338,9 +341,16 @@ func (j Job) stop(started, now time.Time) (StopKind, string) {
 	return "", ""
 }
 
+// stepAffinity is how long a step waits for the worker that ran the step before it, which can start
+// it from the outputs it kept instead of an upload.
+const stepAffinity = time.Minute
+
 func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
 	resources := j.spec().Resources
 	if v.fault != "" || !v.cfg.Carries(j.spec().Tags) {
+		return false, nil
+	}
+	if prev := j.checkpoint(); prev != nil && prev.Worker != v.cfg.Host && time.Since(j.ReadyAt) < stepAffinity {
 		return false, nil
 	}
 	hw := v.probe.Hardware
@@ -436,16 +446,17 @@ func (s *Server) abandon(ctx context.Context, j Job, v *view, reason string) err
 	return s.finish(j, InfrastructureFailure)
 }
 
-// sweep leaves alone the containers of attempts this server never made.
+// sweep removes what finished attempts left on the worker, their containers and run directories,
+// except the outputs a step has yet to start from. It leaves alone the attempts this server never made.
 func (s *Server) sweep(ctx context.Context, v *view) error {
 	s.mu.Lock()
 	var done []string
-	for attempt := range v.containers {
+	for _, attempt := range slices.Concat(slices.Collect(maps.Keys(v.containers)), v.runs) {
 		id, ok := s.attempts[attempt]
-		if !ok || s.busy[id] {
+		if !ok || s.busy[id] || slices.Contains(done, attempt) {
 			continue
 		}
-		if j, unfinished := s.jobs[id]; unfinished && j.current().ID == attempt && j.live(len(j.Attempts)-1) {
+		if j, unfinished := s.jobs[id]; unfinished && (j.current().ID == attempt && j.live(len(j.Attempts)-1) || j.kept() == attempt) {
 			continue
 		}
 		done = append(done, attempt)

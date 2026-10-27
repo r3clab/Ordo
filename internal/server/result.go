@@ -95,6 +95,11 @@ func (s *Server) collect(ctx context.Context, j Job, v *view) error {
 	if err := s.finish(j, failure(*at)); err != nil {
 		return err
 	}
+	// The next step starts from these outputs, so they stay on the worker until it launches.
+	if next, _, err := s.job(j.ID); err == nil && next.kept() == at.ID {
+		_ = v.host.Release(ctx, at.ID)
+		return nil
+	}
 	_ = v.host.Remove(ctx, at.ID)
 	return nil
 }

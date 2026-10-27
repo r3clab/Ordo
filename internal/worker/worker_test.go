@@ -226,6 +226,9 @@ func TestSeedMovesKeptOutputsOrUnpacksTheArchive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(h.StateDir, "runs", "a")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the emptied run directory stayed: %v", err)
+	}
 	if data, err := os.ReadFile(filepath.Join(h.StateDir, "runs", "b", OutputsDir, "klee.log")); err != nil || string(data) != "kept" {
 		t.Fatalf("kept outputs not moved: %q %v", data, err)
 	}
@@ -282,8 +285,13 @@ func TestEnsureImageLoadsOnlyWhenMissing(t *testing.T) {
 func TestPollAndStop(t *testing.T) {
 	log := fakes(t)
 	h := testHost(t)
+	for _, attempt := range []string{"a1", "a2"} {
+		if err := os.MkdirAll(filepath.Join(h.StateDir, "runs", attempt), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	snap, err := h.Poll(context.Background())
-	if err != nil || snap.BootID == "" || time.Since(snap.Now).Abs() > time.Minute || len(snap.Containers) != 1 || snap.Containers[0].Attempt() != "a1" {
+	if err != nil || snap.BootID == "" || time.Since(snap.Now).Abs() > time.Minute || len(snap.Containers) != 1 || snap.Containers[0].Attempt() != "a1" || !slices.Equal(snap.Runs, []string{"a1", "a2"}) {
 		t.Fatalf("poll: %+v, %v", snap, err)
 	}
 	if err := h.Stop(context.Background(), "a1"); err != nil {

@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/r3clab/Ordo/internal/podman"
 	"github.com/r3clab/Ordo/internal/spec"
+	"github.com/r3clab/Ordo/internal/worker"
 )
 
 func twoSteps(out string) Request {
@@ -38,7 +40,7 @@ func TestStepsRunInOrderFromEachOthersOutputs(t *testing.T) {
 	f.tick(t)
 	j := f.job(t, id)
 	second := j.current()
-	if j.State != Running || second.Step != 1 || len(f.h.launches) != 2 || f.h.launches[1].Spec.Resources.Cores != 4 || !slices.Equal(f.h.seeds, [][2]string{{second.ID, first.ID}}) {
+	if j.State != Running || second.Step != 1 || len(f.h.launches) != 2 || f.h.launches[1].Spec.Resources.Cores != 4 || !slices.Equal(f.h.seeds, []seeded{{second.ID, first.ID, true}}) {
 		t.Fatalf("second step must start from the first's outputs: %+v, seeds %v", j, f.h.seeds)
 	}
 	f.h.exit(second.ID, 0)
@@ -53,6 +55,43 @@ func TestStepsRunInOrderFromEachOthersOutputs(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Dir(out))
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("delivery left staging beside out: %v %v", entries, err)
+	}
+}
+
+func TestNextStepPrefersTheWorkerThatKeptItsInputs(t *testing.T) {
+	workers := []worker.Config{testWorker("a"), testWorker("b")}
+	s := open(t, filepath.Join(t.TempDir(), "state"), workers, nil)
+	defer func() { _ = s.Close() }()
+	a, b := newFakeHost(s.id), newFakeHost(s.id)
+	id := submit(t, s, twoSteps(filepath.Join(t.TempDir(), "job")))
+	mustTick(t, s, workers[0], a)
+	first := last(mustJob(t, s, id))
+	a.exit(first.ID, 0)
+	mustTick(t, s, workers[0], a)
+	if !a.runs[first.ID] || len(a.containers) != 0 {
+		t.Fatalf("the first step's outputs must stay on its worker without its container: %v", a.runs)
+	}
+	mustTick(t, s, workers[1], b)
+	if len(b.launches) != 0 {
+		t.Fatal("another worker took the step before the kept outputs' worker had a chance")
+	}
+	a.add("foreign", "other", podman.Running)
+	mustTick(t, s, workers[0], a)
+	if len(a.launches) != 1 || !a.runs[first.ID] {
+		t.Fatal("a sweep removed outputs a queued step is to start from")
+	}
+	delete(a.containers, "foreign")
+	j := mustJob(t, s, id)
+	j.ReadyAt = j.ReadyAt.Add(-stepAffinity)
+	seed(t, s, j)
+	mustTick(t, s, workers[1], b)
+	second := last(mustJob(t, s, id))
+	if second.Worker != "b" || !slices.Equal(b.seeds, []seeded{{second.ID, first.ID, false}}) {
+		t.Fatalf("a worker without the outputs must start from the server's copy: %+v %v", second, b.seeds)
+	}
+	mustTick(t, s, workers[0], a)
+	if a.runs[first.ID] {
+		t.Fatal("kept outputs outlived the step that needed them")
 	}
 }
 

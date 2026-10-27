@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/r3clab/Ordo/internal/spec"
 )
@@ -120,7 +121,7 @@ func (s *Server) finish(j Job, class Failure) error {
 		j.State = Cancelled
 	case class == "" && j.Step+1 < len(j.Steps):
 		j.Step++
-		j.State, j.Error = Queued, ""
+		j.State, j.Error, j.ReadyAt = Queued, "", time.Now().UTC()
 		j.StopRequested, j.StopReason = false, ""
 	case class == "" || (exhausted && at.Result != nil):
 		j.State = Delivering
@@ -145,4 +146,13 @@ func prune(j Job) {
 			_ = os.Remove(filepath.Join(at.ResultDir, OutputsArchive))
 		}
 	}
+}
+
+// kept is the attempt whose run directory still holds, on its worker, the outputs the current step is
+// to start from: the step's launch moves them from there.
+func (j Job) kept() string {
+	if prev := j.checkpoint(); prev != nil && (j.State == Queued || j.State == Dispatching) {
+		return prev.ID
+	}
+	return ""
 }
