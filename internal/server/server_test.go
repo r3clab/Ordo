@@ -33,7 +33,7 @@ func testWorker(host string, tags ...string) worker.Config {
 var testImageID = "sha256:" + strings.Repeat("a", 64)
 
 func testNix() *imagetest.Nix {
-	return &imagetest.Nix{Output: "/nix/store/aaaa-image.json", Config: testImageID}
+	return imagetest.New(testImageID)
 }
 
 func testTools() image.Tools { return image.Tools{Exec: testNix().Exec} }

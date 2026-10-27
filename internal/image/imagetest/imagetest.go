@@ -42,6 +42,8 @@ func WriteArchive(file string, files map[string]string) error {
 	return errors.Join(tw.Close(), f.Close())
 }
 
+func New(config string) *Nix { return &Nix{Output: "/nix/store/aaaa-image.json", Config: config} }
+
 type Nix struct {
 	Output  string
 	Config  string

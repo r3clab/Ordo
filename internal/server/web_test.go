@@ -70,7 +70,7 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 	if w.Code != 200 || !mustJob(t, s, example.ID).CancelRequested {
 		t.Fatal("cancel failed", w.Body.String())
 	}
-	dir := filepath.Join(s.Root, "result")
+	dir := filepath.Join(s.root, "result")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatal("arbitrary file access accepted")
 	}
-	if err := os.Chmod(filepath.Join(s.Root, "token"), 0o644); err != nil {
+	if err := os.Chmod(filepath.Join(s.root, "token"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Token(); err == nil {

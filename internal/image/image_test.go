@@ -90,7 +90,7 @@ func (c *memoryCache) Save(output string, e Entry) error {
 }
 
 func fakeNix() *imagetest.Nix {
-	return &imagetest.Nix{Output: "/nix/store/aaaa-image.json", Config: config}
+	return imagetest.New(config)
 }
 
 func newResolver(t *testing.T, fake *imagetest.Nix) *Resolver {

@@ -70,7 +70,7 @@ func (s *Server) collect(ctx context.Context, j Job, v *view) error {
 	if at.StopRequested == "" && j.spec().TimedOut(result.StartedAt, result.FinishedAt) {
 		at.StopRequested = Timeout
 	}
-	dest := filepath.Join(s.Root, "results", j.ID, at.ID)
+	dest := filepath.Join(s.root, "results", j.ID, at.ID)
 	if _, err := os.Stat(dest); errors.Is(err, os.ErrNotExist) {
 		record := Record{Job: j.ID, Out: j.Out, Step: j.Step, Attempt: at.ID, Worker: at.Worker, MachineID: at.MachineID, ContainerID: at.ContainerID, Spec: j.spec(), Allocation: at.Allocation, StopRequested: at.StopRequested, StopReason: at.StopReason, Result: result}
 		err := s.receive(ctx, v.host, &record, dest)
@@ -178,11 +178,11 @@ func failure(at Attempt) Failure {
 	return ""
 }
 
-func (j Job) resultDir(index int) (string, bool) {
-	if index < 0 || index >= len(j.Attempts) || j.Attempts[index].ResultDir == "" {
-		return "", false
+func (j Job) resultDir(index int) string {
+	if index < 0 || index >= len(j.Attempts) {
+		return ""
 	}
-	return j.Attempts[index].ResultDir, true
+	return j.Attempts[index].ResultDir
 }
 
 // deliver publishes the last attempt's outputs, with the job's record and each step's logs in MetaDir,

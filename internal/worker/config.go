@@ -73,13 +73,15 @@ func (c Config) treeDir(digest string) string { return path.Join(c.StateDir, "tr
 
 func (c Config) serviceDir(name string) string { return path.Join(c.StateDir, "services", name) }
 
+func (c Config) serviceSocket(name string) string { return path.Join(c.serviceDir(name), "socket") }
+
 func (c Config) cdiDir() string { return path.Join(c.StateDir, "cdi") }
 
 func (c Config) ServiceForward(name, address string) (string, error) {
 	if !spec.ValidName(name) {
 		return "", fmt.Errorf("invalid service name %q", name)
 	}
-	socket := path.Join(c.serviceDir(name), "socket")
+	socket := c.serviceSocket(name)
 	if len(socket) > maxSocketPath {
 		return "", fmt.Errorf("service %s socket path is too long for a Unix socket", name)
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"maps"
 	"net/http"
 	"os"
@@ -184,7 +185,7 @@ type Server struct {
 	// installing them and is never held across a commit. A holder of write may read them without mu.
 	write      sync.Mutex
 	mu         sync.Mutex
-	Root       string
+	root       string
 	store      *state.Store
 	id         string
 	workers    []worker.Config
@@ -255,7 +256,7 @@ func Open(c Config) (_ *Server, err error) {
 			}
 		}
 	}
-	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(c.Services), secretsDir: c.SecretsDir, sshConfig: c.SSHConfig, jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	s := &Server{root: root, store: db, workers: workers, services: maps.Clone(c.Services), secretsDir: c.SecretsDir, sshConfig: c.SSHConfig, jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)
 	if errors.Is(err, state.ErrNotFound) {
@@ -731,22 +732,15 @@ func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job
 	return j, nil
 }
 
-type admission struct {
-	id       string
-	state    State
-	existing bool
-	err      error
-}
-
 // admit keys jobs by Out: an unfinished job there with the same request is returned, and a different
 // one, or one whose Out nests with this one's, refuses it.
-func (s *Server) admit(jobs []Job) []admission {
-	out := make([]admission, len(jobs))
+func (s *Server) admit(jobs []Job, results []*BatchResult) {
 	s.write.Lock()
 	defer s.write.Unlock()
 	pending := map[string]record{}
 	fresh := []Job{}
 	for i, j := range jobs {
+		result := results[i]
 		j.Key = jobKey(j)
 		old, ok := pending[j.Out]
 		if id, unfinished := s.outs[j.Out]; unfinished {
@@ -754,30 +748,47 @@ func (s *Server) admit(jobs []Job) []admission {
 		}
 		switch {
 		case ok && old.key == j.Key:
-			out[i] = admission{id: old.ID, state: old.State, existing: true}
+			result.ID, result.State, result.Existing = old.ID, old.State, true
 		case ok:
-			out[i].err = errors.New("out already has an unfinished job with a different request")
+			result.Error = "out already has an unfinished job with a different request"
 		default:
 			if other := s.nested(j.Out, pending); other != "" {
-				out[i].err = fmt.Errorf("out nests with %s, which an unfinished job writes", other)
+				result.Error = fmt.Sprintf("out nests with %s, which an unfinished job writes", other)
 				continue
 			}
 			var err error
 			if j.After, err = s.upstream(j, pending); err != nil {
-				out[i].err = err
+				result.Error = err.Error()
 				continue
 			}
 			pending[j.Out] = record{Summary: j.summary(), key: j.Key}
 			fresh = append(fresh, j)
-			out[i] = admission{id: j.ID, state: j.State}
+			result.ID, result.State = j.ID, j.State
 		}
 	}
 	if err := s.commit(fresh...); err != nil {
-		for i := range out {
-			out[i].err = cmp.Or(out[i].err, err)
+		for _, result := range results {
+			if result.Error == "" {
+				*result = BatchResult{Line: result.Line, Out: result.Out, Error: err.Error()}
+			}
 		}
 	}
-	return out
+}
+
+// The caller holds s.write.
+func (s *Server) claimed(pending map[string]record) iter.Seq2[string, string] {
+	return func(yield func(string, string) bool) {
+		for out, id := range s.outs {
+			if !yield(out, id) {
+				return
+			}
+		}
+		for out, r := range pending {
+			if !yield(out, r.ID) {
+				return
+			}
+		}
+	}
 }
 
 // upstream finds the unfinished jobs whose Out holds each of j's waiting inputs; the caller holds
@@ -787,14 +798,10 @@ func (s *Server) upstream(j Job, pending map[string]record) ([]string, error) {
 	for _, name := range j.Waiting {
 		source := j.Inputs[name]
 		id := ""
-		for out, other := range s.outs {
+		for out, other := range s.claimed(pending) {
 			if within(source, out) {
 				id = other
-			}
-		}
-		for out, other := range pending {
-			if within(source, out) {
-				id = other.ID
+				break
 			}
 		}
 		if id == "" {
@@ -808,8 +815,7 @@ func (s *Server) upstream(j Job, pending map[string]record) ([]string, error) {
 
 // nested finds an unfinished job's Out that contains out or lies inside it; the caller holds s.write.
 func (s *Server) nested(out string, pending map[string]record) string {
-	others := slices.Concat(slices.Collect(maps.Keys(s.outs)), slices.Collect(maps.Keys(pending)))
-	for _, other := range others {
+	for other := range s.claimed(pending) {
 		if within(out, other) || within(other, out) {
 			return other
 		}
@@ -828,7 +834,7 @@ func (s *Server) Run(ctx context.Context, port uint16) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Web UI: http://%s (token file: %s)\n", web.Addr().String(), s.tokenFile())
-	listener, err := ListenUnix(Socket(s.Root))
+	listener, err := ListenUnix(Socket(s.root))
 	if err != nil {
 		return err
 	}

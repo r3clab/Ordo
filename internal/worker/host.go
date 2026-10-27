@@ -87,7 +87,7 @@ func Dial(ctx context.Context, c Config, services map[string]string, sshConfig s
 		if err != nil {
 			return nil, errors.Join(err, m.Close())
 		}
-		prepare += "; mkdir -p -- " + ssh.Quote(c.serviceDir(name)) + "; rm -f -- " + ssh.Quote(path.Join(c.serviceDir(name), "socket"))
+		prepare += "; mkdir -p -- " + ssh.Quote(c.serviceDir(name)) + "; rm -f -- " + ssh.Quote(c.serviceSocket(name))
 		forwards = append(forwards, forward)
 	}
 	if err := m.Run(ctx, prepare, nil, nil, nil); err != nil {

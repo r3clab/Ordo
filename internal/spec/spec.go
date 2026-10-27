@@ -105,9 +105,7 @@ func (s Task) Validate() error {
 	return nil
 }
 
-func (s Task) Timeout() time.Duration { return time.Duration(s.TimeoutSeconds) * time.Second }
-
 func (s Task) TimedOut(start, end time.Time) bool {
-	timeout := s.Timeout()
+	timeout := time.Duration(s.TimeoutSeconds) * time.Second
 	return timeout > 0 && end.Sub(start) >= timeout
 }

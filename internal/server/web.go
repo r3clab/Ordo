@@ -74,7 +74,7 @@ func (s *Server) Workers() []WorkerStatus {
 	}
 	return result
 }
-func (s *Server) tokenFile() string { return filepath.Join(s.Root, "token") }
+func (s *Server) tokenFile() string { return filepath.Join(s.root, "token") }
 
 func (s *Server) Token() (string, error) {
 	file := s.tokenFile()
@@ -178,8 +178,8 @@ func (s *Server) serveLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	dir, ok := job.resultDir(index)
-	if !ok {
+	dir := job.resultDir(index)
+	if dir == "" {
 		http.Error(w, "logs are available after collection", http.StatusConflict)
 		return
 	}

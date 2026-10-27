@@ -46,7 +46,7 @@ func decodeLines[T any](t *testing.T, data []byte) []T {
 func testServer(t *testing.T) (string, *imagetest.Nix) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "server")
-	fake := &imagetest.Nix{Output: "/nix/store/aaaa-image.json", Config: "sha256:" + strings.Repeat("a", 64)}
+	fake := imagetest.New("sha256:" + strings.Repeat("a", 64))
 	s, err := server.Open(server.Config{Root: root, Workers: []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024}}, Tools: image.Tools{Exec: fake.Exec}})
 	if err != nil {
 		t.Fatal(err)
