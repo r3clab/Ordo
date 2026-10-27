@@ -136,18 +136,23 @@ func WriteAtomic(path string, write func(io.Writer) error) error {
 	return SyncDir(dir)
 }
 
-// Archive publishes only a complete, synced tar. Only directories and regular files are supported.
+// Archive publishes only a complete, synced tar that keeps modification times. Only directories and
+// regular files are supported.
 func Archive(dir, dest string) (string, error) {
 	hash := sha256.New()
-	err := WriteAtomic(dest, func(f io.Writer) error { return Tar(io.MultiWriter(f, hash), Part{Path: dir}) })
+	err := WriteAtomic(dest, func(f io.Writer) error { return Tar(io.MultiWriter(f, hash), Part{Path: dir, Times: true}) })
 	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// Part places Path in a tar at Name; an empty Name places a directory's contents at the root.
-type Part struct{ Path, Name string }
+// Part places Path in a tar at Name; an empty Name places a directory's contents at the root. Without
+// Times every entry gets the epoch, so a snapshot's digest depends on its content alone.
+type Part struct {
+	Path, Name string
+	Times      bool
+}
 
 func Tar(w io.Writer, parts ...Part) error {
 	tw := tar.NewWriter(w)
@@ -188,6 +193,10 @@ func writeTree(tw *tar.Writer, part Part, seen map[string]bool) error {
 		}
 		seen[name] = true
 		header := &tar.Header{Name: name, Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg, Size: info.Size()}
+		if part.Times {
+			// Only PAX keeps the sub-second part, which results such as test timings rely on.
+			header.ModTime, header.Format = info.ModTime(), tar.FormatPAX
+		}
 		if info.IsDir() {
 			header.Typeflag = tar.TypeDir
 			header.Size = 0
@@ -262,9 +271,16 @@ func Unpack(r io.Reader, dest string, check func(digest string) error) error {
 func untar(r io.Reader, dir string) error {
 	tr := tar.NewReader(r)
 	var total int64
+	// Writing an entry changes its directory's time, so directories get theirs once all are written.
+	dirs := map[string]time.Time{}
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
+			for target, mtime := range dirs {
+				if err := os.Chtimes(target, mtime, mtime); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 		if err != nil {
@@ -286,6 +302,7 @@ func untar(r io.Reader, dir string) error {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
+			dirs[target] = h.ModTime
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -296,7 +313,7 @@ func untar(r io.Reader, dir string) error {
 			return err
 		}
 		_, err = io.Copy(out, tr)
-		if err := errors.Join(err, out.Sync(), out.Close()); err != nil {
+		if err := errors.Join(err, out.Sync(), out.Close(), os.Chtimes(target, h.ModTime, h.ModTime)); err != nil {
 			return err
 		}
 	}

@@ -6,7 +6,49 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestArchiveKeepsModificationTimes(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(filepath.Join(src, "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(src, "dir", "data")
+	if err := os.WriteFile(file, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileTime, dirTime := time.Unix(1700000000, 123456789), time.Unix(1600000000, 987654321)
+	if err := os.Chtimes(file, fileTime, fileTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(src, "dir"), dirTime, dirTime); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(root, "outputs.tar")
+	if _, err := Archive(src, archive); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	dest := filepath.Join(root, "dest")
+	if err := Unpack(f, dest, nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]time.Time{"dir/data": fileTime, "dir": dirTime} {
+		info, err := os.Stat(filepath.Join(dest, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(want) {
+			t.Fatalf("%s modified at %v, want %v", name, info.ModTime(), want)
+		}
+	}
+}
 
 func TestSnapshotRoundTrip(t *testing.T) {
 	root := t.TempDir()
@@ -35,8 +77,15 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if err != nil || id != first {
 		t.Fatal(err)
 	}
-	if id, err := PutTree(filepath.Join(root, "blobs"), src); err != nil || id != first {
-		t.Fatal("tree blob differs from its archive", err)
+	tree, err := PutTree(filepath.Join(root, "blobs"), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(src, "data"), time.Unix(1, 0), time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := PutTree(filepath.Join(root, "blobs"), src); err != nil || again != tree {
+		t.Fatal("snapshot digest depends on modification times", err)
 	}
 	if _, err := PutTree(filepath.Join(root, "blobs"), filepath.Join(src, "data")); err == nil {
 		t.Fatal("stored a file as a tree")

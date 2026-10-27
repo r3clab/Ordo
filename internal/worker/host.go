@@ -284,9 +284,10 @@ func (h *Host) Collect(ctx context.Context, attempt, dir string) error {
 	if err != nil {
 		return err
 	}
-	// sh has no pipefail, so the file list goes through a temporary file to keep find's failures.
+	// sh has no pipefail, so the file list goes through a temporary file to keep find's failures. The
+	// POSIX format keeps sub-second modification times.
 	script := "set -eu; cd -- " + ssh.Quote(path.Join(h.runDir(attempt), OutputsDir)) + "; l=$(mktemp); trap 'rm -f -- \"$l\"' EXIT; " +
-		"find . -mindepth 1 -printf '%P\\0' > \"$l\"; tar -c -f - --null --no-recursion --hard-dereference -T \"$l\""
+		"find . -mindepth 1 -printf '%P\\0' > \"$l\"; tar -c -f - --format=posix --pax-option=delete=atime,delete=ctime --null --no-recursion --hard-dereference -T \"$l\""
 	reader, writer := io.Pipe()
 	unpacked := make(chan error, 1)
 	go func() {
