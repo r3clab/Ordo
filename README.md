@@ -6,10 +6,22 @@
   </picture>
 </h1>
 
-Ordo is a task dispatcher and scheduler for fair, reproducible evaluations across SSH-accessible workers.
+Ordo makes it easy to schedule reproducible evaluations across SSH-accessible servers.
+Exclusive CPU/GPU allocations and hardware matching support fair comparisons, while a durable queue, JSON workflows, and a local web UI simplify task management.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
-**Status:** Ordo runs local and SSH-managed tasks with exclusive CPU/GPU allocations, hardware matching, a durable queue, JSON workflows, and a loopback web UI.
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/overview-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/figures/overview-light.svg">
+  <img src="assets/figures/overview-light.svg" alt="Ordo's managed flow: submit jobs to a durable server, dispatch over SSH to persistent agents and rootless Podman, verify returned results, then fetch succeeded jobs." width="960">
+</picture>
+
+`ordo server` bootstraps the workers and manages scheduling, dispatch, and result collection.
+Submit jobs or workflows, then use `ordo fetch` to retrieve succeeded runs.
+
+[Command reference](https://github.com/r3clab/Ordo/wiki/Command-map) · [Figure notes and source](assets/figures/README.md).
 
 ## Direction
 
@@ -26,12 +38,6 @@ Neither upstream runtime is required.
 Prefer a small Go implementation over importing Nomad's full control plane or maintaining a Go/Rust split.
 
 ## Deployment
-
-```text
-CLI / workflow files / web UI → Ordo server
-                                   ↕ SSH tunnels
-                              Worker agents → rootless Podman tasks
-```
 
 - **Server:** has Nix and Podman installed; owns the queue, scheduling decisions, and durable run records.
 - **Workers:** each has Nix and Podman installed.

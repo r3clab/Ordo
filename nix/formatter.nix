@@ -17,6 +17,7 @@ let
       "vendor/**"
       "internal/server/web/**"
       "schema/**"
+      "assets/figures/*.svg" # Generated glyph IDs are not prose; check the Typst source.
       "ui/node_modules/**"
       "ui/package-lock.json"
     ];
