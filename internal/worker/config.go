@@ -89,7 +89,7 @@ func (c Config) ServiceForward(name, address string) (string, error) {
 	return socket + ":" + net.JoinHostPort(host, port), nil
 }
 
-func (c Config) CheckLaunch(s spec.Spec, secrets map[string]string) error {
+func (c Config) CheckLaunch(s spec.Spec) error {
 	cpus, err := spec.ParseCPUs(c.CPUs)
 	if err != nil {
 		return err
@@ -100,6 +100,10 @@ func (c Config) CheckLaunch(s spec.Spec, secrets map[string]string) error {
 	}
 	// The placeholders are as long as real values: NVIDIA GPU UUIDs, and rand.Text() attempt and server IDs.
 	placeholder := strings.Repeat("x", 26)
+	secrets := map[string]string{}
+	for _, name := range s.Secrets {
+		secrets[name] = ""
+	}
 	script, _ := launchScript(c, Launch{Attempt: placeholder, Spec: s, Allocation: worst, Secrets: secrets}, placeholder)
 	if err := ssh.CheckScript(script); err != nil {
 		return fmt.Errorf("arguments and environment are too long for %s: %w", c.Host, err)

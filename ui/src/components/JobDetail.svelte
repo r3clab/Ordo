@@ -22,13 +22,12 @@
       ["Created", new Date(job.created_at).toLocaleString()],
       ["Worker tags", job.spec.tags?.join(", ") ?? ""],
       ["Arguments", job.spec.args?.length ? job.spec.args.join(" ") : ""],
-      ["Parameters", Object.entries(job.parameters ?? {}).map(([k, v]) => `${k}=${v}`).join(", ")],
       ["Inputs", Object.keys({ ...job.spec.inputs, ...job.from }).join(", ")],
     ].filter(([, value]) => value),
   );
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && !document.querySelector("dialog[open]") && onclose()} />
+<svelte:window onkeydown={(e) => e.key === "Escape" && onclose()} />
 
 <div class="fixed inset-0 z-40 bg-zinc-950/30 backdrop-blur-[1px]" role="presentation" onclick={onclose}></div>
 <aside class="fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-900" aria-label="Job details">

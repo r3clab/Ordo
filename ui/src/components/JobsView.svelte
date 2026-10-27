@@ -38,7 +38,7 @@
     {#if visible.length === 0}
       <div class="px-6 py-16 text-center">
         <p class="font-medium">{session.jobs.length === 0 ? "No jobs yet" : "No matching jobs"}</p>
-        <p class="muted mt-1 text-sm">{session.jobs.length === 0 ? "Submit a job or workflow to get started." : "Try another filter or search."}</p>
+        <p class="muted mt-1 text-sm">{session.jobs.length === 0 ? "Queue jobs with ordo submit or ordo queue workflow to get started." : "Try another filter or search."}</p>
       </div>
     {:else}
       <div class="overflow-x-auto">

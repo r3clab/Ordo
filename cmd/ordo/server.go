@@ -23,29 +23,33 @@ func decodeFile(file string, value any) error {
 	defer func() { _ = f.Close() }()
 	return server.DecodeJSON(f, value)
 }
-
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("server")
-	var root, config, address string
+	var root, workersFile, address string
 	var tools image.Tools
-	services := map[string]string{}
+	services, secretFiles := map[string]string{}, map[string]string{}
 	f.StringVar(&address, "listen", "127.0.0.1:7331", "loopback web UI address")
 	f.StringVar(&root, "state", "", "private server state directory")
-	f.StringVar(&config, "workers", "", "JSON array of worker connection configurations")
-	f.Func("service", "NAME=HOST:PORT reachable from this server, published to tasks at /services/NAME/socket (repeatable)", keyValue(services, "service"))
+	f.StringVar(&workersFile, "workers", "", "JSON array of worker connection configurations")
+	f.Func("service", "NAME=HOST:PORT reachable from this server, published to tasks at /services/NAME/socket (repeatable)", keyValue(services, "service", "NAME=HOST:PORT"))
+	f.Func("secret", "NAME=FILE whose content, without one trailing newline, tasks listing NAME in secrets receive as $NAME (repeatable)", keyValue(secretFiles, "secret", "NAME=FILE"))
 	f.StringVar(&tools.Nix, "nix", "nix", "nix executable that builds {\"nix\": INSTALLABLE} images")
 	f.StringVar(&tools.Skopeo, "skopeo", cmp.Or(os.Getenv("ORDO_SKOPEO"), "skopeo"), "nix2container skopeo that exports them (default $ORDO_SKOPEO)")
-	if err := parse(f, args, out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331] [--service NAME=HOST:PORT ...] [--nix PATH] [--skopeo PATH]"); err != nil {
+	if err := parse(f, args, out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331] [--service NAME=HOST:PORT ...] [--secret NAME=FILE ...] [--nix PATH] [--skopeo PATH]"); err != nil {
 		return err
 	}
-	if root == "" || config == "" || f.NArg() != 0 {
+	if root == "" || workersFile == "" || f.NArg() != 0 {
 		return errors.New("--state and --workers are required")
 	}
 	var workers []worker.Config
-	if err := decodeFile(config, &workers); err != nil {
+	if err := decodeFile(workersFile, &workers); err != nil {
 		return err
 	}
-	s, err := server.Open(root, workers, services, tools)
+	secrets, err := readSecrets(secretFiles)
+	if err != nil {
+		return err
+	}
+	s, err := server.Open(server.Config{Root: root, Workers: workers, Services: services, Secrets: secrets, Tools: tools})
 	if err != nil {
 		return err
 	}
@@ -60,11 +64,11 @@ func serverClient(root string) *http.Client {
 	return client
 }
 
-func keyValue(values map[string]string, kind string) func(string) error {
+func keyValue(values map[string]string, kind, shape string) func(string) error {
 	return func(value string) error {
 		name, text, ok := strings.Cut(value, "=")
 		if !ok || name == "" {
-			return fmt.Errorf("%s must be NAME=VALUE", kind)
+			return fmt.Errorf("%s must be %s", kind, shape)
 		}
 		if _, exists := values[name]; exists {
 			return fmt.Errorf("duplicate %s %s", kind, name)
@@ -124,4 +128,17 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	return printJSON(out, result)
+}
+
+// Editors and echo end a file with a newline that is not part of the secret.
+func readSecrets(files map[string]string) (map[string]string, error) {
+	values := map[string]string{}
+	for name, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("secret %s: %w", name, err)
+		}
+		values[name] = strings.TrimSuffix(string(data), "\n")
+	}
+	return values, nil
 }

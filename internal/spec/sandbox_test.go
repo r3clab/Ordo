@@ -7,12 +7,8 @@ import (
 )
 
 func TestSandboxValidation(t *testing.T) {
-	type sandbox struct {
-		Sandbox
-		secrets map[string]string
-	}
 	large := strings.Repeat("x", MaxValueBytes+1)
-	for name, c := range map[string]sandbox{
+	for name, s := range map[string]Spec{
 		"network":         {Sandbox: Sandbox{Network: "host"}},
 		"capability":      {Sandbox: Sandbox{CapAdd: []string{"SYS_ADMIN"}}},
 		"duplicate cap":   {Sandbox: Sandbox{CapAdd: []string{"NET_ADMIN", "NET_ADMIN"}}},
@@ -20,19 +16,35 @@ func TestSandboxValidation(t *testing.T) {
 		"env NUL":         {Sandbox: Sandbox{Env: map[string]string{"X": "\x00"}}},
 		"env size":        {Sandbox: Sandbox{Env: map[string]string{"X": large}}},
 		"reserved env":    {Sandbox: Sandbox{Env: map[string]string{"NVIDIA_VISIBLE_DEVICES": "all"}}},
-		"secret is env":   {Sandbox: Sandbox{Env: map[string]string{"TOKEN": ""}}, secrets: map[string]string{"TOKEN": ""}},
-		"reserved secret": {secrets: map[string]string{"NVIDIA_DRIVER_CAPABILITIES": ""}},
-		"secret newline":  {secrets: map[string]string{"TOKEN": "a\nb"}},
-		"secret return":   {secrets: map[string]string{"TOKEN": "a\rb"}},
-		"secret NUL":      {secrets: map[string]string{"TOKEN": "a\x00b"}},
-		"secret size":     {secrets: map[string]string{"TOKEN": large}},
+		"secret is env":   {Sandbox: Sandbox{Env: map[string]string{"TOKEN": ""}}, Secrets: []string{"TOKEN"}},
+		"reserved secret": {Secrets: []string{"NVIDIA_DRIVER_CAPABILITIES"}},
+		"secret name":     {Secrets: []string{"1X"}},
+		"repeated secret": {Secrets: []string{"TOKEN", "TOKEN"}},
 	} {
-		if err := c.Validate(c.secrets); err == nil {
+		s.Resources = Resources{Cores: 1, MemoryMiB: 128}
+		if err := s.Validate(); err == nil {
 			t.Fatalf("%s: accepted invalid sandbox", name)
 		}
 	}
-	if err := (Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}).Validate(map[string]string{"TOKEN": "a b=c", "OTHER": ""}); err != nil {
+	s := Spec{Resources: Resources{Cores: 1, MemoryMiB: 128}, Sandbox: Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}, Secrets: []string{"TOKEN", "OTHER"}}
+	if err := s.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSecretValues(t *testing.T) {
+	for name, value := range map[string]string{"empty": "", "multiline": "a\nb", "carriage-return": "a\rb", "NUL": "a\x00b", "oversize": strings.Repeat("x", MaxValueBytes+1)} {
+		if CheckSecret("TOKEN", value) == nil {
+			t.Fatalf("accepted a %s secret", name)
+		}
+	}
+	if CheckSecret("NVIDIA_DRIVER_CAPABILITIES", "x") == nil || CheckSecret("1X", "x") == nil {
+		t.Fatal("accepted an invalid secret name")
+	}
+	for _, value := range []string{"a b=c", "x"} {
+		if err := CheckSecret("TOKEN", value); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

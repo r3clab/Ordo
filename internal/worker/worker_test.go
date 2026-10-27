@@ -144,11 +144,11 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 func TestCheckLaunchBoundsTheRemoteCommand(t *testing.T) {
 	c := Config{Host: "worker", StateDir: "/home/w/ordo", CPUs: "0-63", MemoryMiB: 512}
 	s := spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Resources: spec.Resources{Cores: 1, MemoryMiB: 128}, Args: []string{"x"}}
-	if err := c.CheckLaunch(s, nil); err != nil {
+	if err := c.CheckLaunch(s); err != nil {
 		t.Fatal(err)
 	}
 	s.Args = []string{strings.Repeat("'", ssh.MaxCommand/4)}
-	if err := c.CheckLaunch(s, nil); err == nil {
+	if err := c.CheckLaunch(s); err == nil {
 		t.Fatal("accepted a launch command beyond the argument limit")
 	}
 }

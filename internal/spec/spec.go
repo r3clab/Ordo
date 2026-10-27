@@ -64,18 +64,26 @@ func (s Spec) Normalize() Spec {
 	return s
 }
 
-func (s Spec) Validate(secrets map[string]string) error {
+func (s Spec) Validate() error {
 	if s.Resources.Cores <= 0 || s.Resources.MemoryMiB <= 0 || s.Resources.MemoryMiB > math.MaxInt64>>20 || s.Resources.GPUs < 0 {
 		return errors.New("positive cores/memory and a non-negative GPU count are required")
 	}
 	if s.TimeoutSeconds < 0 || s.TimeoutSeconds > MaxTimeoutSeconds {
 		return fmt.Errorf("timeout must be 0..%d seconds", MaxTimeoutSeconds)
 	}
-	if !slices.Equal(slices.Sorted(slices.Values(s.Secrets)), slices.Sorted(maps.Keys(secrets))) {
-		return errors.New("secret values must match the declared secret names")
-	}
-	if err := s.Sandbox.Validate(secrets); err != nil {
+	if err := s.Sandbox.Validate(); err != nil {
 		return err
+	}
+	for i, name := range s.Secrets {
+		if err := checkName(name); err != nil {
+			return err
+		}
+		if slices.Contains(s.Secrets[:i], name) {
+			return fmt.Errorf("secret %s is repeated", name)
+		}
+		if _, ok := s.Env[name]; ok {
+			return fmt.Errorf("variable %s is both env and a secret", name)
+		}
 	}
 	if !ValidNameSet(s.Services) {
 		return errors.New("invalid or duplicate service name")

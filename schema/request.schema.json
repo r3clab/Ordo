@@ -123,19 +123,18 @@
       "uniqueItems": true
     },
     "secrets": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "string",
-        "maxLength": 32768,
-        "pattern": "^[^\\x00\\r\\n]*$"
-      },
-      "propertyNames": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
         "type": "string",
         "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
         "not": {
           "pattern": "^NVIDIA_"
         }
-      }
+      },
+      "uniqueItems": true
     },
     "services": {
       "type": [

@@ -1,10 +1,7 @@
 package state
 
 import (
-	"bytes"
-	"database/sql"
 	"errors"
-	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -68,43 +65,5 @@ func TestRejectFutureSchema(t *testing.T) {
 	if s, err := Open(dir); err == nil {
 		_ = s.Close()
 		t.Fatal("silently accepted unknown schema")
-	}
-}
-
-func TestDeleteLeavesNoCopyOnDisk(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "state")
-	s, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = s.Close() }()
-	if err := s.Put("secret", "kept", map[string]string{"TOKEN": "visible"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Put("secret", "gone", map[string]string{"TOKEN": "hunter2-deleted"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Update(func(tx *Tx) error { return tx.Delete("secret", "gone") }); err != nil {
-		t.Fatal(err)
-	}
-	var values map[string]string
-	if err := s.Get("secret", "gone", &values); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("deleted record still readable: %v", err)
-	}
-	if err := s.Get("secret", "kept", &values); err != nil || values["TOKEN"] != "visible" {
-		t.Fatalf("kept record lost: %v", err)
-	}
-	files, err := filepath.Glob(filepath.Join(dir, "state.sqlite*"))
-	if err != nil || len(files) == 0 {
-		t.Fatal("no database files", err)
-	}
-	for _, file := range files {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Contains(data, []byte("hunter2-deleted")) {
-			t.Fatalf("%s still holds the deleted record", file)
-		}
 	}
 }

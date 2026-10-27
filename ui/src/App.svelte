@@ -1,5 +1,4 @@
 <script lang="ts">
-  import type { Job } from "./lib/api";
   import { relative } from "./lib/format";
   import { session } from "./lib/session.svelte";
   import Icon from "./components/Icon.svelte";
@@ -7,7 +6,6 @@
   import Logo from "./components/Logo.svelte";
   import JobsView from "./components/JobsView.svelte";
   import Login from "./components/Login.svelte";
-  import SubmitDialog from "./components/SubmitDialog.svelte";
   import WorkersView from "./components/WorkersView.svelte";
   import WorkflowsView from "./components/WorkflowsView.svelte";
 
@@ -21,26 +19,17 @@
   const readView = (): View => views.find((v) => location.hash === `#/${v.id}`)?.id ?? "jobs";
   let view = $state<View>(readView());
   let selected = $state<string | null>(null);
-  let submitting = $state(false);
   const job = $derived(session.jobs.find((j) => j.id === selected));
   const online = $derived(session.workers.filter((w) => w.connected).length);
   const select = (id: string | null) => (selected = id);
 
   $effect(() => {
-    if (!session.connected) {
-      selected = null;
-      submitting = false;
-    }
+    if (!session.connected) selected = null;
   });
 
   $effect(() => {
     if (location.hash !== `#/${view}`) history.replaceState(null, "", `#/${view}`);
   });
-
-  function submitted(jobs: Job[], workflow: boolean) {
-    if (workflow) view = "workflows";
-    else selected = jobs[0]?.id ?? null;
-  }
 </script>
 
 <svelte:window onhashchange={() => (view = readView())} />
@@ -72,7 +61,6 @@
             <span class="text-xs tabular-nums">{session.live ? `Live · ${relative(session.updated)}` : "Paused"}</span>
           </button>
           <button class="btn-ghost p-1.5" onclick={() => session.refresh()} aria-label="Refresh now" title="Refresh now"><Icon name="refresh" /></button>
-          <button class="btn-primary" onclick={() => (submitting = true)}><Icon name="plus" /><span class="hidden sm:inline">Submit</span></button>
           <button class="btn-ghost p-1.5" onclick={() => session.disconnect()} aria-label="Disconnect" title="Disconnect"><Icon name="logout" /></button>
         </div>
       </div>
@@ -104,7 +92,6 @@
       <JobDetail {job} onclose={() => select(null)} onselect={select} />
     {/key}
   {/if}
-  <SubmitDialog bind:open={submitting} onsubmitted={submitted} />
 
   <div class="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex justify-center px-4" aria-live="polite">
     {#if session.notice}

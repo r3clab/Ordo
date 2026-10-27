@@ -9,12 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/spec"
 )
 
@@ -48,129 +47,31 @@ func (r RetryPolicy) limit(class Failure) int {
 }
 
 type Workflow struct {
-	ID    string       `json:"id"`
-	Image image.Source `json:"image,omitzero"`
-	Tasks []Step       `json:"tasks"`
+	ID    string `json:"id"`
+	Tasks []Step `json:"tasks"`
 }
 type Step struct {
 	Request
-	Depends    []string            `json:"depends_on,omitempty"`
-	From       map[string]string   `json:"from,omitempty"`
-	Matrix     map[string][]string `json:"matrix,omitempty"`
-	Parameters map[string]string   `json:"-"`
+	Depends []string          `json:"depends_on,omitempty"`
+	From    map[string]string `json:"from,omitempty"`
 }
 
-func (w Workflow) nix() bool {
-	return w.Image.IsNix() || slices.ContainsFunc(w.Tasks, func(step Step) bool { return step.Image.IsNix() })
-}
-
-func expand(w Workflow) ([]Step, error) {
+func (w Workflow) scope() ([]Step, error) {
 	if !spec.ValidName(w.ID) || len(w.ID) > MaxWorkflowID || len(w.Tasks) == 0 || len(w.Tasks) > MaxWorkflowTasks {
 		return nil, fmt.Errorf("workflow needs an ID (1..%d characters) and 1..%d tasks", MaxWorkflowID, MaxWorkflowTasks)
 	}
-	groups := map[string][]string{}
-	ids := map[string]bool{}
-	var expanded []Step
+	graph := map[string][]string{}
 	for _, step := range w.Tasks {
-		if !spec.ValidName(step.ID) || len(step.ID) > MaxStepID || groups[step.ID] != nil {
+		if _, dup := graph[step.ID]; dup || !spec.ValidName(step.ID) || len(step.ID) > MaxStepID {
 			return nil, fmt.Errorf("task IDs must be unique and 1..%d characters", MaxStepID)
 		}
-		instances, err := step.instances()
-		if err != nil {
-			return nil, err
-		}
-		for _, t := range instances {
-			if ids[t.ID] {
-				return nil, errors.New("expanded task IDs collide")
-			}
-			ids[t.ID] = true
-			groups[step.ID] = append(groups[step.ID], t.ID)
-			if t.Image.IsZero() {
-				t.Image = w.Image
-			}
-			expanded = append(expanded, t)
-		}
-		if len(expanded) > MaxWorkflowTasks {
-			return nil, fmt.Errorf("expanded workflow exceeds %d tasks", MaxWorkflowTasks)
-		}
+		graph[step.ID] = nil
 	}
-	graph, err := link(w.ID, expanded, func(id string) []string {
-		if group, ok := groups[id]; ok {
-			return group
-		}
-		if ids[id] {
-			return []string{id}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return expanded, acyclic(graph)
-}
-
-func (step Step) instances() ([]Step, error) {
-	combos := []map[string]string{{}}
-	for _, key := range slices.Sorted(maps.Keys(step.Matrix)) {
-		values := step.Matrix[key]
-		if !spec.ValidName(key) || len(values) == 0 || len(values) > MaxWorkflowTasks || len(combos) > MaxWorkflowTasks/len(values) {
-			return nil, errors.New("invalid or oversized parameter matrix")
-		}
-		var next []map[string]string
-		for _, params := range combos {
-			for _, value := range values {
-				p := maps.Clone(params)
-				p[key] = value
-				next = append(next, p)
-			}
-		}
-		combos = next
-	}
-	instances := make([]Step, len(combos))
-	for i, params := range combos {
-		t := step
-		t.Parameters = params
-		t.From = maps.Clone(step.From)
-		if len(step.Matrix) > 0 {
-			t.ID = fmt.Sprintf("%s-%d", step.ID, i)
-		}
-		var err error
-		if t.Args, err = substitute(step.Args, params); err != nil {
-			return nil, err
-		}
-		instances[i] = t
-	}
-	return instances, nil
-}
-
-func substitute(args []string, params map[string]string) ([]string, error) {
-	var pairs []string
-	for _, key := range slices.Sorted(maps.Keys(params)) {
-		pairs = append(pairs, "{{"+key+"}}", params[key])
-	}
-	replacer := strings.NewReplacer(pairs...)
-	args = slices.Clone(args)
-	for i, arg := range args {
-		args[i] = replacer.Replace(arg)
-		if strings.Contains(args[i], "{{") {
-			return nil, errors.New("unknown parameter placeholder")
-		}
-	}
-	return args, nil
-}
-
-func link(workflow string, tasks []Step, resolve func(id string) []string) (map[string][]string, error) {
-	scoped := func(id string) string { return workflow + "--" + id }
-	graph := map[string][]string{}
-	for i, step := range tasks {
-		deps := []string{}
-		for _, dep := range step.Depends {
-			targets := resolve(dep)
-			if len(targets) == 0 {
-				return nil, fmt.Errorf("unknown dependency %s", dep)
-			}
-			deps = append(deps, targets...)
-		}
+	scoped := func(id string) string { return w.ID + "--" + id }
+	steps := make([]Step, len(w.Tasks))
+	for i, step := range w.Tasks {
+		deps := slices.Clone(step.Depends)
+		step.From = maps.Clone(step.From)
 		for name, from := range step.From {
 			if !spec.ValidName(name) {
 				return nil, errors.New("invalid dependency input name")
@@ -178,24 +79,23 @@ func link(workflow string, tasks []Step, resolve func(id string) []string) (map[
 			if _, ok := step.Inputs[name]; ok {
 				return nil, errors.New("input has both local and dependency sources")
 			}
-			targets := resolve(from)
-			if len(targets) != 1 {
-				return nil, errors.New("dependency input must select exactly one expanded task")
-			}
-			deps = append(deps, targets[0])
-			step.From[name] = scoped(targets[0])
+			deps = append(deps, from)
+			step.From[name] = scoped(from)
 		}
 		slices.Sort(deps)
 		deps = slices.Compact(deps)
-		graph[step.ID] = deps
 		step.Depends = nil
 		for _, dep := range deps {
+			if _, ok := graph[dep]; !ok {
+				return nil, fmt.Errorf("unknown dependency %s", dep)
+			}
 			step.Depends = append(step.Depends, scoped(dep))
 		}
+		graph[step.ID] = deps
 		step.ID = scoped(step.ID)
-		tasks[i] = step
+		steps[i] = step
 	}
-	return graph, nil
+	return steps, acyclic(graph)
 }
 
 func acyclic(graph map[string][]string) error {
@@ -228,23 +128,35 @@ func acyclic(graph map[string][]string) error {
 
 func jobKey(j Job) string {
 	data, _ := json.Marshal(struct {
-		Spec       any
-		Workflow   string
-		Depends    []string
-		From       map[string]string
-		Parameters map[string]string
-		Retry      RetryPolicy
-	}{j.Spec, j.Workflow, j.Depends, j.From, j.Parameters, j.Retry})
+		Spec     any
+		Workflow string
+		Depends  []string
+		From     map[string]string
+		Retry    RetryPolicy
+	}{j.Spec, j.Workflow, j.Depends, j.From, j.Retry})
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
+func (s *Server) serveWorkflow(w http.ResponseWriter, r *http.Request) {
+	var flow Workflow
+	if err := DecodeJSON(http.MaxBytesReader(w, r.Body, 8<<20), &flow); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	jobs, err := s.SubmitWorkflow(r.Context(), flow)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	WriteJSON(w, http.StatusOK, jobs)
+}
+
 func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) {
-	steps, err := expand(w)
+	steps, err := w.scope()
 	if err != nil {
 		return nil, err
 	}
 	jobs := make([]Job, 0, len(steps))
-	secrets := map[string]map[string]string{}
 	requests := make([]Request, len(steps))
 	for i, step := range steps {
 		requests[i] = step.Request
@@ -255,12 +167,8 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		if err != nil {
 			return nil, err
 		}
-		if len(step.Secrets) > 0 {
-			secrets[j.ID] = step.Secrets
-		}
 		j.Workflow = w.ID
 		j.Depends = step.Depends
-		j.Parameters = step.Parameters
 		j.Key = jobKey(j)
 		jobs = append(jobs, j)
 	}
@@ -291,7 +199,7 @@ func (s *Server) SubmitWorkflow(ctx context.Context, w Workflow) ([]Job, error) 
 		}
 		return jobs, nil
 	}
-	if err := s.commitLocked(secrets, jobs...); err != nil {
+	if err := s.commitLocked(jobs...); err != nil {
 		return nil, err
 	}
 	return jobs, nil
@@ -382,7 +290,7 @@ func (s *Server) requestStop(id string, workflow bool, reason string, mark func(
 		}
 		changed = append(changed, j)
 	}
-	return s.commitLocked(nil, changed...)
+	return s.commitLocked(changed...)
 }
 func (s *Server) finish(j Job, class Failure) error {
 	s.refresh(&j)

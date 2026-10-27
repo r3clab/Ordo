@@ -56,15 +56,14 @@ for ((i=0;i<90;i++)); do
 done
 jq -e 'length==2 and all(.state=="succeeded" and (.attempts|length)==1)' "$work/final.json" >/dev/null
 while IFS= read -r result; do test "$(<"$result/outputs/result")" = done; done < <(jq -r '.[].attempts[-1].result_dir' "$work/final.json")
-jq -n --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:"dag",image:{archive:$archive,id:$image},tasks:[
+jq -n --arg image "$ORDO_TEST_IMAGE" --arg archive "$ORDO_TEST_ARCHIVE" '{id:"dag",tasks:([
  {id:"produce",resources:{cores:1,memory_mib:128},args:["-c","printf source > /outputs/value"]},
  {id:"consume",resources:{cores:1,memory_mib:128},from:{upstream:"produce"},args:["-c","cp /inputs/upstream/value /outputs/value"]},
- {id:"sweep",resources:{cores:1,memory_mib:128},depends_on:["produce"],matrix:{seed:["3","5"]},args:["-c","printf {{seed}} > /outputs/seed"]},
  {id:"fail",resources:{cores:1,memory_mib:128},retry:{task:1},args:["-c","exit 9"]},
  {id:"skip",resources:{cores:1,memory_mib:128},depends_on:["fail"],args:["-c","exit 0"]},
  {id:"timeout",resources:{cores:1,memory_mib:128},timeout_seconds:2,args:["-c","sleep 30"]},
  {id:"cancel",resources:{cores:1,memory_mib:128},args:["-c","sleep 60"]}
-]}' > "$work/workflow.json"
+] | map(.image={archive:$archive,id:$image}))}' > "$work/workflow.json"
 "$ORDO_TEST_BINARY" queue workflow --state "$work/server" --file "$work/workflow.json" > "$work/workflow-submitted.json"
 for ((i=0;i<60;i++)); do
   "$ORDO_TEST_BINARY" queue get --state "$work/server" --id dag--cancel > "$work/cancel.json"
@@ -74,12 +73,11 @@ done
 "$ORDO_TEST_BINARY" queue cancel --state "$work/server" --id dag--cancel > "$work/cancel-request.json"
 for ((i=0;i<90;i++)); do
   "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/workflow-final.json"
-  if jq -e 'map(select(.workflow=="dag")) | length==8 and all(.state=="succeeded" or .state=="failed" or .state=="cancelled" or .state=="skipped")' "$work/workflow-final.json" >/dev/null; then break; fi
+  if jq -e 'map(select(.workflow=="dag")) | length==6 and all(.state=="succeeded" or .state=="failed" or .state=="cancelled" or .state=="skipped")' "$work/workflow-final.json" >/dev/null; then break; fi
   sleep 1
 done
 jq -e 'map(select(.workflow=="dag")) | map({key:.id,value:.}) | from_entries |
  .["dag--produce"].state=="succeeded" and .["dag--consume"].state=="succeeded" and
- .["dag--sweep-0"].state=="succeeded" and .["dag--sweep-1"].state=="succeeded" and
  .["dag--fail"].state=="failed" and (.["dag--fail"].attempts|length)==2 and
  .["dag--skip"].state=="skipped" and (.["dag--skip"].attempts//[]|length)==0 and
  .["dag--timeout"].state=="failed" and .["dag--timeout"].attempts[-1].stop_requested=="timeout" and
@@ -91,4 +89,4 @@ if [[ -n ${ORDO_TEST_CHROMIUM:-} ]]; then
  node tests/web-smoke.mjs "$url" "$work/server" "$work"
 fi
 passed=true
-printf 'PASS: queue recovery, DAG outputs, parameter sweep, bounded retry, timeout, cancellation\n'
+printf 'PASS: queue recovery, DAG outputs, bounded retry, timeout, cancellation\n'

@@ -34,8 +34,6 @@ type object struct {
 	ID      string `json:"id,omitempty"`
 }
 
-func (s Source) IsZero() bool { return s == Source{} }
-
 func (s Source) IsNix() bool { return s.Nix != "" }
 
 func (s Source) Validate() error {

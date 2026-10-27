@@ -7,7 +7,7 @@
 </h1>
 
 Ordo makes it easy to schedule reproducible evaluations across SSH-accessible servers.
-Exclusive CPU/GPU allocations and worker tags support fair comparisons, while a durable queue, JSON workflows, and a local web UI simplify task management.
+Exclusive CPU/GPU allocations and worker tags support fair comparisons, while a durable queue, workflows written in Nix, and a local web UI simplify task management.
 Every task runs in rootless Podman using a [nix2container](https://github.com/nlewo/nix2container)-built image.
 
 ## How it works
@@ -64,8 +64,8 @@ Exclusive cores and GPUs do not isolate shared caches, memory bandwidth, or unre
 
 ## Workflows and recovery
 
-- Provide a CLI, declarative workflow files, and a web UI for your own trusted workloads.
-- Support independent tasks, parameter sweeps, and dependency graphs.
+- Provide a CLI, workflows written in Nix, and a monitoring web UI for your own trusted workloads.
+- Support independent tasks, Nix-generated parameter sweeps, and dependency graphs.
 - Manage input transfers and output collection over SSH, caching reusable inputs.
 - Keep tasks running through server restarts or SSH disconnects.
   Containers carry their attempt ID, so the server finds and collects them after reconnecting, before retries or downstream scheduling.
@@ -102,30 +102,44 @@ The opt-in [live checks](tests/README.md) cover server restarts, workflows, and 
 
 ## Durable queue
 
-Start `ordo server --state SERVER_DIR --workers workers.json` with 1–10 worker entries:
+Start `ordo server --state SERVER_DIR --workers workers.json [--service NAME=HOST:PORT …] [--secret NAME=FILE …]` with 1–10 worker entries:
 
 ```json
 [{"host":"WORKER","state_dir":"/home/worker/.local/state/ordo","cpus":"0,1,64,65","memory_mib":512}]
 ```
 
-`ordo submit --state SERVER_DIR` reads one job request per line from stdin (or `--file JOBS.jsonl`):
+Write tasks with the flake's [`lib`](#nix-library); a parameter sweep is a `map` over a list:
 
-```json
-{"id":"evaluation-001","image":{"nix":"/absolute/path/evaluation#images.grep"},"inputs":{"dataset":"/absolute/path/data"},"resources":{"cores":1,"memory_mib":256},"args":["-c","cp /inputs/dataset/value /outputs/value"]}
+```nix
+let
+  inherit (ordo.lib) mkTask toJSONL;
+  tasks = map (seed: mkTask {
+    id = "evaluation-${seed}";
+    image = evaluation.images.grep;
+    inputs.dataset = "/absolute/path/data";
+    args = [ "-c" "run-eval --seed ${seed} /inputs/dataset > /outputs/score" ];
+    cores = 1;
+    memoryMiB = 256;
+  }) [ "1" "2" "3" ];
+in
+pkgs.writeText "jobs.jsonl" (toJSONL tasks)
 ```
 
-- Every line needs an `id`.
+`ordo submit --state SERVER_DIR --file jobs.jsonl` queues one job request per line (stdin without `--file`).
+
+- Every task needs an `id`.
   Resubmitting an ID with the same request returns the existing job, so rerunning a generator only queues what is new; the same ID with a different request is an error.
 - It prints one result per line (`id`, `line`, `state`, `existing`, or `error`), keeps going past bad lines, and exits nonzero if any line failed.
+- Image archives and input paths refer to the server's filesystem.
 - `image` takes one of three forms:
-  - `{"nix": INSTALLABLE}`: the server runs `nix build` on a flake attribute such as `/path/flake#images.grep` or a `/nix/store/….drv^*` path, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
+  - A derivation, written as `{"nix": "/nix/store/….drv^*"}`, or any `{"nix": INSTALLABLE}` such as `/path/flake#images.grep`: the server runs `nix build`, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
     Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
     A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
   - A local Podman reference, resolved and exported from the server's Podman storage.
-  - `{"archive": FILE, "id": "sha256:IMAGE_ID"}`: an OCI archive on the server with its immutable image ID.
+  - `{ archive = FILE; id = "sha256:IMAGE_ID"; }`: an OCI archive on the server with its immutable image ID.
 - The server finds `nix` on its `PATH` (`--nix` overrides it) and `skopeo` through `--skopeo` or `ORDO_SKOPEO`.
   Stock `skopeo` lacks the `nix:` transport; run the server from `nix run .#ordo-server`, which sets `ORDO_SKOPEO`.
-- Only the private control socket accepts `{"nix": …}` images, since building an installable runs its code; the web UI's API refuses them.
+- Only the private control socket accepts submissions; the web UI's API has none, since a submission can build Nix code, read server files, and use every configured secret.
 
 `ordo fetch --state SERVER_DIR --into results [--id ID …] [--wait]` writes each succeeded job's outputs, `stdout.log`, `stderr.log`, and `run.json` to `results/ID/`, creating `results` private (mode 0700).
 It skips jobs whose directory already exists, so a finished result is never fetched again, and receives each one into a temporary directory renamed into place only after its checksum matches.
@@ -151,8 +165,7 @@ For a remote server, use SSH forwarding, for example `ssh -L 7331:127.0.0.1:7331
 Do not expose the listener with a public proxy; public deployment/TLS/multi-user authorization are deliberately unsupported.
 Authenticated API requests additionally enforce loopback Host headers and same-origin browser requests.
 
-The page accepts job or workflow JSON, shows worker connectivity/hardware/reservations and attempt histories, and cancels jobs or whole workflows.
-Image/input paths in submitted JSON refer to the **server's filesystem**; `{"nix": …}` images need `ordo submit`.
+The page shows worker connectivity/hardware/reservations and attempt histories, and cancels jobs or whole workflows; queue work with `ordo submit` or `ordo queue workflow`.
 Logs are available after result collection, with the last 1 MiB of each stream shown; full logs remain in each attempt's result directory.
 Untrusted task output is rendered as text, not HTML.
 Auto-refresh can be paused.
@@ -178,7 +191,7 @@ After changing `ui/package-lock.json`, update `npmDepsHash` in `nix/checks/ui.ni
 ## GPU workers
 
 Configure a worker's optional `gpus` array with full NVIDIA GPU UUIDs.
-Request `resources.gpus` in queue/workflow JSON.
+Request them with `gpus` in `mkTask` or `mkStep`.
 An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, and unsupported device controls are rejected.
 
 - The server reads UUID/model/memory information with `nvidia-smi` and generates a private CDI specification under `STATE/cdi` with `nvidia-ctk` on the worker.
@@ -197,8 +210,8 @@ An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, 
 
 Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-class"]` in each of their `workers.json` entries, then require it in the task's `tags`:
 
-```json
-{"resources":{"cores":1,"gpus":2,"memory_mib":8192},"tags":["l40s-class"]}
+```nix
+mkTask { id = "train"; image = evaluation.images.train; cores = 1; gpus = 2; memoryMiB = 8192; tags = [ "l40s-class" ]; }
 ```
 
 - A job runs only on workers carrying every tag it lists; jobs without tags still run on any worker.
@@ -209,22 +222,26 @@ Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-cl
 
 ## Task environment
 
-Queue/workflow tasks may declare environment, secrets, network access, capabilities, and controller-side services:
+Tasks may declare environment, secrets, network access, capabilities, and controller-side services:
 
-```json
-{"env":{"MODE":"eval"},"secrets":{"MODEL_TOKEN":"VALUE"},"network":"egress","cap_add":["NET_ADMIN"],"services":["model"]}
+```nix
+mkTask { env.MODE = "eval"; secrets = [ "MODEL_TOKEN" ]; network = "egress"; capAdd = [ "NET_ADMIN" ]; services = [ "model" ]; /* … */ }
 ```
 
 - `env` values are part of the job's specification and appear in job records, `run.json`, and the web UI.
   Names starting with `NVIDIA_` are reserved, since NVIDIA's container hooks read them to inject devices.
-- `secrets` values are stored apart from jobs in the server's private state, deleted once the job ends, and never returned by the API or written to `run.json`, which lists only their names.
+- `secrets` lists names only, so task files in the world-readable Nix store hold no values.
+  The server supplies them: start it with a repeated `--secret NAME=FILE`, and a task listing `NAME` sees the file's content as `$NAME`.
+  Each file is read once at startup, without one trailing newline; a value cannot be empty or contain NUL or line breaks, and is at most 32 KiB.
+  Values stay in the server's memory, never in job records, the API, or `run.json`, which lists only names.
+  Submission rejects a name the server was not given, and the server refuses to start without a secret that an unfinished job uses.
+  Changing a value needs a server restart; later launches receive the new one.
   At launch they travel over SSH standard input into a mode-0600 env file on the worker, removed as soon as `podman run` returns, never through argv.
-  Values cannot contain NUL or line breaks.
-  Secret values are not part of a job's identity: resubmitting an existing ID keeps the original values.
   `podman inspect` on the worker shows them while the container exists.
+  **Anyone who can submit jobs can use every configured secret**, and a task can print one to the logs the web UI shows.
 - `network` is `none` (default, loopback only) or `egress` (rootless pasta with full outbound access).
   Domain filtering belongs in the image, for example with nftables under `NET_ADMIN`.
-- `cap_add` accepts only `NET_ADMIN`, which acts on the container's own network namespace under rootless Podman.
+- `capAdd` accepts only `NET_ADMIN`, which acts on the container's own network namespace under rootless Podman.
 - `services` names endpoints configured on the server with repeated `--service NAME=HOST:PORT`, resolved from the server.
   The server's SSH connection to each worker forwards each one to a Unix socket, and the task sees it at `/services/NAME/socket`, even with `network` set to `none`.
   The directory is mounted rather than the socket, so a task keeps reaching the service after a reconnect; while the server is disconnected, connections fail and the task must retry.
@@ -235,29 +252,40 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
 
 ## Workflows
 
-`ordo queue workflow --state SERVER_DIR --file workflow.json` submits the entire graph atomically:
+`mkWorkflow` combines steps, which are tasks that may also name `dependsOn` and `from`:
 
-```json
-{"id":"example","image":{"archive":"/absolute/image.tar","id":"sha256:IMAGE_ID"},"tasks":[
-  {"id":"produce","resources":{"cores":1,"memory_mib":128},"args":["-c","printf data > /outputs/value"]},
-  {"id":"consume","from":{"data":"produce"},"resources":{"cores":1,"memory_mib":128},"args":["-c","cp /inputs/data/value /outputs/value"]},
-  {"id":"sweep","depends_on":["produce"],"matrix":{"seed":["1","2"]},"resources":{"cores":1,"memory_mib":128},"timeout_seconds":60,"retry":{"task":1,"infrastructure":1},"args":["-c","printf {{seed}} > /outputs/seed"]}
-]}
+```nix
+let
+  inherit (ordo.lib) mkStep mkWorkflow;
+  step = args: mkStep ({ image = evaluation.images.grep; cores = 1; memoryMiB = 128; } // args);
+in
+pkgs.writeText "workflow.json" (builtins.toJSON (mkWorkflow {
+  id = "example";
+  tasks = [
+    (step { id = "produce"; args = [ "-c" "printf data > /outputs/value" ]; })
+    (step { id = "consume"; from.data = "produce"; args = [ "-c" "cp /inputs/data/value /outputs/value" ]; })
+  ] ++ map (seed: step {
+    id = "score-${seed}";
+    dependsOn = [ "produce" ];
+    timeoutSeconds = 60;
+    retry = { task = 1; infrastructure = 1; };
+    args = [ "-c" "printf ${seed} > /outputs/seed" ];
+  }) [ "1" "2" ];
+}))
 ```
 
-- Workflow IDs are at most 24 characters, task IDs 32; expanded jobs use `WORKFLOW--TASK` IDs.
-  A workflow expands to at most 1,000 tasks.
-- Matrices form a deterministic Cartesian product of string values; `{{parameter}}` is substituted in command arguments, never evaluated by a host shell.
-  Expanded IDs have numeric suffixes starting at `-0`.
-- `depends_on` requires every referenced task to succeed.
-  A sweep reference creates a barrier across all its instances.
-  `from` selects one task's collected output directory and adds its dependency automatically; select an explicit instance for sweep outputs.
+`ordo queue workflow --state SERVER_DIR --file workflow.json` submits the entire graph atomically.
+
+- Workflow IDs are at most 24 characters, task IDs 32; jobs use `WORKFLOW--TASK` IDs.
+  A workflow holds at most 1,000 tasks.
+- `dependsOn` requires every referenced task to succeed.
+  `from` selects one task's collected output directory and adds its dependency automatically.
 - Failed/cancelled dependencies skip downstream tasks; independent branches continue.
 - Task-exit retries default to zero, confirmed infrastructure-failure retries to one.
   Each count is bounded to 0–10.
   Every executed attempt remains visible.
   Unknown/disconnected executions do not consume retries.
-- `timeout_seconds` is a per-attempt wall-clock limit from container start.
+- `timeoutSeconds` is a per-attempt wall-clock limit from container start.
   The server stops an expired container; while the server is unreachable, Podman kills it 60 seconds past the limit.
   Either way the attempt counts as a task failure.
   Zero disables it; the maximum is one year.
@@ -271,35 +299,24 @@ Queue/workflow tasks may declare environment, secrets, network access, capabilit
   Attempts also record `stop_requested`: `cancel`, `stop`, or `timeout`.
   The first request reaching an attempt wins, but a later cancel still marks the job `cancelled`.
 
-## Typed specification
+## Nix library
 
-`ordo schema [request|workflow]` prints the JSON Schema of a job request or workflow, generated from the Go types; `schema/` holds committed copies for editors and other tools.
-The schema covers names, enums, and limits; rules spanning fields, such as input conflicts, are checked only on submission.
+The flake's `lib` provides `mkTask`, `mkStep`, `mkWorkflow`, and `toJSONL`, checking each task at evaluation time against the patterns, enums, and limits it reads from `schema/`.
 
-The flake's `lib` builds requests at Nix evaluation time, checking them against the patterns, enums, and limits it reads from `schema/`:
-
-```nix
-let
-  inherit (ordo.lib) mkTask toJSONL;
-  tasks = lib.mapAttrsToList (name: image: mkTask {
-    id = "klee-${name}";
-    inherit image;
-    args = [ "--max-time" "1h" ];
-    cores = 1;
-    memoryMiB = 40960;
-    timeoutSeconds = 7200;
-  }) klee-eval.images;
-in
-pkgs.writeText "tasks.jsonl" (toJSONL tasks)
-```
-
-- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`) and returns the request attrset.
-  `mkStep` adds `dependsOn`, `from`, and `matrix`, and `mkWorkflow` combines steps.
+- `mkTask` takes camelCase arguments (`memoryMiB`, `timeoutSeconds`, `capAdd`) and returns the request attrset; every task needs an `image`.
+  `mkStep` also takes `dependsOn` and `from`, and `mkWorkflow` takes an `id` and its steps as `tasks`.
+- Sweeps and other repetition are plain Nix, such as `map` over seeds or `lib.mapAttrsToList` over images.
 - A derivation `image` becomes `{"nix": "/nix/store/….drv^*"}`: the task file keeps the `.drv` alive without building the image, which the server builds on submission.
   The `.drv` must be in the server's Nix store, so evaluate on the server host or `nix copy --derivation` it there.
   JSON printed by `nix eval` roots nothing, so garbage collection can remove the `.drv` before submission.
-- `mkTask` takes no `secrets`, since anything it returns lands in the world-readable store; add them at submit time.
 - Consumers should make Ordo's `nix2container` input follow their own, so the server's `skopeo` reads their image format.
+
+### Wire format
+
+`ordo submit` reads JSON job requests, one per line, and `ordo queue workflow` reads one JSON workflow; any generator may write them.
+Their fields are snake_case (`resources.memory_mib`, `timeout_seconds`, `cap_add`, `depends_on`).
+`ordo schema [request|workflow]` prints their JSON Schema, generated from the Go types; `schema/` holds committed copies for editors and other tools.
+The schema covers names, enums, and limits; rules spanning fields, such as input conflicts, are checked only on submission.
 
 ## Development
 

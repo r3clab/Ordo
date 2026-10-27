@@ -69,7 +69,6 @@ export interface Job {
   workflow?: string;
   depends_on?: string[];
   from?: Record<string, string>;
-  parameters?: Record<string, string>;
   retry?: { task?: number; infrastructure?: number };
   cancel_requested?: boolean;
 }
@@ -92,12 +91,11 @@ export class ApiError extends Error {
   }
 }
 
-export async function request(token: string, path: string, method = "GET", body?: unknown): Promise<Response> {
+export async function request(token: string, path: string, method = "GET"): Promise<Response> {
   const response = await fetch(`/v1/${path}`, {
     method,
     credentials: "omit",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { Authorization: `Bearer ${token}` },
   });
   if (!response.ok) {
     throw new ApiError(response.status, (await response.text()).trim() || response.statusText);

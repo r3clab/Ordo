@@ -14,18 +14,16 @@ const Egress = "egress"
 const MaxValueBytes = 32 << 10
 
 const (
-	EnvNamePattern     = `^[A-Za-z_][A-Za-z0-9_]*$`
-	EnvValuePattern    = `^[^\x00]*$`
-	SecretValuePattern = `^[^\x00\r\n]*$`
+	EnvNamePattern  = `^[A-Za-z_][A-Za-z0-9_]*$`
+	EnvValuePattern = `^[^\x00]*$`
 )
 
 // NVIDIA's container hooks read these variables to inject devices outside the GPU allocation.
 const ReservedEnvPrefix = "NVIDIA_"
 
 var (
-	envName     = regexp.MustCompile(EnvNamePattern)
-	envValue    = regexp.MustCompile(EnvValuePattern)
-	secretValue = regexp.MustCompile(SecretValuePattern)
+	envName  = regexp.MustCompile(EnvNamePattern)
+	envValue = regexp.MustCompile(EnvValuePattern)
 )
 
 var networks = []string{"none", Egress}
@@ -42,7 +40,7 @@ type Sandbox struct {
 	CapAdd  []string          `json:"cap_add,omitempty"`
 }
 
-func (s Sandbox) Validate(secrets map[string]string) error {
+func (s Sandbox) Validate() error {
 	if s.Network != "" && !slices.Contains(networks, s.Network) {
 		return errors.New(`network must be "none" or "egress"`)
 	}
@@ -59,27 +57,36 @@ func (s Sandbox) Validate(secrets map[string]string) error {
 			return err
 		}
 	}
-	for name, value := range secrets {
-		if err := checkVariable(name, value); err != nil {
-			return err
-		}
-		// Podman's env-file format has no quoting.
-		if !secretValue.MatchString(value) {
-			return fmt.Errorf("secret %s contains a line break", name)
-		}
-		if _, ok := s.Env[name]; ok {
-			return fmt.Errorf("variable %s is both env and a secret", name)
-		}
+	return nil
+}
+
+func CheckSecret(name, value string) error {
+	if err := checkVariable(name, value); err != nil {
+		return err
+	}
+	if value == "" {
+		return fmt.Errorf("secret %s is empty", name)
+	}
+	// Podman's env-file format has no quoting.
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("secret %s contains a line break", name)
 	}
 	return nil
 }
 
-func checkVariable(name, value string) error {
+func checkName(name string) error {
 	if !envName.MatchString(name) {
 		return fmt.Errorf("invalid environment variable name %q", name)
 	}
 	if strings.HasPrefix(name, ReservedEnvPrefix) {
 		return fmt.Errorf("environment variable %s is reserved", name)
+	}
+	return nil
+}
+
+func checkVariable(name, value string) error {
+	if err := checkName(name); err != nil {
+		return err
 	}
 	if len(value) > MaxValueBytes || !envValue.MatchString(value) {
 		return fmt.Errorf("variable %s must be at most %d bytes without NUL", name, MaxValueBytes)

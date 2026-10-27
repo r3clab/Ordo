@@ -130,9 +130,8 @@ func refineRequest(s *jsonschema.Schema) {
 	at(s, "env").PropertyNames = variables()
 	at(s, "env", "{}").MaxLength = jsonschema.Ptr(spec.MaxValueBytes)
 	at(s, "env", "{}").Pattern = spec.EnvValuePattern
-	at(s, "secrets").PropertyNames = variables()
-	at(s, "secrets", "{}").MaxLength = jsonschema.Ptr(spec.MaxValueBytes)
-	at(s, "secrets", "{}").Pattern = spec.SecretValuePattern
+	at(s, "secrets").UniqueItems = true
+	at(s, "secrets").Items = variables()
 	at(s, "network").Enum = enum(spec.Networks())
 	at(s, "cap_add").UniqueItems = true
 	at(s, "cap_add", "[]").Enum = enum(spec.Capabilities())
@@ -157,9 +156,6 @@ func refineWorkflow(s *jsonschema.Schema) {
 	step := at(tasks, "[]")
 	refineRequest(step)
 	at(step, "id").MaxLength = jsonschema.Ptr(server.MaxStepID)
-	step.Required = append(slices.DeleteFunc(step.Required, func(field string) bool { return field == "image" }), "id")
+	step.Required = append(step.Required, "id")
 	at(step, "from").PropertyNames = names()
-	matrix := at(step, "matrix")
-	matrix.PropertyNames = names()
-	at(matrix, "{}").MinItems, at(matrix, "{}").MaxItems = jsonschema.Ptr(1), jsonschema.Ptr(server.MaxWorkflowTasks)
 }

@@ -6,47 +6,6 @@
       "maxLength": 24,
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
     },
-    "image": {
-      "description": "A local Podman reference, {\"nix\": INSTALLABLE} for a nix2container image the server builds, or {\"archive\": FILE, \"id\": \"sha256:IMAGE_ID\"} for an OCI archive on the server.",
-      "oneOf": [
-        {
-          "type": "string",
-          "minLength": 1
-        },
-        {
-          "type": "object",
-          "properties": {
-            "nix": {
-              "type": "string",
-              "maxLength": 4096,
-              "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
-            }
-          },
-          "required": [
-            "nix"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "archive": {
-              "type": "string",
-              "minLength": 1
-            },
-            "id": {
-              "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
-            }
-          },
-          "required": [
-            "archive",
-            "id"
-          ],
-          "additionalProperties": false
-        }
-      ]
-    },
     "tasks": {
       "type": "array",
       "items": {
@@ -175,19 +134,18 @@
             "uniqueItems": true
           },
           "secrets": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string",
-              "maxLength": 32768,
-              "pattern": "^[^\\x00\\r\\n]*$"
-            },
-            "propertyNames": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
               "not": {
                 "pattern": "^NVIDIA_"
               }
-            }
+            },
+            "uniqueItems": true
           },
           "services": {
             "type": [
@@ -253,27 +211,10 @@
               "type": "string",
               "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
             }
-          },
-          "matrix": {
-            "type": "object",
-            "additionalProperties": {
-              "type": [
-                "null",
-                "array"
-              ],
-              "items": {
-                "type": "string"
-              },
-              "minItems": 1,
-              "maxItems": 1000
-            },
-            "propertyNames": {
-              "type": "string",
-              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
-            }
           }
         },
         "required": [
+          "image",
           "resources",
           "id"
         ],

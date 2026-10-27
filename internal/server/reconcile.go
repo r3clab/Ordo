@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -169,7 +168,7 @@ func (s *Server) note(id string, err error) {
 	}
 	j = j.clone()
 	j.Error = err.Error()
-	_ = s.commitLocked(nil, j)
+	_ = s.commitLocked(j)
 }
 
 // block leaves a job for the operator: each cause needs a look, so only a cancel releases it, and
@@ -305,18 +304,9 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 	if j.stopKind() != "" {
 		return s.finish(j, CancelFailure)
 	}
-	var secrets map[string]string
-	if len(j.Spec.Secrets) > 0 {
-		err := s.store.Get("secret", j.ID, &secrets)
-		if errors.Is(err, sql.ErrNoRows) {
-			at.Failure = InfrastructureFailure
-			j.State = Failed
-			j.Error = "job secrets are missing; resubmit it under a new ID"
-			return s.save(j)
-		}
-		if err != nil {
-			return err
-		}
+	secrets := make(map[string]string, len(j.Spec.Secrets))
+	for _, name := range j.Spec.Secrets {
+		secrets[name] = s.secrets[name]
 	}
 	id, err := v.host.Launch(ctx, worker.Launch{Attempt: at.ID, Spec: j.Spec, Allocation: at.Allocation, Secrets: secrets})
 	if errors.Is(err, ssh.ErrTransport) || ctx.Err() != nil {

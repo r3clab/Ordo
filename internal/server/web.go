@@ -119,7 +119,7 @@ func listenWeb(address string) (net.Listener, error) {
 	return net.Listen("tcp", address)
 }
 func (s *Server) WebHandler(token string) http.Handler {
-	api := s.handler(Web)
+	api := s.routes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -162,54 +162,51 @@ func (s *Server) WebHandler(token string) http.Handler {
 		http.ServeFileFS(w, r, webFiles, "web/"+asset.file)
 	})
 }
-func (s *Server) webRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/workers", func(w http.ResponseWriter, r *http.Request) { WriteJSON(w, http.StatusOK, s.Workers()) })
-	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", func(w http.ResponseWriter, r *http.Request) {
-		name, ok := logStreams[r.PathValue("stream")]
-		if !ok {
-			http.Error(w, "unknown log stream", 400)
-			return
-		}
-		job, ok := s.job(r.PathValue("id"))
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		index := len(job.Attempts) - 1
-		if query := r.URL.Query().Get("attempt"); query != "" {
-			var err error
-			index, err = strconv.Atoi(query)
-			if err != nil {
-				http.Error(w, "invalid attempt", 400)
-				return
-			}
-		}
-		dir, err := job.resultDir(index)
+func (s *Server) serveLogs(w http.ResponseWriter, r *http.Request) {
+	name, ok := logStreams[r.PathValue("stream")]
+	if !ok {
+		http.Error(w, "unknown log stream", 400)
+		return
+	}
+	job, ok := s.job(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	index := len(job.Attempts) - 1
+	if query := r.URL.Query().Get("attempt"); query != "" {
+		var err error
+		index, err = strconv.Atoi(query)
 		if err != nil {
-			http.Error(w, "logs are available after collection", http.StatusConflict)
+			http.Error(w, "invalid attempt", 400)
 			return
 		}
-		file := filepath.Join(dir, name)
-		info, err := os.Lstat(file)
-		if err != nil || !info.Mode().IsRegular() {
-			http.Error(w, "log is unavailable", 500)
+	}
+	dir, err := job.resultDir(index)
+	if err != nil {
+		http.Error(w, "logs are available after collection", http.StatusConflict)
+		return
+	}
+	file := filepath.Join(dir, name)
+	info, err := os.Lstat(file)
+	if err != nil || !info.Mode().IsRegular() {
+		http.Error(w, "log is unavailable", 500)
+		return
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		http.Error(w, "log is unavailable", 500)
+		return
+	}
+	defer func() { _ = f.Close() }()
+	const limit int64 = 1 << 20
+	if info.Size() > limit {
+		if _, err := f.Seek(-limit, io.SeekEnd); err != nil {
+			http.Error(w, "log seek failed", 500)
 			return
 		}
-		f, err := os.Open(file)
-		if err != nil {
-			http.Error(w, "log is unavailable", 500)
-			return
-		}
-		defer func() { _ = f.Close() }()
-		const limit int64 = 1 << 20
-		if info.Size() > limit {
-			if _, err := f.Seek(-limit, io.SeekEnd); err != nil {
-				http.Error(w, "log seek failed", 500)
-				return
-			}
-			w.Header().Set("X-Ordo-Truncated", "true")
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = io.Copy(w, io.LimitReader(f, limit))
-	})
+		w.Header().Set("X-Ordo-Truncated", "true")
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.Copy(w, io.LimitReader(f, limit))
 }

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
-	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/server"
 	"github.com/r3clab/Ordo/internal/worker"
 )
@@ -47,7 +46,7 @@ func decodeLines[T any](t *testing.T, data []byte) []T {
 
 func TestSubmitStreamsResultsAndIsIdempotent(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "server")
-	s, err := server.Open(root, []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024}}, nil, image.Tools{})
+	s, err := server.Open(server.Config{Root: root, Workers: []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024}}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir, open } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import assert from "node:assert/strict";
 const [url, root, evidence] = process.argv.slice(2);
@@ -32,16 +32,14 @@ try {
   await evaluate('document.getElementById("login").requestSubmit()');
   await wait('!!document.querySelector("nav[aria-label=Views]")');
   assert(await evaluate('localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ""'));
-  const workflow = { id: "browser", image: { archive: process.env.ORDO_TEST_ARCHIVE, id: process.env.ORDO_TEST_IMAGE }, tasks: [
-    { id: "log", resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf '<script>globalThis.injection=true</script>\\n'"] },
-    { id: "stop", resources: { cores: 1, memory_mib: 128 }, timeout_seconds: 60, args: ["-c", "sleep 45"] },
+  const image = { archive: process.env.ORDO_TEST_ARCHIVE, id: process.env.ORDO_TEST_IMAGE };
+  const workflow = { id: "browser", tasks: [
+    { id: "log", image, resources: { cores: 1, memory_mib: 128 }, args: ["-c", "printf '<script>globalThis.injection=true</script>\\n'"] },
+    { id: "stop", image, resources: { cores: 1, memory_mib: 128 }, timeout_seconds: 60, args: ["-c", "sleep 45"] },
   ] };
-  await evaluate(click("header button", "Submit"));
-  await wait('document.querySelector("dialog").open');
-  await evaluate(click("[role=radio]", "Workflow"));
-  await evaluate(input("#spec", JSON.stringify(workflow)));
-  await evaluate('document.getElementById("submit").requestSubmit()');
-  await wait('document.body.textContent.includes("Workflow submitted with 2 tasks.")');
+  const file = `${evidence}/browser-workflow.json`;
+  await writeFile(file, JSON.stringify(workflow), { mode: 0o600 });
+  execFileSync(process.env.ORDO_TEST_BINARY, ["queue", "workflow", "--state", root, "--file", file], { stdio: "ignore" });
   await evaluate('document.querySelector(\'a[href="#/jobs"]\').click()');
   await wait(state("browser--stop", "running"));
   await evaluate(`${row("browser--stop")}.click()`);
@@ -57,5 +55,5 @@ try {
   await evaluate(`document.querySelector('[aria-label="Disconnect"]').click()`);
   await wait('!!document.getElementById("token")');
   assert(await evaluate('document.getElementById("token").value === "" && document.querySelector("tr[data-job-id]") === null && localStorage.length === 0 && sessionStorage.length === 0'));
-  console.log("PASS: real browser authentication, workflow submission, status, running cancellation, safe logs, disconnect");
+  console.log("PASS: real browser authentication, queued workflow status, running cancellation, safe logs, disconnect");
 } finally { socket?.close(); browser.kill("SIGTERM"); await new Promise((resolve) => { if (browser.exitCode !== null) resolve(); else browser.once("exit", resolve); }); await log.close(); }

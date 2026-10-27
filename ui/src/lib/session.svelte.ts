@@ -41,10 +41,10 @@ class Session {
     this.error = reason;
   }
 
-  async call(path: string, method = "GET", body?: unknown): Promise<Response> {
+  async call(path: string, method = "GET"): Promise<Response> {
     const token = this.token;
     try {
-      const response = await request(token, path, method, body);
+      const response = await request(token, path, method);
       if (token !== this.token) throw new Error("Session changed; response discarded.");
       return response;
     } catch (error) {

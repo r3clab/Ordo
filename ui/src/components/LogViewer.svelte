@@ -37,7 +37,7 @@
 
 <div class="space-y-2">
   <div class="flex items-center justify-between">
-    <Segmented label="Log stream" options={[["stdout", "stdout"], ["stderr", "stderr"]] as const} value={stream} onchange={(s) => (stream = s)} class="px-3 py-1 font-mono text-xs" />
+    <Segmented label="Log stream" options={[["stdout", "stdout"], ["stderr", "stderr"]] as const} value={stream} onchange={(s) => (stream = s)} />
     {#if truncated}<span class="text-xs text-amber-600 dark:text-amber-400">Showing the last 1 MiB</span>{/if}
   </div>
   {#if error}

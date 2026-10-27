@@ -2,9 +2,9 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -157,7 +157,7 @@ func (f *fakeHost) Remove(_ context.Context, attempt string) error {
 
 func open(t *testing.T, state string, workers []worker.Config, services map[string]string) *Server {
 	t.Helper()
-	s, err := Open(state, workers, services, image.Tools{})
+	s, err := Open(Config{Root: state, Workers: workers, Services: services})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestFailedCollectionBlocksOnce(t *testing.T) {
 
 func TestTagsSelectWorkers(t *testing.T) {
 	root := t.TempDir()
-	if _, err := Open(filepath.Join(root, "bad"), []worker.Config{testWorker("a", "l40s", "l40s")}, nil, image.Tools{}); err == nil {
+	if _, err := Open(Config{Root: filepath.Join(root, "bad"), Workers: []worker.Config{testWorker("a", "l40s", "l40s")}}); err == nil {
 		t.Fatal("accepted a duplicate worker tag")
 	}
 	workers := []worker.Config{testWorker("plain"), testWorker("a", "l40s"), testWorker("b", "fast")}
@@ -364,7 +364,7 @@ func TestTagsSelectWorkers(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if other, err := Open(state, []worker.Config{testWorker("plain"), testWorker("a"), testWorker("b", "fast")}, nil, image.Tools{}); err == nil {
+	if other, err := Open(Config{Root: state, Workers: []worker.Config{testWorker("plain"), testWorker("a"), testWorker("b", "fast")}}); err == nil {
 		_ = other.Close()
 		t.Fatal("dropped a tag an unfinished job uses")
 	}
@@ -373,49 +373,59 @@ func TestTagsSelectWorkers(t *testing.T) {
 
 func TestSecretsServicesAndStop(t *testing.T) {
 	ctx := context.Background()
-	state := filepath.Join(t.TempDir(), "state")
-	workers := []worker.Config{testWorker("worker")}
-	services := map[string]string{"model": "127.0.0.1:8317"}
-	s := open(t, state, workers, services)
+	config := Config{Root: filepath.Join(t.TempDir(), "state"), Workers: []worker.Config{testWorker("worker")}, Services: map[string]string{"model": "127.0.0.1:8317"}, Secrets: map[string]string{"TOKEN": "hunter2"}}
+	workers := config.Workers
+	broken := config
+	broken.Secrets = map[string]string{"TOKEN": "a\nb"}
+	if _, err := Open(broken); err == nil {
+		t.Fatal("accepted a secret the env file cannot carry")
+	}
+	s, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := request(t, "agent")
 	req.Sandbox = spec.Sandbox{Env: map[string]string{"MODE": "eval"}, Network: spec.Egress, CapAdd: []string{"NET_ADMIN"}}
-	req.Secrets, req.Services, req.Retry = map[string]string{"TOKEN": "hunter2"}, []string{"model"}, RetryPolicy{Task: 2}
-	unknown := req
-	unknown.Services = []string{"other"}
-	if _, err := s.Submit(ctx, unknown); err == nil {
-		t.Fatal("accepted an unconfigured service")
-	}
-	huge := req
-	huge.Args = []string{strings.Repeat("x", ssh.MaxCommand)}
-	if _, err := s.Submit(ctx, huge); err == nil {
-		t.Fatal("accepted a launch command beyond the remote argument limit")
+	req.Secrets, req.Services, req.Retry = []string{"TOKEN"}, []string{"model"}, RetryPolicy{Task: 2}
+	for name, change := range map[string]func(*Request){
+		"an unconfigured service":                           func(r *Request) { r.Services = []string{"other"} },
+		"an unconfigured secret":                            func(r *Request) { r.Secrets = []string{"OTHER"} },
+		"a repeated secret":                                 func(r *Request) { r.Secrets = []string{"TOKEN", "TOKEN"} },
+		"a secret that is also env":                         func(r *Request) { r.Env = map[string]string{"TOKEN": "x"} },
+		"a launch command beyond the remote argument limit": func(r *Request) { r.Args = []string{strings.Repeat("x", ssh.MaxCommand)} },
+	} {
+		bad := req
+		change(&bad)
+		if _, err := s.Submit(ctx, bad); err == nil {
+			t.Fatal("accepted", name)
+		}
 	}
 	submit(t, s, req)
-	resubmitted := req
-	resubmitted.Secrets = map[string]string{"TOKEN": "rotated"}
-	if _, err := s.Submit(ctx, resubmitted); err != nil {
-		t.Fatal("secret values must not change job identity:", err)
-	}
 	listed, _ := json.Marshal(s.List())
-	if strings.Contains(string(listed), "hunter2") || strings.Contains(string(listed), "rotated") || !slices.Equal(mustJob(t, s, "agent").Spec.Secrets, []string{"TOKEN"}) {
+	if strings.Contains(string(listed), "hunter2") || !slices.Equal(mustJob(t, s, "agent").Spec.Secrets, []string{"TOKEN"}) {
 		t.Fatalf("jobs must name secrets without values: %s", listed)
 	}
 
 	h := newFakeHost(s.id)
 	mustTick(t, s, workers[0], h)
 	launched := h.launches[0]
-	if launched.Secrets["TOKEN"] != "hunter2" || !slices.Equal(launched.Spec.Services, []string{"model"}) || launched.Spec.Network != spec.Egress {
-		t.Fatalf("launch lost the sandbox or original secret: %+v", launched)
+	if !maps.Equal(launched.Secrets, config.Secrets) || !slices.Equal(launched.Spec.Services, []string{"model"}) || launched.Spec.Network != spec.Egress {
+		t.Fatalf("launch lost the sandbox or configured secret: %+v", launched)
 	}
 
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if other, err := Open(state, workers, nil, image.Tools{}); err == nil {
-		_ = other.Close()
-		t.Fatal("dropped a service an unfinished job uses")
+	for name, dropped := range map[string]Config{"service": {Root: config.Root, Workers: workers, Secrets: config.Secrets}, "secret": {Root: config.Root, Workers: workers, Services: config.Services}} {
+		if other, err := Open(dropped); err == nil {
+			_ = other.Close()
+			t.Fatalf("dropped a %s an unfinished job uses", name)
+		}
 	}
-	s = open(t, state, workers, services)
+	if s, err = Open(config); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
 	stale := mustJob(t, s, "agent")
 	if err := s.Stop("agent", "budget spent"); err != nil {
 		t.Fatal(err)
@@ -435,11 +445,6 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	if at := j.Attempts[0]; j.State != Failed || j.StopReason != "budget spent" || at.StopRequested != Stop || at.Result == nil || at.Result.ExitCode != 137 {
 		t.Fatalf("stopped job retried or lost its reason: %+v", j)
 	}
-	var values map[string]string
-	if err := s.store.Get("secret", "agent", &values); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("terminal job kept its secrets: %v", err)
-	}
-
 	queued := req
 	queued.ID = "queued"
 	submit(t, s, queued)
@@ -448,18 +453,6 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	}
 	if j := mustJob(t, s, "queued"); j.State != Cancelled {
 		t.Fatalf("stopping an unstarted job must cancel it: %s", j.State)
-	}
-
-	live := req
-	live.ID = "live"
-	submit(t, s, live)
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s = open(t, state, workers, services)
-	defer func() { _ = s.Close() }()
-	if err := s.store.Get("secret", "live", &values); err != nil || values["TOKEN"] != "hunter2" {
-		t.Fatalf("restart dropped a live job's secret: %v", err)
 	}
 }
 

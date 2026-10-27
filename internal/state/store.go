@@ -60,7 +60,7 @@ func openDB(file string) (_ *sql.DB, err error) {
 	}
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)", "foreign_keys(ON)", "secure_delete(ON)"} {
+	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)", "foreign_keys(ON)"} {
 		q.Add("_pragma", pragma)
 	}
 	u.RawQuery = q.Encode()
@@ -97,30 +97,18 @@ func (s *Store) Put(kind, id string, value any) error {
 	return s.Update(func(tx *Tx) error { return tx.Put(kind, id, value) })
 }
 
-type Tx struct {
-	tx      *sql.Tx
-	deleted bool
-}
+type Tx struct{ tx *sql.Tx }
 
-// Update leaves no copy of a deleted record on disk: secure_delete zeroes its freed pages, and
-// truncating the write-ahead log after commit discards the frames that still hold it.
 func (s *Store) Update(fn func(*Tx) error) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	t := &Tx{tx: tx}
-	if err := fn(t); err != nil {
+	if err := fn(&Tx{tx: tx}); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	if t.deleted {
-		_, err = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-	}
-	return err
+	return tx.Commit()
 }
 
 func (t *Tx) Put(kind, id string, value any) error {
@@ -129,12 +117,6 @@ func (t *Tx) Put(kind, id string, value any) error {
 		return err
 	}
 	_, err = t.tx.Exec(upsert, kind, id, data)
-	return err
-}
-
-func (t *Tx) Delete(kind, id string) error {
-	t.deleted = true
-	_, err := t.tx.Exec("DELETE FROM records WHERE kind=? AND id=?", kind, id)
 	return err
 }
 

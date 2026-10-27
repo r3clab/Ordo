@@ -74,7 +74,7 @@ func TestSourceJSON(t *testing.T) {
 		if (err == nil) != test.ok || got != test.want {
 			t.Fatalf("%s: got %+v, %v", test.in, got, err)
 		}
-		if !test.ok || got.IsZero() {
+		if !test.ok || got == (Source{}) {
 			continue
 		}
 		data, err := json.Marshal(got)
@@ -82,12 +82,6 @@ func TestSourceJSON(t *testing.T) {
 		if err != nil || json.Unmarshal(data, &back) != nil || back != got {
 			t.Fatalf("%s did not round-trip: %s", test.in, data)
 		}
-	}
-	data, err := json.Marshal(struct {
-		Image Source `json:"image,omitzero"`
-	}{})
-	if err != nil || string(data) != "{}" {
-		t.Fatalf("zero source not omitted: %s", data)
 	}
 }
 

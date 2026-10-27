@@ -7,7 +7,6 @@ import (
 
 	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/server"
-	"github.com/r3clab/Ordo/internal/worker"
 )
 
 func validator(t *testing.T, name string) func(string) error {
@@ -32,18 +31,17 @@ func validator(t *testing.T, name string) func(string) error {
 func TestRequestSchemaMatchesValidation(t *testing.T) {
 	validate := validator(t, "request")
 	base := `"id":"grep-1","resources":{"cores":2,"memory_mib":4096}`
-	tagged := []worker.Config{{Tags: []string{"l40s"}}}
 	for _, valid := range []string{
 		`{` + base + `,"image":"localhost/klee:1"}`,
 		`{` + base + `,"image":{"nix":"/nix/store/x.drv^*"},"args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"tags":["l40s"]}`,
-		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"},"secrets":{"TOKEN":"x"},"inputs":{"corpus":"/data"}}`,
+		`{` + base + `,"image":{"archive":"/image.tar","id":"sha256:` + strings.Repeat("a", 64) + `"},"secrets":["TOKEN"],"inputs":{"corpus":"/data"}}`,
 	} {
 		if err := validate(valid); err != nil {
 			t.Errorf("rejected %s: %v", valid, err)
 		}
 		var r server.Request
-		if err := json.Unmarshal([]byte(valid), &r); err != nil || r.Check(nil, tagged) != nil && !strings.Contains(r.Check(nil, tagged).Error(), "service") {
-			t.Errorf("the schema accepts what Go rejects: %s: %v %v", valid, err, r.Check(nil, tagged))
+		if err := json.Unmarshal([]byte(valid), &r); err != nil || r.Validate() != nil {
+			t.Errorf("the schema accepts what Go rejects: %s: %v %v", valid, err, r.Validate())
 		}
 	}
 	for _, invalid := range []string{
@@ -61,7 +59,10 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{` + base + `,"image":"x","cap_add":["NET_ADMIN","NET_ADMIN"]}`,
 		`{` + base + `,"image":"x","env":{"1BAD":"x"}}`,
 		`{` + base + `,"image":"x","env":{"NVIDIA_VISIBLE_DEVICES":"all"}}`,
-		`{` + base + `,"image":"x","secrets":{"TOKEN":"a\nb"}}`,
+		`{` + base + `,"image":"x","secrets":{"TOKEN":"x"}}`,
+		`{` + base + `,"image":"x","secrets":["TOKEN","TOKEN"]}`,
+		`{` + base + `,"image":"x","secrets":["1BAD"]}`,
+		`{` + base + `,"image":"x","secrets":["NVIDIA_X"]}`,
 		`{` + base + `,"image":"x","retry":{"task":11}}`,
 		`{` + base + `,"image":"x","timeout_seconds":31536001}`,
 		`{"id":"bad id","image":"x","resources":{"cores":1,"memory_mib":1}}`,
@@ -76,23 +77,25 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 			t.Errorf("accepted %s", invalid)
 		}
 		var r server.Request
-		if err := server.DecodeJSON(strings.NewReader(invalid), &r); err == nil && r.Check(nil, tagged) == nil {
+		if err := server.DecodeJSON(strings.NewReader(invalid), &r); err == nil && r.Validate() == nil {
 			t.Errorf("Go accepts what the schema rejects: %s", invalid)
 		}
 	}
 }
 
-func TestWorkflowSchemaInheritsImageAndBoundsTasks(t *testing.T) {
+func TestWorkflowSchemaRequiresImagesAndBoundsTasks(t *testing.T) {
 	validate := validator(t, "workflow")
-	step := `{"id":"run","resources":{"cores":1,"memory_mib":128},"depends_on":["prep"],"from":{"corpus":"prep"},"matrix":{"program":["grep","sed"]}}`
-	if err := validate(`{"id":"eval","image":{"nix":"/src#images.grep"},"tasks":[` + step + `]}`); err != nil {
+	step := `{"id":"run","image":{"nix":"/src#images.grep"},"resources":{"cores":1,"memory_mib":128},"depends_on":["prep"],"from":{"corpus":"prep"}}`
+	if err := validate(`{"id":"eval","tasks":[` + step + `]}`); err != nil {
 		t.Fatal(err)
 	}
 	for _, invalid := range []string{
 		`{"id":"eval","tasks":[]}`,
 		`{"id":"` + strings.Repeat("w", 25) + `","tasks":[` + step + `]}`,
-		`{"id":"eval","tasks":[{"resources":{"cores":1,"memory_mib":128}}]}`,
-		`{"id":"eval","tasks":[{"id":"run","resources":{"cores":1,"memory_mib":128},"matrix":{"program":[]}}]}`,
+		`{"id":"eval","tasks":[{"image":"x","resources":{"cores":1,"memory_mib":128}}]}`,
+		`{"id":"eval","tasks":[{"id":"run","resources":{"cores":1,"memory_mib":128}}]}`,
+		`{"id":"eval","image":"x","tasks":[` + step + `]}`,
+		`{"id":"eval","tasks":[{"id":"run","image":"x","resources":{"cores":1,"memory_mib":128},"matrix":{"program":["grep"]}}]}`,
 	} {
 		if err := validate(invalid); err == nil {
 			t.Errorf("accepted %s", invalid)

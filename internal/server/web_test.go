@@ -2,7 +2,7 @@ package server
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +16,8 @@ import (
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
-func TestWebAuthenticationSubmissionCancellationAndLogs(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil, image.Tools{})
+func TestWebAuthenticationCancellationAndLogs(t *testing.T) {
+	s, err := Open(Config{Root: filepath.Join(t.TempDir(), "server"), Workers: []worker.Config{testWorker("worker")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestWebAuthenticationSubmissionCancellationAndLogs(t *testing.T) {
 	if w := request("GET", "/v1/jobs", token, "evil.example:7331", "", nil); w.Code != 403 {
 		t.Fatal("DNS rebinding accepted")
 	}
-	if w := request("POST", "/v1/jobs", token, "", "http://evil.example", nil); w.Code != 403 {
+	if w := request("POST", "/v1/jobs/example/cancel", token, "", "http://evil.example", nil); w.Code != 403 {
 		t.Fatal("cross-origin write accepted")
 	}
 	for _, path := range []string{"/", "/app.js", "/style.css"} {
@@ -70,12 +70,10 @@ func TestWebAuthenticationSubmissionCancellationAndLogs(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := json.Marshal(Request{ID: "example", Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}})
-	w := request("POST", "/v1/jobs", token, "", "http://127.0.0.1:7331", data)
-	if w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
+	if _, err := s.Submit(context.Background(), Request{ID: "example", Image: image.Source{Archive: archive, ID: "sha256:" + strings.Repeat("a", 64)}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}); err != nil {
+		t.Fatal(err)
 	}
-	w = request("POST", "/v1/jobs/example/cancel", token, "", "", nil)
+	w := request("POST", "/v1/jobs/example/cancel", token, "", "http://127.0.0.1:7331", nil)
 	if w.Code != 200 || !s.List()[0].CancelRequested {
 		t.Fatal("cancel failed", w.Body.String())
 	}
@@ -118,7 +116,7 @@ func TestWebListenerIsLoopbackOnly(t *testing.T) {
 	_ = l.Close()
 }
 func TestWebHTTPRoundTrip(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil, image.Tools{})
+	s, err := Open(Config{Root: filepath.Join(t.TempDir(), "server"), Workers: []worker.Config{testWorker("worker")}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -68,7 +68,6 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 		for chunk := range slices.Chunk(entries, batchChunk) {
 			results := make([]BatchResult, len(chunk))
 			var jobs []Job
-			var secrets []map[string]string
 			var slots []int
 			for i, e := range chunk {
 				results[i] = BatchResult{ID: e.Request.ID, Line: e.Line}
@@ -82,10 +81,9 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 					continue
 				}
 				jobs = append(jobs, j)
-				secrets = append(secrets, e.Request.Secrets)
 				slots = append(slots, i)
 			}
-			for k, admitted := range s.admit(jobs, secrets) {
+			for k, admitted := range s.admit(jobs) {
 				result := &results[slots[k]]
 				if admitted.err != nil {
 					result.Error = admitted.err.Error()

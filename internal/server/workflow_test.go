@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,26 +13,30 @@ import (
 	"github.com/r3clab/Ordo/internal/worker"
 )
 
-func TestWorkflowExpansionAndValidation(t *testing.T) {
-	w := Workflow{ID: "sweep", Tasks: []Step{{Request: Request{ID: "map", Args: []string{"{{seed}}"}}, Matrix: map[string][]string{"seed": {"1", "2"}}}, {Request: Request{ID: "reduce"}, Depends: []string{"map"}, From: map[string]string{"first": "map-0"}}}}
-	steps, err := expand(w)
-	if err != nil {
-		t.Fatal(err)
+func TestWorkflowScoping(t *testing.T) {
+	w := Workflow{ID: "flow", Tasks: []Step{{Request: Request{ID: "map"}}, {Request: Request{ID: "reduce"}, Depends: []string{"map"}, From: map[string]string{"first": "map"}}}}
+	for range 2 {
+		steps, err := w.scope()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if steps[0].ID != "flow--map" || steps[1].ID != "flow--reduce" || !slices.Equal(steps[1].Depends, []string{"flow--map"}) || steps[1].From["first"] != "flow--map" {
+			t.Fatalf("bad scoping: %+v", steps)
+		}
 	}
-	if len(steps) != 3 || steps[0].Args[0] != "1" || steps[1].Args[0] != "2" || len(steps[2].Depends) != 2 || steps[2].From["first"] != "sweep--map-0" {
-		t.Fatalf("bad expansion: %+v", steps)
+	if w.Tasks[1].ID != "reduce" || w.Tasks[1].From["first"] != "map" {
+		t.Fatal("scoping changed the submitted workflow")
 	}
-	w.Tasks[1].From["first"] = "map"
-	if _, err := expand(w); err == nil {
-		t.Fatal("accepted ambiguous sweep input")
-	}
-	w = Workflow{ID: "cycle", Tasks: []Step{{Request: Request{ID: "a"}, Depends: []string{"b"}}, {Request: Request{ID: "b"}, Depends: []string{"a"}}}}
-	if _, err := expand(w); err == nil {
-		t.Fatal("accepted cycle")
-	}
-	w.Tasks[1].Depends = []string{"missing"}
-	if _, err := expand(w); err == nil {
-		t.Fatal("accepted missing dependency")
+	for name, tasks := range map[string][]Step{
+		"a cycle":                   {{Request: Request{ID: "a"}, Depends: []string{"b"}}, {Request: Request{ID: "b"}, Depends: []string{"a"}}},
+		"a missing dependency":      {{Request: Request{ID: "a"}, Depends: []string{"missing"}}},
+		"a missing input source":    {{Request: Request{ID: "a"}, From: map[string]string{"x": "missing"}}},
+		"a repeated task ID":        {{Request: Request{ID: "a"}}, {Request: Request{ID: "a"}}},
+		"an input with two sources": {{Request: Request{ID: "a"}}, {Request: Request{ID: "b", Inputs: map[string]string{"x": "/data"}}, From: map[string]string{"x": "a"}}},
+	} {
+		if _, err := (Workflow{ID: "bad", Tasks: tasks}).scope(); err == nil {
+			t.Fatal("accepted", name)
+		}
 	}
 }
 func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
@@ -40,7 +45,7 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(filepath.Join(root, "state"), []worker.Config{testWorker("worker")}, nil, image.Tools{})
+	s, err := Open(Config{Root: filepath.Join(root, "state"), Workers: []worker.Config{testWorker("worker")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +58,13 @@ func TestWorkflowAtomicSubmissionAndRetries(t *testing.T) {
 	b.ID = "b"
 	b.Depends = []string{"a"}
 	flow := Workflow{ID: "flow", Tasks: []Step{a, b}}
-	bad := flow
-	bad.Tasks = append([]Step(nil), flow.Tasks...)
-	bad.Tasks[1].Resources.Cores = 0
-	if _, err := s.SubmitWorkflow(context.Background(), bad); err == nil || len(s.List()) != 0 {
-		t.Fatal("published partial workflow")
+	for _, change := range []func(*Step){func(step *Step) { step.Resources.Cores = 0 }, func(step *Step) { step.Image = image.Source{} }} {
+		bad := flow
+		bad.Tasks = append([]Step(nil), flow.Tasks...)
+		change(&bad.Tasks[1])
+		if _, err := s.SubmitWorkflow(context.Background(), bad); err == nil || len(s.List()) != 0 {
+			t.Fatal("published partial workflow")
+		}
 	}
 	jobs, err := s.SubmitWorkflow(context.Background(), flow)
 	if err != nil {

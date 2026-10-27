@@ -25,6 +25,11 @@ let
   optional = check: value: value == null || check value;
   distinct = values: lib.unique values == values;
   distinctNames = names: distinct names && builtins.all validName names;
+  validEnvName =
+    name:
+    builtins.isString name
+    && builtins.match envPattern name != null
+    && builtins.match "${reservedEnvPattern}.*" name == null;
   compact = lib.filterAttrs (_: value: value != null);
 
   # Discarding the output dependency keeps only the .drv in a written task file's
@@ -41,7 +46,6 @@ let
     {
       id,
       image ? null,
-      archive ? null,
       args ? null,
       inputs ? null,
       cores,
@@ -54,8 +58,10 @@ let
       services ? null,
       retry ? null,
       tags ? null,
+      secrets ? null,
     }:
     assert require (validName id) "task id ${builtins.toJSON id} must match ${namePattern}";
+    assert require (image != null) "${id}: needs an image";
     assert require (
       atLeast resources.cores.minimum cores && atLeast resources.memory_mib.minimum memoryMiB
     ) "${id}: cores and memoryMiB must be positive integers";
@@ -68,12 +74,14 @@ let
       s: builtins.all validName (builtins.attrNames s)
     ) inputs) "${id}: input names must match ${namePattern}";
     assert require (optional (
-      vars:
-      builtins.all (
-        name:
-        builtins.match envPattern name != null && builtins.match "${reservedEnvPattern}.*" name == null
-      ) (builtins.attrNames vars)
+      vars: builtins.all validEnvName (builtins.attrNames vars)
     ) env) "${id}: env names must match ${envPattern} and not ${reservedEnvPattern}";
+    assert require (optional (names: distinct names && builtins.all validEnvName names)
+      secrets
+    ) "${id}: secrets must be distinct names matching ${envPattern} and not ${reservedEnvPattern}";
+    assert require (optional (
+      names: env == null || !builtins.any (name: env ? ${name}) names
+    ) secrets) "${id}: a secret cannot also be set in env";
     assert require (optional (
       n: builtins.elem n networks
     ) network) "${id}: network must be one of ${toString networks}";
@@ -88,15 +96,15 @@ let
     compact {
       inherit
         id
-        archive
         args
         inputs
         env
         network
         services
         tags
+        secrets
         ;
-      image = if image == null then null else imageRef image;
+      image = imageRef image;
       resources = compact {
         inherit cores gpus;
         memory_mib = memoryMiB;
@@ -116,16 +124,12 @@ in
 {
   inherit imageRef;
 
-  mkTask =
-    args:
-    assert require (args.image or null != null) "${args.id or "task"}: mkTask needs an image";
-    request args;
+  mkTask = request;
 
   mkStep =
     {
       dependsOn ? null,
       from ? null,
-      matrix ? null,
       ...
     }@args:
     assert require (
@@ -135,21 +139,15 @@ in
       removeAttrs args [
         "dependsOn"
         "from"
-        "matrix"
       ]
     )
     // compact {
-      inherit from matrix;
+      inherit from;
       depends_on = dependsOn;
     };
 
   mkWorkflow =
-    {
-      id,
-      image ? null,
-      archive ? null,
-      tasks,
-    }:
+    { id, tasks }:
     assert require (
       validName id && builtins.stringLength id <= maxWorkflowID
     ) "workflow id ${id} must match ${namePattern} within ${toString maxWorkflowID} characters";
@@ -157,9 +155,8 @@ in
       builtins.length tasks >= 1 && builtins.length tasks <= maxTasks
     ) "workflow ${id} needs 1..${toString maxTasks} tasks";
     assert require (distinct (map (task: task.id) tasks)) "workflow ${id} repeats a task id";
-    compact {
-      inherit id archive tasks;
-      image = if image == null then null else imageRef image;
+    {
+      inherit id tasks;
     };
 
   toJSONL = tasks: lib.concatMapStrings (task: builtins.toJSON task + "\n") tasks;
