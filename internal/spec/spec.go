@@ -44,11 +44,11 @@ type Resources struct {
 	GPUs      int   `json:"gpus,omitempty"`
 }
 
-type Spec struct {
-	Image     string            `json:"image"`
-	Args      []string          `json:"args,omitempty"`
-	Resources Resources         `json:"resources"`
-	Inputs    map[string]string `json:"inputs,omitempty"`
+// Task is the part of a job that its request states directly; a request names its image and inputs by
+// source, and the job by content.
+type Task struct {
+	Args      []string  `json:"args,omitempty"`
+	Resources Resources `json:"resources"`
 	Sandbox
 	Secrets        []string `json:"secrets,omitempty"`
 	Services       []string `json:"services,omitempty"`
@@ -56,9 +56,20 @@ type Spec struct {
 	Tags           []string `json:"tags,omitempty"`
 }
 
+type Spec struct {
+	Image  string            `json:"image"`
+	Inputs map[string]string `json:"inputs,omitempty"`
+	Task
+}
+
 func (s Spec) Normalize() Spec {
-	s.Args = slices.Clone(s.Args)
 	s.Inputs = maps.Clone(s.Inputs)
+	s.Task = s.Task.Normalize()
+	return s
+}
+
+func (s Task) Normalize() Task {
+	s.Args = slices.Clone(s.Args)
 	s.Env = maps.Clone(s.Env)
 	s.CapAdd = slices.Sorted(slices.Values(s.CapAdd))
 	s.Secrets = slices.Sorted(slices.Values(s.Secrets))
@@ -67,7 +78,7 @@ func (s Spec) Normalize() Spec {
 	return s
 }
 
-func (s Spec) Validate() error {
+func (s Task) Validate() error {
 	if s.Resources.Cores <= 0 || s.Resources.MemoryMiB <= 0 || s.Resources.MemoryMiB > math.MaxInt64>>20 || s.Resources.GPUs < 0 {
 		return errors.New("positive cores/memory and a non-negative GPU count are required")
 	}
@@ -97,9 +108,9 @@ func (s Spec) Validate() error {
 	return nil
 }
 
-func (s Spec) Timeout() time.Duration { return time.Duration(s.TimeoutSeconds) * time.Second }
+func (s Task) Timeout() time.Duration { return time.Duration(s.TimeoutSeconds) * time.Second }
 
-func (s Spec) TimedOut(start, end time.Time) bool {
+func (s Task) TimedOut(start, end time.Time) bool {
 	timeout := s.Timeout()
 	return timeout > 0 && end.Sub(start) >= timeout
 }

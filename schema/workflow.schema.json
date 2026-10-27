@@ -136,6 +136,17 @@
             "minimum": 0,
             "maximum": 31536000
           },
+          "tags": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+            },
+            "uniqueItems": true
+          },
           "retry": {
             "type": "object",
             "properties": {
@@ -154,17 +165,6 @@
               }
             },
             "additionalProperties": false
-          },
-          "tags": {
-            "type": [
-              "null",
-              "array"
-            ],
-            "items": {
-              "type": "string",
-              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
-            },
-            "uniqueItems": true
           },
           "depends_on": {
             "type": [

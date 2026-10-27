@@ -5,6 +5,7 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"path"
 	"regexp"
@@ -89,7 +90,8 @@ func (c Config) ServiceForward(name, address string) (string, error) {
 	return socket + ":" + net.JoinHostPort(host, port), nil
 }
 
-func (c Config) CheckLaunch(s spec.Spec) error {
+// CheckLaunch also counts imported, the inputs a job takes from other jobs' outputs at dispatch.
+func (c Config) CheckLaunch(s spec.Spec, imported []string) error {
 	cpus, err := spec.ParseCPUs(c.CPUs)
 	if err != nil {
 		return err
@@ -98,7 +100,15 @@ func (c Config) CheckLaunch(s spec.Spec) error {
 	for range s.Resources.GPUs {
 		worst.GPUs = append(worst.GPUs, "GPU-"+strings.Repeat("0", 36))
 	}
-	// The placeholders are as long as real values: NVIDIA GPU UUIDs, and rand.Text() attempt and server IDs.
+	// The placeholders are as long as real values: NVIDIA GPU UUIDs, SHA-256 hex digests of imported
+	// outputs, and rand.Text() attempt and server IDs.
+	s.Inputs = maps.Clone(s.Inputs)
+	if s.Inputs == nil && len(imported) > 0 {
+		s.Inputs = map[string]string{}
+	}
+	for _, name := range imported {
+		s.Inputs[name] = strings.Repeat("0", 64)
+	}
 	placeholder := strings.Repeat("x", 26)
 	secrets := map[string]string{}
 	for _, name := range s.Secrets {

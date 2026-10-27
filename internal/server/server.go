@@ -24,17 +24,11 @@ import (
 )
 
 type Request struct {
-	ID        string            `json:"id,omitempty"`
-	Image     image.Source      `json:"image"`
-	Inputs    map[string]string `json:"inputs,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Resources spec.Resources    `json:"resources"`
-	spec.Sandbox
-	Secrets        []string    `json:"secrets,omitempty"`
-	Services       []string    `json:"services,omitempty"`
-	TimeoutSeconds int64       `json:"timeout_seconds,omitempty"`
-	Retry          RetryPolicy `json:"retry,omitempty"`
-	Tags           []string    `json:"tags,omitempty"`
+	ID     string            `json:"id,omitempty"`
+	Image  image.Source      `json:"image"`
+	Inputs map[string]string `json:"inputs,omitempty"`
+	spec.Task
+	Retry RetryPolicy `json:"retry,omitempty"`
 }
 
 type Failure string
@@ -326,36 +320,66 @@ func (s *Server) commitLocked(jobs ...Job) error {
 	return nil
 }
 
-type stagedImage struct {
-	image.Resolved
-	err error
+type staged[V any] struct {
+	value V
+	err   error
 }
 
 type staging struct {
-	images map[image.Source]stagedImage
-	inputs map[string]string
+	images map[image.Source]staged[image.Resolved]
+	inputs map[string]staged[string]
 }
+
+// Snapshots read the submitter's files, so only a few share the disk at once.
+const snapshots = 4
 
 // stage takes only requests that passed check.
 func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
-	st := &staging{images: map[image.Source]stagedImage{}, inputs: map[string]string{}}
-	var sources []image.Source
+	var images []image.Source
+	var inputs []string
 	for _, r := range requests {
-		if _, seen := st.images[r.Image]; !seen {
-			st.images[r.Image] = stagedImage{}
-			sources = append(sources, r.Image)
+		images = append(images, r.Image)
+		for _, source := range r.Inputs {
+			inputs = append(inputs, source)
 		}
 	}
-	staged := make([]stagedImage, len(sources))
+	st := &staging{}
 	var wg sync.WaitGroup
-	for i, src := range sources {
-		wg.Go(func() { staged[i].Resolved, staged[i].err = s.images.Resolve(ctx, src) })
+	wg.Go(func() {
+		st.images = each(images, len(images), func(src image.Source) (image.Resolved, error) { return s.images.Resolve(ctx, src) })
+	})
+	wg.Go(func() {
+		st.inputs = each(inputs, snapshots, func(source string) (string, error) { return content.PutTree(s.images.Blobs, source) })
+	})
+	wg.Wait()
+	return st
+}
+
+// each calls do once per distinct key, at most limit at a time.
+func each[K comparable, V any](keys []K, limit int, do func(K) (V, error)) map[K]staged[V] {
+	out := map[K]staged[V]{}
+	var distinct []K
+	for _, k := range keys {
+		if _, seen := out[k]; !seen {
+			out[k] = staged[V]{}
+			distinct = append(distinct, k)
+		}
+	}
+	results := make([]staged[V], len(distinct))
+	slots := make(chan struct{}, max(limit, 1))
+	var wg sync.WaitGroup
+	for i, k := range distinct {
+		wg.Go(func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			results[i].value, results[i].err = do(k)
+		})
 	}
 	wg.Wait()
-	for i, src := range sources {
-		st.images[src] = staged[i]
+	for i, k := range distinct {
+		out[k] = results[i]
 	}
-	return st
+	return out
 }
 
 func (r Request) Validate() error {
@@ -373,7 +397,7 @@ func (r Request) Validate() error {
 			return errors.New("invalid input name")
 		}
 	}
-	return r.spec().Validate()
+	return r.Task.Validate()
 }
 
 func (s *Server) check(r Request) error {
@@ -401,11 +425,10 @@ func (s *Server) checkConfig(sp spec.Spec) error {
 }
 
 func (r Request) spec() spec.Spec {
-	return spec.Spec{Args: r.Args, Resources: r.Resources, Sandbox: r.Sandbox, Secrets: r.Secrets, Services: r.Services, TimeoutSeconds: r.TimeoutSeconds, Tags: r.Tags}.Normalize()
+	return spec.Spec{Task: r.Task}.Normalize()
 }
 
-// prepare takes a request that passed check and was staged. It also takes the workflow inputs a job
-// will import, so the launch size check counts them.
+// prepare takes a request that passed check and was staged.
 func (s *Server) prepare(r Request, from map[string]string, st *staging) (Job, error) {
 	if r.ID == "" {
 		r.ID = newID()
@@ -414,34 +437,22 @@ func (s *Server) prepare(r Request, from map[string]string, st *staging) (Job, e
 	if img.err != nil {
 		return Job{}, img.err
 	}
-	var err error
-	j := Job{ID: r.ID, Spec: r.spec(), Archive: img.Blob, ImageOrigin: img.Origin, State: Queued, CreatedAt: time.Now().UTC(), From: from, Retry: r.Retry}
-	j.Spec.Image = img.ID
+	j := Job{ID: r.ID, Spec: r.spec(), Archive: img.value.Blob, ImageOrigin: img.value.Origin, State: Queued, CreatedAt: time.Now().UTC(), From: from, Retry: r.Retry}
+	j.Spec.Image = img.value.ID
 	if len(r.Inputs) > 0 {
 		j.Spec.Inputs = map[string]string{}
 		for name, source := range r.Inputs {
-			hash, ok := st.inputs[source]
-			if !ok {
-				if hash, err = content.PutTree(s.images.Blobs, source); err != nil {
-					return Job{}, err
-				}
-				st.inputs[source] = hash
+			input := st.inputs[source]
+			if input.err != nil {
+				return Job{}, input.err
 			}
-			j.Spec.Inputs[name] = hash
+			j.Spec.Inputs[name] = input.value
 		}
 	}
-	worst := j.Spec
-	worst.Inputs = maps.Clone(worst.Inputs)
-	for name := range from {
-		if worst.Inputs == nil {
-			worst.Inputs = map[string]string{}
-		}
-		// Imported outputs are known only at dispatch, by their SHA-256 hex digest.
-		worst.Inputs[name] = strings.Repeat("0", 64)
-	}
+	imported := slices.Collect(maps.Keys(from))
 	for _, w := range s.workers {
 		if w.Carries(j.Spec.Tags) {
-			if err := w.CheckLaunch(worst); err != nil {
+			if err := w.CheckLaunch(j.Spec, imported); err != nil {
 				return Job{}, err
 			}
 		}

@@ -105,7 +105,7 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 	h := testHost(t)
 	l := Launch{
 		Attempt:    "a1",
-		Spec:       spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Args: []string{"it's $HOME", "$(touch pwned)", "a\nb"}, Inputs: map[string]string{"data": strings.Repeat("c", 64)}, Services: []string{"model"}, TimeoutSeconds: 10, Sandbox: spec.Sandbox{Env: map[string]string{"MODE": "eval"}}},
+		Spec:       spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Inputs: map[string]string{"data": strings.Repeat("c", 64)}, Task: spec.Task{Args: []string{"it's $HOME", "$(touch pwned)", "a\nb"}, Services: []string{"model"}, TimeoutSeconds: 10, Sandbox: spec.Sandbox{Env: map[string]string{"MODE": "eval"}}}},
 		Allocation: pool.Allocation{CPUs: []int{0, 64}, MemoryMiB: 128},
 		Secrets:    map[string]string{"TOKEN": "hunter2"},
 	}
@@ -143,12 +143,12 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 
 func TestCheckLaunchBoundsTheRemoteCommand(t *testing.T) {
 	c := Config{Host: "worker", StateDir: "/home/w/ordo", CPUs: "0-63", MemoryMiB: 512}
-	s := spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Resources: spec.Resources{Cores: 1, MemoryMiB: 128}, Args: []string{"x"}}
-	if err := c.CheckLaunch(s); err != nil {
+	s := spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}, Args: []string{"x"}}}
+	if err := c.CheckLaunch(s, nil); err != nil {
 		t.Fatal(err)
 	}
 	s.Args = []string{strings.Repeat("'", ssh.MaxCommand/4)}
-	if err := c.CheckLaunch(s); err == nil {
+	if err := c.CheckLaunch(s, nil); err == nil {
 		t.Fatal("accepted a launch command beyond the argument limit")
 	}
 }
@@ -220,9 +220,12 @@ func TestEnsureImageLoadsOnlyWhenMissing(t *testing.T) {
 	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.EnsureImage(context.Background(), archive, id); err != nil || len(calls(t, log, "podman")) != 1 {
-		t.Fatal("present image reloaded", err)
+	for range 2 {
+		if err := h.EnsureImage(context.Background(), archive, id); err != nil || len(calls(t, log, "podman")) != 1 {
+			t.Fatal("present image reloaded or probed again", err)
+		}
 	}
+	h = testHost(t)
 	t.Setenv("ORDO_FAKE_IMAGE_EXISTS", "1")
 	t.Setenv("ORDO_FAKE_IMAGE", "sha256:"+strings.Repeat("d", 64))
 	if err := h.EnsureImage(context.Background(), archive, id); err == nil {

@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
@@ -44,10 +45,31 @@ type Host struct {
 	Config
 	run    Runner
 	server string
+
+	mu sync.Mutex
+	// present caches what EnsureImage and EnsureInput confirmed. Something outside Ordo may remove an
+	// image or tree, so a failed launch forgets them all.
+	present map[string]bool
 }
 
 func New(c Config, run Runner, server string) *Host {
-	return &Host{Config: c, run: run, server: server}
+	return &Host{Config: c, run: run, server: server, present: map[string]bool{}}
+}
+
+func (h *Host) ensure(key string, put func() error) error {
+	h.mu.Lock()
+	known := h.present[key]
+	h.mu.Unlock()
+	if known {
+		return nil
+	}
+	if err := put(); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.present[key] = true
+	h.mu.Unlock()
+	return nil
 }
 
 func Dial(ctx context.Context, c Config, services map[string]string) (*ssh.Master, error) {
@@ -137,6 +159,10 @@ func (h *Host) Poll(ctx context.Context) (Snapshot, error) {
 }
 
 func (h *Host) EnsureImage(ctx context.Context, archive, id string) error {
+	return h.ensure(id, func() error { return h.loadImage(ctx, archive, id) })
+}
+
+func (h *Host) loadImage(ctx context.Context, archive, id string) error {
 	if absent, err := h.absent(ctx, prelude()+"pm image exists -- "+ssh.Quote(id)); !absent {
 		return err
 	}
@@ -159,8 +185,12 @@ func (h *Host) EnsureImage(ctx context.Context, archive, id string) error {
 	return nil
 }
 
-// EnsureInput unpacks a snapshot tar, which the server built from regular files and directories only.
 func (h *Host) EnsureInput(ctx context.Context, blob, digest string) error {
+	return h.ensure(h.treeDir(digest), func() error { return h.unpackInput(ctx, blob, digest) })
+}
+
+// unpackInput unpacks a snapshot tar, which the server built from regular files and directories only.
+func (h *Host) unpackInput(ctx context.Context, blob, digest string) error {
 	tree := ssh.Quote(h.treeDir(digest))
 	if absent, err := h.absent(ctx, "test -d "+tree); !absent {
 		return err
@@ -218,6 +248,9 @@ func (h *Host) Launch(ctx context.Context, l Launch) (string, error) {
 	script, stdin := launchScript(h.Config, l, h.server)
 	data, err := h.output(ctx, script, stdin)
 	if err != nil {
+		h.mu.Lock()
+		clear(h.present)
+		h.mu.Unlock()
 		return "", err
 	}
 	id := strings.TrimSpace(string(data))

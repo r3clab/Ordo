@@ -8,7 +8,7 @@ import (
 
 func TestSandboxValidation(t *testing.T) {
 	large := strings.Repeat("x", MaxValueBytes+1)
-	for name, s := range map[string]Spec{
+	for name, s := range map[string]Task{
 		"network":         {Sandbox: Sandbox{Network: "host"}},
 		"capability":      {Sandbox: Sandbox{CapAdd: []string{"SYS_ADMIN"}}},
 		"duplicate cap":   {Sandbox: Sandbox{CapAdd: []string{"NET_ADMIN", "NET_ADMIN"}}},
@@ -26,7 +26,7 @@ func TestSandboxValidation(t *testing.T) {
 			t.Fatalf("%s: accepted invalid sandbox", name)
 		}
 	}
-	s := Spec{Resources: Resources{Cores: 1, MemoryMiB: 128}, Sandbox: Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}, Secrets: []string{"TOKEN", "OTHER"}}
+	s := Task{Resources: Resources{Cores: 1, MemoryMiB: 128}, Sandbox: Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}, Secrets: []string{"TOKEN", "OTHER"}}
 	if err := s.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestSecretValues(t *testing.T) {
 }
 
 func TestNormalizeSortsTags(t *testing.T) {
-	tags := Spec{Tags: []string{"l40s", "fast"}}.Normalize().Tags
+	tags := Task{Tags: []string{"l40s", "fast"}}.Normalize().Tags
 	if !slices.Equal(tags, []string{"fast", "l40s"}) {
 		t.Fatal("tag order changes job identity", tags)
 	}
