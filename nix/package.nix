@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, perSystem, ... }:
 pkgs.buildGoModule (finalAttrs: {
   pname = "ordo";
   version = "0.1.0-dev";
@@ -14,6 +14,7 @@ pkgs.buildGoModule (finalAttrs: {
   vendorHash = "sha256-FudAMvDz6JlHVthB5Z5ubfpUM084iTsaIK8LiVeu1V8=";
   env.CGO_ENABLED = "0";
   subPackages = [ "cmd/ordo" ];
+  ldflags = [ "-X main.defaultSkopeo=${perSystem.nix2container.skopeo-nix2container}/bin/skopeo" ];
 
   checkPhase = ''
     runHook preCheck

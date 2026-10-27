@@ -39,7 +39,7 @@ Prefer a small Go implementation over importing Nomad's full control plane or ma
 
 ## Deployment
 
-- **Server:** has Nix and nix2container's `skopeo` installed (`.#ordo-server` bundles `skopeo`); owns the queue, scheduling decisions, and durable run records.
+- **Server:** has Nix installed (the Nix-built `ordo` bundles nix2container's `skopeo`); owns the queue, scheduling decisions, and durable run records.
 - **Workers:** each has rootless Podman installed and runs no Ordo process.
   The server runs each step as a short shell script over one SSH connection per worker.
 - **Tasks:** declare a container image, command, inputs, resource requirements, and outputs.
@@ -134,8 +134,8 @@ pkgs.writeText "jobs.jsonl" (toJSONL tasks)
 - `image` is `{"nix": INSTALLABLE}`, such as a derivation written as `{"nix": "/nix/store/….drv^*"}` or `{"nix": "/path/flake#images.grep"}`: the server runs `nix build`, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
   Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
   A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
-- The server finds `nix` on its `PATH` (`--nix` overrides it) and `skopeo` through `--skopeo` or `ORDO_SKOPEO`.
-  Stock `skopeo` lacks the `nix:` transport; run the server from `nix run .#ordo-server`, which sets `ORDO_SKOPEO`.
+- The server finds `nix` on its `PATH` (`--nix` overrides it) and uses the nix2container `skopeo` bundled by the Nix build (`--skopeo` overrides it).
+  Stock `skopeo` lacks the `nix:` transport, so a `go build` binary needs `--skopeo` pointing at nix2container's.
 - Only the private control socket accepts submissions; the web UI's API has none, since a submission can build Nix code, read server files, and use every configured secret.
 
 `ordo fetch --state SERVER_DIR --into results [--id ID …] [--wait]` writes each succeeded job's outputs, `stdout.log`, `stderr.log`, and `run.json` to `results/ID/`, creating `results` private (mode 0700).
@@ -333,8 +333,7 @@ nix flake check                # formatting, lint, build, race-enabled tests, an
 
 - `nix/devshell.nix`: tools and a fail-fast formatting/lint pre-commit hook, installed on shell entry.
 - `nix/formatter.nix`: treefmt configuration and formatting check.
-- `nix/package.nix`: Go build, tests, and sandboxed lint check.
-- `nix/packages/ordo-server.nix`: the server binary with nix2container's `skopeo`.
+- `nix/package.nix`: Go build with nix2container's `skopeo` baked in, tests, and sandboxed lint check.
 - `nix/lib/default.nix`: `mkTask`, `mkStep`, `mkWorkflow`, and `toJSONL`.
 - `nix/checks/ui.nix`: UI type check and committed-build freshness check.
 - `nix/checks/schema.nix`: fails when `schema/` differs from `ordo schema --out`; regenerate with `go run ./cmd/ordo schema --out schema`.

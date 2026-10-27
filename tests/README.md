@@ -4,10 +4,10 @@
 These scripts are opt-in checks against real workers, not part of sandboxed package tests.
 They require local `ssh`, `jq`, `nix`, and coreutils, plus the documented worker prerequisites.
 
-Build the server with nix2container's `skopeo`:
+Build the server:
 
 ```sh
-nix build path:.#ordo-server -o result
+nix build path:. -o result
 ```
 
 The server builds the test image from `ORDO_TEST_INSTALLABLE`.

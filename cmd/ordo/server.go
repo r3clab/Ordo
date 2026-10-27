@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +22,10 @@ func decodeFile(file string, value any) error {
 	defer func() { _ = f.Close() }()
 	return server.DecodeJSON(f, value)
 }
+
+// Nix builds set this to nix2container's skopeo; stock skopeo lacks the nix: transport.
+var defaultSkopeo = "skopeo"
+
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("server")
 	var root, workersFile, address string
@@ -34,7 +37,7 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f.Func("service", "NAME=HOST:PORT reachable from this server, published to tasks at /services/NAME/socket (repeatable)", keyValue(services, "service", "NAME=HOST:PORT"))
 	f.Func("secret", "NAME=FILE whose content, without one trailing newline, tasks listing NAME in secrets receive as $NAME (repeatable)", keyValue(secretFiles, "secret", "NAME=FILE"))
 	f.StringVar(&tools.Nix, "nix", "nix", "nix executable that builds {\"nix\": INSTALLABLE} images")
-	f.StringVar(&tools.Skopeo, "skopeo", cmp.Or(os.Getenv("ORDO_SKOPEO"), "skopeo"), "nix2container skopeo that exports them (default $ORDO_SKOPEO)")
+	f.StringVar(&tools.Skopeo, "skopeo", defaultSkopeo, "nix2container skopeo that exports them")
 	if err := parse(f, args, out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331] [--service NAME=HOST:PORT ...] [--secret NAME=FILE ...] [--nix PATH] [--skopeo PATH]"); err != nil {
 		return err
 	}
