@@ -81,7 +81,7 @@ func (r *Resolver) Resolve(ctx context.Context, src Source) (Resolved, error) {
 // archive stores the OCI archive of src, unless the cache already holds key's.
 func (r *Resolver) archive(key, src string, origin *Origin, dir string) (Resolved, error) {
 	e, ok, err := r.Cache.Load(key)
-	if err != nil || (ok && content.Has(r.Blobs, e.Blob)) {
+	if err != nil || (ok && content.Reuse(r.Blobs, e.Blob)) {
 		return Resolved{Entry: e, Origin: origin}, err
 	}
 	file := filepath.Join(dir, "image.tar")

@@ -123,14 +123,17 @@ type Stage struct {
 }
 
 type Job struct {
-	ID              string      `json:"id"`
-	Out             string      `json:"out"`
-	Steps           []Stage     `json:"steps"`
-	Step            int         `json:"step"`
-	ReadyAt         time.Time   `json:"ready_at,omitzero"`
+	ID      string    `json:"id"`
+	Out     string    `json:"out"`
+	Steps   []Stage   `json:"steps"`
+	Step    int       `json:"step"`
+	ReadyAt time.Time `json:"ready_at,omitzero"`
+	// Avoid is the worker the last attempt failed on, which gives the others a head start at the retry.
+	Avoid           string      `json:"avoid,omitempty"`
 	State           State       `json:"state"`
 	Error           string      `json:"error,omitempty"`
 	CreatedAt       time.Time   `json:"created_at"`
+	FinishedAt      time.Time   `json:"finished_at,omitzero"`
 	Attempts        []Attempt   `json:"attempts,omitempty"`
 	Key             string      `json:"submission_key,omitempty"`
 	Retry           RetryPolicy `json:"retry,omitempty"`
@@ -158,13 +161,16 @@ type Summary struct {
 	Worker          string         `json:"worker,omitempty"`
 	Attempts        int            `json:"attempts,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
+	FinishedAt      time.Time      `json:"finished_at,omitzero"`
 	Error           string         `json:"error,omitempty"`
 	CancelRequested bool           `json:"cancel_requested,omitempty"`
 	After           []string       `json:"after,omitempty"`
+	// Pending says, for each connected worker that could run a queued job, why it has not yet.
+	Pending map[string]string `json:"pending,omitempty"`
 }
 
 func (j Job) summary() Summary {
-	s := Summary{ID: j.ID, Out: j.Out, State: j.State, Step: j.Step, Steps: len(j.Steps), Attempts: len(j.Attempts), CreatedAt: j.CreatedAt, Error: j.Error, CancelRequested: j.CancelRequested, After: j.After}
+	s := Summary{ID: j.ID, Out: j.Out, State: j.State, Step: j.Step, Steps: len(j.Steps), Attempts: len(j.Attempts), CreatedAt: j.CreatedAt, FinishedAt: j.FinishedAt, Error: j.Error, CancelRequested: j.CancelRequested, After: j.After}
 	if j.Step < len(j.Steps) {
 		s.Image, s.Resources = j.spec().Image, j.spec().Resources
 	}
@@ -183,8 +189,11 @@ type record struct {
 type Server struct {
 	// write serializes changes to jobs, records, attempts and the store, so mu guards only reading and
 	// installing them and is never held across a commit. A holder of write may read them without mu.
-	write      sync.Mutex
-	mu         sync.Mutex
+	write sync.Mutex
+	mu    sync.Mutex
+	// staging is held for reading while blobs are stored for jobs not yet committed, which pruneBlobs
+	// cannot yet see as in use.
+	staging    sync.RWMutex
 	root       string
 	store      *state.Store
 	id         string
@@ -201,6 +210,7 @@ type Server struct {
 	busy     map[string]bool
 	fault    error
 	nodes    map[string]WorkerStatus
+	pending  map[string]map[string]string
 	images   *image.Resolver
 }
 
@@ -256,7 +266,7 @@ func Open(c Config) (_ *Server, err error) {
 			}
 		}
 	}
-	s := &Server{root: root, store: db, workers: workers, services: maps.Clone(c.Services), secretsDir: c.SecretsDir, sshConfig: c.SSHConfig, jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	s := &Server{root: root, store: db, workers: workers, services: maps.Clone(c.Services), secretsDir: c.SecretsDir, sshConfig: c.SSHConfig, jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}, pending: map[string]map[string]string{}}
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)
 	if errors.Is(err, state.ErrNotFound) {
@@ -388,6 +398,7 @@ func (s *Server) List(f Filter) []Summary {
 	var jobs []Summary
 	add := func(r record) {
 		if f.keeps(r.Summary) {
+			r.Pending = maps.Clone(s.pending[r.ID])
 			jobs = append(jobs, r.Summary)
 		}
 	}
@@ -466,6 +477,11 @@ func (s *Server) commit(jobs ...Job) error {
 	if s.fault != nil || len(jobs) == 0 {
 		return s.fault
 	}
+	for i := range jobs {
+		if jobs[i].State.Terminal() && jobs[i].FinishedAt.IsZero() {
+			jobs[i].FinishedAt = time.Now().UTC()
+		}
+	}
 	err := s.store.Update(func(tx *state.Tx) error {
 		for _, j := range jobs {
 			if err := tx.Put("job", j.ID, j); err != nil {
@@ -488,6 +504,9 @@ func (s *Server) commit(jobs ...Job) error {
 
 func (s *Server) installLocked(j Job) {
 	s.records[j.ID] = record{Summary: j.summary(), key: j.Key}
+	if j.State != Queued {
+		delete(s.pending, j.ID)
+	}
 	for _, at := range j.Attempts {
 		s.attempts[at.ID] = j.ID
 	}
@@ -646,8 +665,12 @@ func (s *Server) checkConfig(t spec.Task) error {
 			return err
 		}
 	}
-	if !slices.ContainsFunc(s.workers, func(w worker.Config) bool { return w.Carries(t.Tags) }) {
+	tagged := slices.DeleteFunc(slices.Clone(s.workers), func(w worker.Config) bool { return !w.Carries(t.Tags) })
+	if len(tagged) == 0 {
 		return fmt.Errorf("no configured worker has all tags %q; add them to a worker's \"tags\" in the server config", t.Tags)
+	}
+	if r := t.Resources; !slices.ContainsFunc(tagged, func(w worker.Config) bool { return w.Fits(r) }) {
+		return fmt.Errorf("no matching worker is configured with %d cores, %d MiB and %d GPUs", r.Cores, r.MemoryMiB, r.GPUs)
 	}
 	return nil
 }
@@ -841,6 +864,7 @@ func (s *Server) Run(ctx context.Context, port uint16) error {
 	for _, remote := range s.workers {
 		wg.Go(func() { s.work(child, remote) })
 	}
+	wg.Go(func() { s.tidy(child) })
 	api := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	public := &http.Server{Handler: s.WebHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 2)
@@ -884,9 +908,16 @@ func (s *Server) routes() *http.ServeMux {
 	})
 	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		j, ok := s.lookup(w, r)
-		if ok {
-			WriteJSON(w, http.StatusOK, j)
+		if !ok {
+			return
 		}
+		s.mu.Lock()
+		pending := maps.Clone(s.pending[j.ID])
+		s.mu.Unlock()
+		WriteJSON(w, http.StatusOK, struct {
+			Job
+			Pending map[string]string `json:"pending,omitempty"`
+		}{j, pending})
 	})
 	return mux
 }

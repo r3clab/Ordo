@@ -3,11 +3,12 @@ package pool
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/r3clab/Ordo/internal/spec"
 )
 
-var ErrCapacity = errors.New("worker has insufficient unreserved resources")
+var ErrCapacity = errors.New("insufficient unreserved")
 
 type Hardware struct {
 	Hostname  string `json:"hostname"`
@@ -49,7 +50,7 @@ func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error)
 		}
 	}
 	if req.MemoryMiB > remaining {
-		return Allocation{}, ErrCapacity
+		return Allocation{}, fmt.Errorf("%w memory", ErrCapacity)
 	}
 	a := Allocation{MemoryMiB: req.MemoryMiB}
 	for _, cpu := range h.CPUs {
@@ -61,7 +62,7 @@ func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error)
 		}
 	}
 	if len(a.CPUs) != req.Cores {
-		return Allocation{}, ErrCapacity
+		return Allocation{}, fmt.Errorf("%w cores", ErrCapacity)
 	}
 	for _, gpu := range h.GPUs {
 		if len(a.GPUs) == req.GPUs {
@@ -72,7 +73,7 @@ func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error)
 		}
 	}
 	if len(a.GPUs) != req.GPUs {
-		return Allocation{}, ErrCapacity
+		return Allocation{}, fmt.Errorf("%w GPUs", ErrCapacity)
 	}
 	return a, nil
 }

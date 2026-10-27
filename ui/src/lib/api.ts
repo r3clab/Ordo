@@ -91,6 +91,7 @@ export interface Job {
   inputs?: Record<string, string>;
   waiting?: string[];
   after?: string[];
+  pending?: Record<string, string>;
 }
 
 export interface JobSummary {
@@ -107,6 +108,7 @@ export interface JobSummary {
   error?: string;
   cancel_requested?: boolean;
   after?: string[];
+  pending?: Record<string, string>;
 }
 
 export interface WorkerStatus {

@@ -106,6 +106,9 @@ func TestRetriesCountPerStepAndTaskFailuresAreDelivered(t *testing.T) {
 		f.tick(t)
 		f.h.exit(last(f.job(t, id)).ID, code)
 		f.tick(t)
+		if f.job(t, id).State == Queued {
+			ready(t, f.s, id)
+		}
 	}
 	exit(1)
 	exit(0)

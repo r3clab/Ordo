@@ -67,9 +67,20 @@ func (c Config) Carries(tags []string) bool {
 	return true
 }
 
+func (c Config) Fits(r spec.Resources) bool {
+	cpus, err := spec.ParseCPUs(c.CPUs)
+	return err == nil && len(cpus) >= r.Cores && c.MemoryMiB >= r.MemoryMiB && len(c.GPUs) >= r.GPUs
+}
+
 func (c Config) runDir(attempt string) string { return path.Join(c.StateDir, "runs", attempt) }
 
 func (c Config) treeDir(digest string) string { return path.Join(c.StateDir, "trees", digest) }
+
+func (c Config) imageDir() string { return path.Join(c.StateDir, "images") }
+
+// imageMark records an image that Ordo loaded. Prune removes only those, as an image the worker user
+// pulled may carry the same ID.
+func (c Config) imageMark(id string) string { return path.Join(c.imageDir(), id) }
 
 func (c Config) serviceDir(name string) string { return path.Join(c.StateDir, "services", name) }
 

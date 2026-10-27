@@ -92,6 +92,7 @@ Each line is a job.
 `--wait` reports final results and exits nonzero if a submission fails or a tracked job does not succeed.
 
 Results appear in `out`, with job history and logs under `.ordo/`.
+The server forgets finished jobs after 30 days.
 Task failures still deliver collected outputs, while cancelled and skipped jobs deliver nothing.
 A nonempty `out` with no unfinished job counts as done, even after a task failure.
 Use a new output path to rerun a finished job.
@@ -99,6 +100,7 @@ Use a new output path to rerun a finished job.
 Inputs under another unfinished job's output directory make the job wait for it.
 Failure or cancellation skips dependent jobs.
 See [job options](https://github.com/r3clab/Ordo/wiki/Configuration-and-jobs#job-options) for retries, dependencies, environment variables, and secrets.
+Submission fails if no worker matching the job's tags is configured with the requested resources.
 Run `ordo schema` for the full job format.
 
 ## Monitor and control

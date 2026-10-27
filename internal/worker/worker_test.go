@@ -302,6 +302,42 @@ func TestEnsureImageLoadsOnlyWhenMissing(t *testing.T) {
 	}
 }
 
+func TestPruneRemovesOnlyIdleUnneededImagesAndTrees(t *testing.T) {
+	log := fakes(t)
+	h := testHost(t)
+	old := time.Now().Add(-25 * time.Hour)
+	for _, name := range []string{"kept", "idle", "fresh"} {
+		mark, tree := h.imageMark("sha256:"+name), h.treeDir(name)
+		if err := errors.Join(os.MkdirAll(filepath.Dir(mark), 0o700), os.WriteFile(mark, nil, 0o600), os.MkdirAll(tree, 0o700)); err != nil {
+			t.Fatal(err)
+		}
+		if name != "fresh" {
+			if err := errors.Join(os.Chtimes(mark, old, old), os.Chtimes(tree, old, old)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := h.Prune(context.Background(), []string{"sha256:kept", "kept"}, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"kept": true, "idle": false, "fresh": true} {
+		_, markErr := os.Stat(h.imageMark("sha256:" + name))
+		_, treeErr := os.Stat(h.treeDir(name))
+		if (markErr == nil) != want || (treeErr == nil) != want {
+			t.Fatalf("%s: image mark %v, tree %v, want kept %v", name, markErr, treeErr, want)
+		}
+	}
+	var removed [][]string
+	for _, c := range calls(t, log, "podman") {
+		if slices.Equal(c[1:3], []string{"image", "rm"}) {
+			removed = append(removed, c)
+		}
+	}
+	if len(removed) != 1 || removed[0][len(removed[0])-1] != "sha256:idle" {
+		t.Fatalf("image removals = %q", removed)
+	}
+}
+
 func TestPollAndStop(t *testing.T) {
 	log := fakes(t)
 	h := testHost(t)

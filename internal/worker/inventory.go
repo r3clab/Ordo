@@ -26,7 +26,7 @@ func (h *Host) Probe(ctx context.Context) (Probe, error) {
 		return Probe{}, err
 	}
 	script := prelude() + "S=" + ssh.Quote(h.StateDir) + "; mkdir -p -- \"$S\"; if [ \"$(stat -c %a \"$S\")\" != 700 ]; then echo \"$S must be mode 700\" >&2; exit 1; fi; " +
-		"mkdir -p -- \"$S/runs\" \"$S/trees\" \"$S/cdi\"; t() { printf '\\n@@%s\\n' \"$1\"; }; " +
+		"mkdir -p -- \"$S/runs\" \"$S/trees\" \"$S/images\" \"$S/cdi\"; t() { printf '\\n@@%s\\n' \"$1\"; }; " +
 		"t machine; cat /etc/machine-id; t boot; cat /proc/sys/kernel/random/boot_id; t hostname; uname -n; t arch; uname -m; " +
 		"t online; cat /sys/devices/system/cpu/online; " +
 		"t cpu; grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo || true; t memory; grep -m1 '^MemTotal:' /proc/meminfo; " +

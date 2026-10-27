@@ -39,7 +39,7 @@ func Put(dir string, r io.Reader) (string, error) {
 	}
 	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
 	id, err := digest(io.TeeReader(r, f))
-	if err != nil || Has(dir, id) {
+	if err != nil || Reuse(dir, id) {
 		return id, err
 	}
 	if err := f.Sync(); err != nil {
@@ -73,6 +73,38 @@ func Has(dir, id string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// Reuse reports whether dir holds id, and if so renews its modification time, which Prune reads as
+// its last use.
+func Reuse(dir, id string) bool {
+	if !Has(dir, id) {
+		return false
+	}
+	now := time.Now()
+	_ = os.Chtimes(filepath.Join(dir, id), now, now)
+	return true
+}
+
+// Prune removes the blobs in dir that keep lacks and that were last stored or reused before cutoff.
+func Prune(dir string, keep map[string]bool, cutoff time.Time) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || !Valid(e.Name()) || keep[e.Name()] || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // MoveFile renames file into dir rather than copying it, so both must be on one filesystem.
 func MoveFile(dir, file string) (string, error) {
 	f, err := os.Open(file)
@@ -80,7 +112,7 @@ func MoveFile(dir, file string) (string, error) {
 		return "", err
 	}
 	id, err := digest(f)
-	if err := errors.Join(err, f.Sync(), f.Close()); err != nil || Has(dir, id) {
+	if err := errors.Join(err, f.Sync(), f.Close()); err != nil || Reuse(dir, id) {
 		return id, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {

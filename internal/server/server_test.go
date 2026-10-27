@@ -246,6 +246,14 @@ func seed(t *testing.T, s *Server, jobs ...Job) {
 	}
 }
 
+// ready ends a queued job's retry wait and the head start the other workers had.
+func ready(t *testing.T, s *Server, id string) {
+	t.Helper()
+	j := mustJob(t, s, id)
+	j.ReadyAt = time.Now().Add(-max(stepAffinity, avoidance))
+	seed(t, s, j)
+}
+
 func mustJob(t *testing.T, s *Server, id string) Job {
 	t.Helper()
 	j, ok, err := s.job(id)
@@ -358,6 +366,7 @@ func TestRefusedLaunchRetriesAndChangedWorkerBlocks(t *testing.T) {
 	if j.State != Queued || j.Attempts[0].Failure != InfrastructureFailure || !slices.Contains(f.h.removed, j.Attempts[0].ID) {
 		t.Fatalf("refused launch must requeue as an infrastructure failure: %+v", j)
 	}
+	ready(t, f.s, id)
 	f.tick(t)
 	if j = f.job(t, id); j.State != Running || len(j.Attempts) != 2 {
 		t.Fatalf("retry not launched: %+v", j)
@@ -394,6 +403,7 @@ func TestRetryReleasesTheFinishedAttempt(t *testing.T) {
 	if j := f.job(t, id); j.State != Queued || j.Attempts[0].Failure != TaskFailure {
 		t.Fatalf("failed task not requeued: %+v", j)
 	}
+	ready(t, f.s, id)
 	f.tick(t)
 	if j := f.job(t, id); j.State != Running || len(j.Attempts) != 2 {
 		t.Fatalf("the finished attempt still holds the worker: %+v", j)
@@ -436,6 +446,11 @@ func TestTagsSelectWorkers(t *testing.T) {
 		t.Fatal("accepted tags that no single worker has")
 	}
 	req.Tags = []string{"l40s"}
+	req.Resources.Cores = 5
+	if _, err := s.Submit(context.Background(), req); err == nil || !strings.Contains(err.Error(), "5 cores") {
+		t.Fatal("accepted a job larger than any worker with its tags", err)
+	}
+	req.Resources.Cores = 1
 	submit(t, s, req)
 	for _, cfg := range workers {
 		h := newFakeHost(s.id)
@@ -601,6 +616,7 @@ func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
 		t.Fatalf("reboot must fail the attempt as infrastructure: %+v", j)
 	}
 
+	ready(t, f.s, id)
 	f.tick(t)
 	delete(f.h.containers, f.job(t, id).Attempts[1].ID)
 	f.tick(t)
@@ -619,6 +635,39 @@ func TestRebootDisappearanceForeignContainersAndSweep(t *testing.T) {
 	f.tick(t)
 	if len(f.h.containers) != 0 {
 		t.Fatalf("finished attempt's container not swept: %v", f.h.containers)
+	}
+}
+
+func TestExpireForgetsOldFinishedJobsNoOneWaitsFor(t *testing.T) {
+	f := newFixture(t)
+	old := time.Now().Add(-retention - time.Hour)
+	jobs := []Job{
+		{ID: "expired", Out: f.out("expired"), State: Succeeded, CreatedAt: old, FinishedAt: old},
+		{ID: "upstream", Out: f.out("upstream"), State: Succeeded, CreatedAt: old, FinishedAt: old},
+		{ID: "recent", Out: f.out("recent"), State: Failed, CreatedAt: old},
+		{ID: "waiting", Out: f.out("waiting"), State: Queued, CreatedAt: old, After: []string{"upstream"}, Waiting: []string{"in"}},
+	}
+	seed(t, f.s, jobs...)
+	results := filepath.Join(f.s.root, "results", "expired")
+	if err := os.MkdirAll(results, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.expire(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var listed []string
+	for _, r := range f.s.List(Filter{}) {
+		listed = append(listed, r.ID)
+	}
+	slices.Sort(listed)
+	if !slices.Equal(listed, []string{"recent", "upstream", "waiting"}) {
+		t.Fatalf("listed after expiry: %q", listed)
+	}
+	if _, ok, _ := f.s.job("expired"); ok {
+		t.Fatal("an expired job is still readable")
+	}
+	if _, err := os.Stat(results); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("an expired job's results outlived it", err)
 	}
 }
 
@@ -687,6 +736,25 @@ func TestFailedUploadRequeuesWithoutAnAttempt(t *testing.T) {
 	if j := f.job(t, id); j.State != Queued || len(j.Attempts) != 0 || j.Error != "disk full" {
 		t.Fatalf("failed upload must requeue without an attempt: %+v", j)
 	}
+	pending := func() string {
+		t.Helper()
+		f.tick(t)
+		listed := f.s.List(Filter{IDs: []string{id}})
+		if len(listed) != 1 || listed[0].State != Queued {
+			t.Fatalf("job left the queue before its retry: %+v", listed)
+		}
+		return listed[0].Pending["worker"]
+	}
+	if reason := pending(); !strings.Contains(reason, "retry waits") {
+		t.Fatalf("a retry must wait out its backoff: %q", reason)
+	}
+	j := f.job(t, id)
+	j.ReadyAt = time.Now().Add(-time.Second)
+	seed(t, f.s, j)
+	if reason := pending(); !strings.Contains(reason, "failed here") {
+		t.Fatalf("the worker a retry failed on must give the others a head start: %q", reason)
+	}
+	ready(t, f.s, id)
 	f.tick(t)
 	if j := f.job(t, id); j.State != Running || len(j.Attempts) != 1 {
 		t.Fatalf("requeued job did not launch: %+v", j)

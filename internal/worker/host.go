@@ -173,7 +173,7 @@ func (h *Host) loadImage(ctx context.Context, archive, id string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	data, err := h.output(ctx, prelude()+"pm load >&2; pm image inspect --format=json -- "+ssh.Quote(id), f)
+	data, err := h.output(ctx, prelude()+"pm load >&2; mkdir -p -- "+ssh.Quote(h.imageDir())+"; : > "+ssh.Quote(h.imageMark(id))+"; pm image inspect --format=json -- "+ssh.Quote(id), f)
 	if err != nil {
 		return err
 	}
@@ -255,8 +255,12 @@ func launchScript(c Config, l Launch, server string) (string, io.Reader) {
 	for _, name := range l.Spec.Services {
 		r.Services[name] = c.serviceDir(name)
 	}
+	used := []string{c.imageMark(l.Spec.Image)}
+	for _, tree := range r.Inputs {
+		used = append(used, tree)
+	}
 	// A task running as a non-root image user gets a subordinate UID, which must still write its outputs.
-	script := prelude() + "mkdir -p -- " + ssh.Quote(r.Outputs) + "; chmod 777 -- " + ssh.Quote(r.Outputs) + "; "
+	script := prelude() + "touch -c -- " + quoteAll(used) + "; mkdir -p -- " + ssh.Quote(r.Outputs) + "; chmod 777 -- " + ssh.Quote(r.Outputs) + "; "
 	var stdin io.Reader
 	if len(l.Secrets) > 0 {
 		r.Secrets = slices.Sorted(maps.Keys(l.Secrets))
@@ -353,6 +357,22 @@ func writeFiles(first, second string, write func(a, b io.Writer) error) error {
 		return err
 	}
 	return errors.Join(a.Sync(), b.Sync())
+}
+
+// Prune removes the images Ordo loaded and the input trees it unpacked that keep does not name and no
+// launch used for idle. Podman refuses to remove an image that a container still uses.
+func (h *Host) Prune(ctx context.Context, keep []string, idle time.Duration) error {
+	age := "+" + strconv.Itoa(int(idle.Minutes()))
+	images, trees := ssh.Quote(h.imageDir()), ssh.Quote(path.Join(h.StateDir, "trees"))
+	script := prelude() + "k=$(mktemp); trap 'rm -f -- \"$k\"' EXIT; cat > \"$k\"; " +
+		"find " + images + " -mindepth 1 -maxdepth 1 -type f -mmin " + age + " -printf '%f\\n' | while IFS= read -r i; do grep -qxF -- \"$i\" \"$k\" && continue; " +
+		"if pm image rm -- \"$i\" >/dev/null 2>&1 || ! pm image exists -- \"$i\"; then rm -f -- " + images + "/\"$i\"; fi; done; " +
+		"find " + trees + " -mindepth 1 -maxdepth 1 -type d -mmin " + age + " ! -name '.*' -printf '%f\\n' | while IFS= read -r d; do grep -qxF -- \"$d\" \"$k\" || rm -rf -- " + trees + "/\"$d\"; done"
+	err := h.run.Run(ctx, script, strings.NewReader(strings.Join(keep, "\n")+"\n"), nil, nil)
+	h.mu.Lock()
+	clear(h.present)
+	h.mu.Unlock()
+	return err
 }
 
 // Callers remove only finished attempts, so a container that still runs is killed.

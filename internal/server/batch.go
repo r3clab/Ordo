@@ -65,6 +65,8 @@ func ParseBatch(r io.Reader) ([]BatchEntry, error) {
 // of an unfinished job or an earlier line's, and then waits for that job.
 func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq[BatchResult] {
 	return func(yield func(BatchResult) bool) {
+		s.staging.RLock()
+		defer s.staging.RUnlock()
 		var requests []Request
 		var outs []string
 		for i := range entries {

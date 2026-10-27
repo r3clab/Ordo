@@ -122,6 +122,11 @@ func (t *Tx) Put(kind, id string, value any) error {
 	return err
 }
 
+func (t *Tx) Delete(kind, id string) error {
+	_, err := t.tx.Exec("DELETE FROM records WHERE kind=? AND id=?", kind, id)
+	return err
+}
+
 func (s *Store) Get(kind, id string, value any) error {
 	var data []byte
 	err := s.db.QueryRow("SELECT body FROM records WHERE kind=? AND id=?", kind, id).Scan(&data)

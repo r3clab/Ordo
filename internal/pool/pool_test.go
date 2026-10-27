@@ -3,6 +3,7 @@ package pool
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/r3clab/Ordo/internal/spec"
@@ -16,7 +17,7 @@ func TestAllocationRespectsHeld(t *testing.T) {
 	if err != nil || !slices.Equal(first.CPUs, []int{0}) || first.GPUs[0] != gpu {
 		t.Fatal("first allocation", first, err)
 	}
-	if _, err := Plan(h, req, []Allocation{first}); !errors.Is(err, ErrCapacity) {
+	if _, err := Plan(h, req, []Allocation{first}); !errors.Is(err, ErrCapacity) || !strings.HasSuffix(err.Error(), "GPUs") {
 		t.Fatal("overlapping GPU admitted", err)
 	}
 	req.GPUs = 0

@@ -118,3 +118,33 @@ func TestRejectArchiveEscapes(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneKeepsUsedAndRecentBlobs(t *testing.T) {
+	dir := t.TempDir()
+	put := func(data string) string {
+		t.Helper()
+		id, err := Put(dir, bytes.NewReader([]byte(data)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	kept, idle, reused, fresh := put("kept"), put("idle"), put("reused"), put("fresh")
+	old := time.Now().Add(-2 * time.Hour)
+	for _, id := range []string{kept, idle, reused} {
+		if err := os.Chtimes(filepath.Join(dir, id), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if put("reused") != reused {
+		t.Fatal("content changed its ID")
+	}
+	if err := Prune(dir, map[string]bool{kept: true}, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]bool{kept: true, idle: false, reused: true, fresh: true} {
+		if Has(dir, id) != want {
+			t.Fatalf("blob %s present = %v, want %v", id, !want, want)
+		}
+	}
+}

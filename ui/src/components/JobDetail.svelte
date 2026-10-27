@@ -82,6 +82,18 @@
       </section>
     {/if}
 
+    {#if job.state === "queued" && job.pending}
+      <section>
+        <h3 class="label mb-2">Waiting for a worker</h3>
+        <dl class="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 text-sm">
+          {#each Object.entries(job.pending) as [host, reason] (host)}
+            <dt class="muted truncate" title={host}>{host}</dt>
+            <dd class="text-xs leading-5">{reason}</dd>
+          {/each}
+        </dl>
+      </section>
+    {/if}
+
     {#if job.after?.length}
       <section>
         <h3 class="label mb-2">Waits for</h3>

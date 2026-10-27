@@ -100,6 +100,7 @@ func (v *view) busyGPUs(ctx context.Context) ([]string, error) {
 func (s *Server) work(ctx context.Context, cfg worker.Config) {
 	for {
 		err := s.session(ctx, cfg)
+		s.forget(cfg.Host)
 		if ctx.Err() != nil {
 			return
 		}
@@ -127,8 +128,13 @@ func (s *Server) session(ctx context.Context, cfg worker.Config) error {
 	if err != nil {
 		return err
 	}
+	var pruned time.Time
 	for {
 		err := s.pass(ctx, cfg, h, &probe, bg)
+		if err == nil && time.Since(pruned) >= pruneEvery {
+			pruned = time.Now()
+			err = h.Prune(ctx, s.inUse(), idle)
+		}
 		if end := fatal(ctx, err); end != nil {
 			return end
 		}
@@ -345,41 +351,96 @@ func (j Job) stop(started, now time.Time) (StopKind, string) {
 	return "", ""
 }
 
-// stepAffinity is how long a step waits for the worker that ran the step before it, which can start
-// it from the outputs it kept instead of an upload.
-const stepAffinity = time.Minute
+const (
+	// stepAffinity is how long a step waits for the worker that ran the step before it, which can
+	// start it from the outputs it kept instead of an upload.
+	stepAffinity = time.Minute
+	// avoidance is how long other workers have a retry to themselves before the worker it failed on.
+	avoidance = time.Minute
+	// A retry waits retryDelay, doubled for each earlier failure of its kind in the step, up to
+	// maxRetryDelay, so a fault that fails every attempt does not spin through them.
+	retryDelay    = 10 * time.Second
+	maxRetryDelay = 5 * time.Minute
+)
+
+func backoff(failures int) time.Duration {
+	return min(retryDelay<<min(failures-1, 16), maxRetryDelay)
+}
 
 func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
+	if !v.cfg.Carries(j.spec().Tags) {
+		return false, nil
+	}
+	allocation, reason, err := s.place(ctx, *j, v)
+	if err != nil {
+		return false, err
+	}
+	if reason != "" {
+		s.wait(j.ID, v.cfg.Host, reason)
+		return false, nil
+	}
+	hw := v.probe.Hardware
+	j.Attempts = append(j.Attempts, Attempt{ID: newID(), Step: j.Step, Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
+	j.State, j.Avoid = Dispatching, ""
+	if err := s.save(*j); err != nil {
+		return false, err
+	}
+	v.held = append(v.held, allocation)
+	return true, nil
+}
+
+// place allocates j on v's worker, or says why the worker cannot take it now.
+func (s *Server) place(ctx context.Context, j Job, v *view) (pool.Allocation, string, error) {
+	now := time.Now()
+	switch prev := j.checkpoint(); {
+	case v.fault != "":
+		return pool.Allocation{}, v.fault, nil
+	case now.Before(j.ReadyAt):
+		return pool.Allocation{}, "retry waits until " + j.ReadyAt.Format(time.RFC3339), nil
+	case j.Avoid == v.cfg.Host && now.Sub(j.ReadyAt) < avoidance:
+		return pool.Allocation{}, "the last attempt failed here; other workers have it until " + j.ReadyAt.Add(avoidance).Format(time.RFC3339), nil
+	case prev != nil && prev.Worker != v.cfg.Host && now.Sub(j.ReadyAt) < stepAffinity:
+		return pool.Allocation{}, prev.Worker + " keeps the previous step's outputs and has it until " + j.ReadyAt.Add(stepAffinity).Format(time.RFC3339), nil
+	}
 	resources := j.spec().Resources
-	if v.fault != "" || !v.cfg.Carries(j.spec().Tags) {
-		return false, nil
-	}
-	if prev := j.checkpoint(); prev != nil && prev.Worker != v.cfg.Host && time.Since(j.ReadyAt) < stepAffinity {
-		return false, nil
-	}
 	hw := v.probe.Hardware
 	allocation, err := pool.Plan(hw, resources, v.held)
 	if err == nil && resources.GPUs > 0 {
 		// A device busy outside Ordo would break the exclusive allocation the job asks for.
 		var busy []string
 		if busy, err = v.busyGPUs(ctx); err != nil {
-			return false, err
+			return pool.Allocation{}, "", err
 		}
 		allocation, err = pool.Plan(hw, resources, append(slices.Clone(v.held), pool.Allocation{GPUs: busy}))
 	}
 	if errors.Is(err, pool.ErrCapacity) {
-		return false, nil
+		return pool.Allocation{}, err.Error(), nil
 	}
-	if err != nil {
-		return false, err
+	return allocation, "", err
+}
+
+func (s *Server) wait(id, host, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if j, ok := s.jobs[id]; !ok || j.State != Queued {
+		return
 	}
-	j.Attempts = append(j.Attempts, Attempt{ID: newID(), Step: j.Step, Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
-	j.State = Dispatching
-	if err := s.save(*j); err != nil {
-		return false, err
+	if s.pending[id] == nil {
+		s.pending[id] = map[string]string{}
 	}
-	v.held = append(v.held, allocation)
-	return true, nil
+	s.pending[id][host] = reason
+}
+
+// forget drops the reasons of a worker whose session ended, as it no longer places jobs.
+func (s *Server) forget(host string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, reasons := range s.pending {
+		delete(reasons, host)
+		if len(reasons) == 0 {
+			delete(s.pending, id)
+		}
+	}
 }
 
 // launch starts an attempt that no poll has shown yet. The attempt is durable before this runs, so a
@@ -405,7 +466,7 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 		// Nothing ran yet, so the job goes back to the queue, where another worker may take it.
 		_ = v.host.Remove(ctx, at.ID)
 		j.Attempts = j.Attempts[:len(j.Attempts)-1]
-		j.State = Queued
+		j.State, j.ReadyAt, j.Avoid = Queued, time.Now().UTC().Add(retryDelay), v.cfg.Host
 		j.Error = err.Error()
 		return s.save(j)
 	}

@@ -134,7 +134,7 @@ func (s *Server) finish(j Job, class Failure) error {
 	case exhausted:
 		j.State = Failed
 	default:
-		j.State = Queued
+		j.State, j.ReadyAt, j.Avoid = Queued, time.Now().UTC().Add(backoff(count)), at.Worker
 	}
 	if err := s.save(j); err != nil {
 		return err
@@ -185,6 +185,8 @@ func (s *Server) await(j Job, v *view) error {
 }
 
 func (s *Server) snapshot(j Job) error {
+	s.staging.RLock()
+	defer s.staging.RUnlock()
 	inputs := map[string]string{}
 	for _, name := range j.Waiting {
 		digest, err := content.PutTree(s.images.Blobs, j.Inputs[name])
