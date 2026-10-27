@@ -14,12 +14,12 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const submitUsage = "Usage: ordo submit --state DIR [--file JOBS.jsonl]\n\nReads one job request or workflow per line (stdin by default) and prints one result per line.\nEach needs an id; resubmitting an id with the same request returns the existing job or workflow."
+const submitUsage = "Usage: ordo submit [--state DIR] [--file JOBS.jsonl]\n\nReads one job request or workflow per line (stdin by default) and prints one result per line.\nEach needs an id; resubmitting an id with the same request returns the existing job or workflow."
 
 func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("submit")
 	var root, file string
-	f.StringVar(&root, "state", "", "server state directory")
+	stateFlag(f, &root)
 	f.StringVar(&file, "file", "-", "JSONL job requests and workflows, or - for stdin")
 	if err := parse(f, args, out, submitUsage); err != nil {
 		return err

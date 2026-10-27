@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/r3clab/Ordo/internal/image"
@@ -26,55 +28,93 @@ func decodeFile(file string, value any) error {
 // Nix builds set this to nix2container's skopeo; stock skopeo lacks the nix: transport.
 var defaultSkopeo = "skopeo"
 
+type serverConfig struct {
+	Listen   string            `json:"listen,omitempty"`
+	Workers  []worker.Config   `json:"workers"`
+	Services map[string]string `json:"services,omitempty"`
+	Secrets  map[string]string `json:"secrets,omitempty"`
+	Nix      string            `json:"nix,omitempty"`
+	Skopeo   string            `json:"skopeo,omitempty"`
+}
+
+func xdgDir(env, fallback string) string {
+	if dir := os.Getenv(env); filepath.IsAbs(dir) {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, fallback)
+}
+
+func defaultState() string {
+	if dir := os.Getenv("ORDO_STATE"); dir != "" {
+		return dir
+	}
+	if dir := xdgDir("XDG_STATE_HOME", ".local/state"); dir != "" {
+		return filepath.Join(dir, "ordo", "server")
+	}
+	return ""
+}
+
+func defaultConfig() string {
+	if dir := xdgDir("XDG_CONFIG_HOME", ".config"); dir != "" {
+		return filepath.Join(dir, "ordo", "server.json")
+	}
+	return ""
+}
+
+func stateFlag(f *flag.FlagSet, root *string) {
+	f.StringVar(root, "state", defaultState(), "server state directory (default $ORDO_STATE, else $XDG_STATE_HOME/ordo/server)")
+}
+
+func loadServerConfig(file string) (serverConfig, error) {
+	c := serverConfig{Listen: "127.0.0.1:7331", Nix: "nix", Skopeo: defaultSkopeo}
+	if err := decodeFile(file, &c); err != nil {
+		return c, fmt.Errorf("server config: %w", err)
+	}
+	for name, secret := range c.Secrets {
+		if !filepath.IsAbs(secret) {
+			c.Secrets[name] = filepath.Join(filepath.Dir(file), secret)
+		}
+	}
+	return c, nil
+}
+
+const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), listen, services, secrets, nix, skopeo."
+
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("server")
-	var root, workersFile, address string
-	var tools image.Tools
-	services, secretFiles := map[string]string{}, map[string]string{}
-	f.StringVar(&address, "listen", "127.0.0.1:7331", "loopback web UI address")
-	f.StringVar(&root, "state", "", "private server state directory")
-	f.StringVar(&workersFile, "workers", "", "JSON array of worker connection configurations")
-	f.Func("service", "NAME=HOST:PORT reachable from this server, published to tasks at /services/NAME/socket (repeatable)", keyValue(services, "service", "NAME=HOST:PORT"))
-	f.Func("secret", "NAME=FILE whose content, without one trailing newline, tasks listing NAME in secrets receive as $NAME (repeatable)", keyValue(secretFiles, "secret", "NAME=FILE"))
-	f.StringVar(&tools.Nix, "nix", "nix", "nix executable that builds task images")
-	f.StringVar(&tools.Skopeo, "skopeo", defaultSkopeo, "nix2container skopeo that exports them")
-	if err := parse(f, args, out, "Usage: ordo server --state DIR --workers workers.json [--listen 127.0.0.1:7331] [--service NAME=HOST:PORT ...] [--secret NAME=FILE ...] [--nix PATH] [--skopeo PATH]"); err != nil {
+	var root string
+	stateFlag(f, &root)
+	file := f.String("config", defaultConfig(), "server configuration file")
+	if err := parse(f, args, out, serverUsage); err != nil {
 		return err
 	}
-	if root == "" || workersFile == "" || f.NArg() != 0 {
-		return errors.New("--state and --workers are required")
+	if f.NArg() != 0 {
+		return errors.New("ordo server takes no arguments")
 	}
-	var workers []worker.Config
-	if err := decodeFile(workersFile, &workers); err != nil {
-		return err
+	if root == "" || *file == "" {
+		return errors.New("--state and --config are required without a home directory")
 	}
-	secrets, err := readSecrets(secretFiles)
+	c, err := loadServerConfig(*file)
 	if err != nil {
 		return err
 	}
-	s, err := server.Open(server.Config{Root: root, Workers: workers, Services: services, Secrets: secrets, Tools: tools})
+	secrets, err := readSecrets(c.Secrets)
 	if err != nil {
 		return err
 	}
-	err = s.Run(ctx, address)
+	s, err := server.Open(server.Config{Root: root, Workers: c.Workers, Services: c.Services, Secrets: secrets, Tools: image.Tools{Nix: c.Nix, Skopeo: c.Skopeo}})
+	if err != nil {
+		return err
+	}
+	err = s.Run(ctx, c.Listen)
 	return errors.Join(err, s.Close())
 }
 
-func keyValue(values map[string]string, kind, shape string) func(string) error {
-	return func(value string) error {
-		name, text, ok := strings.Cut(value, "=")
-		if !ok || name == "" {
-			return fmt.Errorf("%s must be %s", kind, shape)
-		}
-		if _, exists := values[name]; exists {
-			return fmt.Errorf("duplicate %s %s", kind, name)
-		}
-		values[name] = text
-		return nil
-	}
-}
-
-const queueUsage = "Usage: ordo queue <list|get|cancel|cancel-workflow|stop> --state DIR [--id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents."
+const queueUsage = "Usage: ordo queue <list|get|cancel|cancel-workflow|stop> [--state DIR] [--id ID [--reason TEXT]]\n\nstop ends a running job early and keeps its result, classified by exit status; cancel abandons it and skips its dependents."
 
 func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] == "--help" {
@@ -84,7 +124,7 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 	operation := args[0]
 	f := newFlags("queue")
 	var root, id, reason string
-	f.StringVar(&root, "state", "", "server state directory")
+	stateFlag(f, &root)
 	f.StringVar(&id, "id", "", "job ID")
 	f.StringVar(&reason, "reason", "", "why a job is stopped or cancelled")
 	if err := parse(f, args[1:], out, queueUsage); err != nil {

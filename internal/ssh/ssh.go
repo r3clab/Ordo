@@ -159,6 +159,20 @@ func (m *Master) Run(ctx context.Context, script string, stdin io.Reader, stdout
 	return transport(m.host, "%v: %s", err, strings.TrimSpace(tail.String()))
 }
 
+func Home(ctx context.Context, alias string) (string, error) {
+	if !ValidHost(alias) {
+		return "", errors.New("invalid SSH host alias")
+	}
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "ssh", "-T", "-oBatchMode=yes", "-oConnectTimeout=10", "-oLogLevel=ERROR", alias, command(`printf %s "$HOME"`))
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", transport(alias, "%v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return string(out), nil
+}
+
 // remote is ssh's -R argument, such as SOCKET:HOST:PORT; the forward lives as long as the master.
 func (m *Master) Forward(ctx context.Context, remote string) error {
 	out, err := exec.CommandContext(ctx, "ssh", "-S", m.socket, "-O", "forward", "-R", remote, m.host).CombinedOutput()

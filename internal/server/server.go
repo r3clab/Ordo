@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/pool"
 	"github.com/r3clab/Ordo/internal/spec"
+	"github.com/r3clab/Ordo/internal/ssh"
 	"github.com/r3clab/Ordo/internal/state"
 	"github.com/r3clab/Ordo/internal/worker"
 )
@@ -165,26 +167,13 @@ type Config struct {
 	Services map[string]string
 	Secrets  map[string]string
 	Tools    image.Tools
+	// Home finds a worker's home for its default state directory; nil uses ssh.Home.
+	Home func(ctx context.Context, host string) (string, error)
 }
 
 func Open(c Config) (_ *Server, err error) {
 	if len(c.Workers) == 0 || len(c.Workers) > 10 {
 		return nil, errors.New("configure 1-10 workers")
-	}
-	seen := map[string]bool{}
-	for _, w := range c.Workers {
-		if seen[w.Host] {
-			return nil, errors.New("worker SSH aliases must be unique")
-		}
-		if err := w.Validate(); err != nil {
-			return nil, fmt.Errorf("worker %s: %w", w.Host, err)
-		}
-		seen[w.Host] = true
-		for name, address := range c.Services {
-			if _, err := w.ServiceForward(name, address); err != nil {
-				return nil, err
-			}
-		}
 	}
 	for name, value := range c.Secrets {
 		if err := spec.CheckSecret(name, value); err != nil {
@@ -204,7 +193,30 @@ func Open(c Config) (_ *Server, err error) {
 			_ = db.Close()
 		}
 	}()
-	s := &Server{Root: root, store: db, workers: c.Workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	home := c.Home
+	if home == nil {
+		home = ssh.Home
+	}
+	workers, err := stateDirs(db, c.Workers, home)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, w := range workers {
+		if seen[w.Host] {
+			return nil, errors.New("worker SSH aliases must be unique")
+		}
+		if err := w.Validate(); err != nil {
+			return nil, fmt.Errorf("worker %s: %w", w.Host, err)
+		}
+		seen[w.Host] = true
+		for name, address := range c.Services {
+			if _, err := w.ServiceForward(name, address); err != nil {
+				return nil, err
+			}
+		}
+	}
+	s := &Server{Root: root, store: db, workers: workers, services: maps.Clone(c.Services), secrets: maps.Clone(c.Secrets), jobs: map[string]Job{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)
 	if errors.Is(err, state.ErrNotFound) {
@@ -235,6 +247,35 @@ func Open(c Config) (_ *Server, err error) {
 	s.images = image.NewResolver(filepath.Join(root, "blobs"), root, c.Tools, imageCache{db})
 	return s, nil
 }
+
+// stateDirs caches each resolved home, so a restart while that worker is down still finds its state.
+func stateDirs(db *state.Store, workers []worker.Config, home func(context.Context, string) (string, error)) ([]worker.Config, error) {
+	workers = slices.Clone(workers)
+	for i, w := range workers {
+		if w.StateDir != "" {
+			continue
+		}
+		var dir string
+		err := db.Get("home", w.Host, &dir)
+		if errors.Is(err, state.ErrNotFound) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			dir, err = home(ctx, w.Host)
+			cancel()
+			if err == nil && !path.IsAbs(dir) {
+				err = fmt.Errorf("home %q is not an absolute path", dir)
+			}
+			if err == nil {
+				err = db.Put("home", w.Host, dir)
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("worker %s: find its home for the default state_dir, or set state_dir: %w", w.Host, err)
+		}
+		workers[i].StateDir = path.Join(dir, worker.DefaultStateDir)
+	}
+	return workers, nil
+}
+
 func (s *Server) Close() error {
 	s.images.Close()
 	return s.store.Close()
@@ -494,16 +535,16 @@ func (s *Server) check(r Request) error {
 func (s *Server) checkConfig(sp spec.Spec) error {
 	for _, name := range sp.Services {
 		if _, ok := s.services[name]; !ok {
-			return fmt.Errorf("service %q is unknown; configure it with ordo server --service", name)
+			return fmt.Errorf("service %q is unknown; add it to \"services\" in the server config", name)
 		}
 	}
 	for _, name := range sp.Secrets {
 		if _, ok := s.secrets[name]; !ok {
-			return fmt.Errorf("secret %q is unknown; configure it with ordo server --secret", name)
+			return fmt.Errorf("secret %q is unknown; add it to \"secrets\" in the server config", name)
 		}
 	}
 	if !slices.ContainsFunc(s.workers, func(w worker.Config) bool { return w.Carries(sp.Tags) }) {
-		return fmt.Errorf("no configured worker has all tags %q; add them to a worker's \"tags\" in the ordo server --workers file", sp.Tags)
+		return fmt.Errorf("no configured worker has all tags %q; add them to a worker's \"tags\" in the server config", sp.Tags)
 	}
 	return nil
 }

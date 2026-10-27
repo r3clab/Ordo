@@ -19,7 +19,7 @@ import (
 
 var pollInterval = 2 * time.Second
 
-const fetchUsage = "Usage: ordo fetch --state DIR --into DIR [--id ID ...] [--wait]\n\nWrites each succeeded job's outputs, stdout.log, stderr.log and run.json to DIR/ID,\nskipping jobs whose directory already exists. Without --id it fetches every job.\n--wait polls until the selected jobs finish."
+const fetchUsage = "Usage: ordo fetch [--state DIR] --into DIR [--id ID ...] [--wait]\n\nWrites each succeeded job's outputs, stdout.log, stderr.log and run.json to DIR/ID,\nskipping jobs whose directory already exists. Without --id it fetches every job.\n--wait polls until the selected jobs finish."
 
 type fetchResult struct {
 	ID     string       `json:"id"`
@@ -33,7 +33,7 @@ func fetchCommand(ctx context.Context, args []string, out io.Writer) error {
 	var root, into string
 	var ids []string
 	var wait bool
-	f.StringVar(&root, "state", "", "server state directory")
+	stateFlag(f, &root)
 	f.StringVar(&into, "into", "", "directory that receives one subdirectory per job")
 	f.Func("id", "job to fetch (repeatable; default all)", func(id string) error {
 		if !spec.ValidName(id) {

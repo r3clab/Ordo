@@ -102,11 +102,18 @@ The opt-in [live checks](tests/README.md) cover server restarts, workflows, and 
 
 ## Durable queue
 
-Start `ordo server --state SERVER_DIR --workers workers.json [--service NAME=HOST:PORT …] [--secret NAME=FILE …]` with 1–10 worker entries:
+Start `ordo server`; it reads `$XDG_CONFIG_HOME/ordo/server.json` (`--config FILE` overrides it), which lists 1–10 workers:
 
 ```json
-[{"host":"WORKER","state_dir":"/home/worker/.local/state/ordo","cpus":"0,1,64,65","memory_mib":512}]
+{"workers":[{"host":"WORKER","cpus":"0,1,64,65","memory_mib":512}]}
 ```
+
+- The server keeps its state in `SERVER_DIR`: `--state DIR`, else `$ORDO_STATE`, else `$XDG_STATE_HOME/ordo/server`.
+  Every other command finds the server the same way; set `ORDO_STATE` to point a shell at another server.
+- A worker's `state_dir` defaults to `~/.local/state/ordo/worker` in the worker user's home.
+  The server asks for that home over SSH on first start and remembers it, so a later restart works while the worker is down; set `state_dir` for a worker unreachable on first start.
+- Optional keys: `listen` (web UI address, default `127.0.0.1:7331`), `services` and `secrets` (see [task environment](#task-environment)), `nix`, and `skopeo`.
+  Unknown keys are rejected.
 
 A task is a JSON object, one per line; any generator may write them, and [Nix](#nix-library) makes a parameter sweep a `map` over a list:
 
@@ -124,7 +131,7 @@ in
 pkgs.writeText "jobs.jsonl" (toJSONL tasks)
 ```
 
-`ordo submit --state SERVER_DIR --file jobs.jsonl` queues each line, a job request or a [workflow](#workflows) (stdin without `--file`).
+`ordo submit --file jobs.jsonl` queues each line, a job request or a [workflow](#workflows) (stdin without `--file`).
 
 - Every task needs an `id`.
   Resubmitting an ID with the same request returns the existing job, so rerunning a generator only queues what is new; the same ID with a different request is an error.
@@ -133,18 +140,18 @@ pkgs.writeText "jobs.jsonl" (toJSONL tasks)
 - `image` is a Nix installable, such as a derivation `"/nix/store/….drv^*"` or `"/path/flake#images.grep"`: the server runs `nix build`, exports the nix2container image with nix2container's `skopeo`, and records the build as `image_origin`.
   Exports are cached by store path, so a resubmission repeats only the already-built `nix build`.
   A batch builds its distinct images concurrently, at most four at once across the server, and a failed build fails only the jobs that use it.
-- The server finds `nix` on its `PATH` (`--nix` overrides it) and uses the nix2container `skopeo` bundled by the Nix build (`--skopeo` overrides it).
-  Stock `skopeo` lacks the `nix:` transport, so a `go build` binary needs `--skopeo` pointing at nix2container's.
+- The server finds `nix` on its `PATH` (the config's `nix` overrides it) and uses the nix2container `skopeo` bundled by the Nix build (the config's `skopeo` overrides it).
+  Stock `skopeo` lacks the `nix:` transport, so a `go build` binary needs `skopeo` pointing at nix2container's.
 - Only the private control socket accepts submissions; the web UI's API has none, since a submission can build Nix code, read server files, and use every configured secret.
 
-`ordo fetch --state SERVER_DIR --into results [--id ID …] [--wait]` writes each succeeded job's outputs, `stdout.log`, `stderr.log`, and `run.json` to `results/ID/`, creating `results` private (mode 0700).
+`ordo fetch --into results [--id ID …] [--wait]` writes each succeeded job's outputs, `stdout.log`, `stderr.log`, and `run.json` to `results/ID/`, creating `results` private (mode 0700).
 It skips jobs whose directory already exists, so a finished result is never fetched again, and receives each one into a temporary directory renamed into place only after its checksum matches.
 Without `--id` it selects every job; `--wait` polls until the selected jobs finish.
 It prints one line per job and exits nonzero if any selected job did not succeed.
 An output named `run.json`, `stdout.log`, or `stderr.log` would collide, so such a job is refused.
 
-`ordo queue list` and `ordo queue get --id ID` accept the same `--state` argument.
-The control socket is private.
+`ordo queue list` and `ordo queue get --id ID` inspect jobs.
+Every client command accepts `--state` like the server, and talks to its private control socket there.
 Server shutdown or disconnection never stops containers; attempts are committed before launch, and the worker's machine ID must match before reconciliation.
 A container that disappears or cannot be collected, or a worker whose identity changed, blocks that job rather than rerunning it.
 A blocked job keeps its reservation and is never retried; cancel it to release it.
@@ -152,7 +159,7 @@ Results must be collected and recorded before the server marks success.
 
 ## Web UI
 
-The server also listens on `http://127.0.0.1:7331`; override the port with `--listen 127.0.0.1:PORT`.
+The server also listens on `http://127.0.0.1:7331`; override it with the config's `listen`, such as `"listen":"127.0.0.1:PORT"`.
 Only literal loopback bind addresses are accepted.
 Read `SERVER_DIR/token` (mode 0600) and paste its bearer token into the page.
 The token is stable across restarts, never placed in a URL/cookie/browser storage, and cleared on disconnect or page reload.
@@ -204,7 +211,7 @@ An omitted pool disables GPU admission; ordinal indices, `all`, MIG partitions, 
 
 ## Worker tags
 
-Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-class"]` in each of their `workers.json` entries, then require it in the task's `tags`:
+Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-class"]` in each of their config entries, then require it in the task's `tags`:
 
 ```nix
 { id = "train"; image = image evaluation.images.train; resources = { cores = 1; gpus = 2; memory_mib = 8192; }; tags = [ "l40s-class" ]; }
@@ -214,7 +221,7 @@ Give the workers you consider equivalent a shared tag, such as `"tags":["l40s-cl
 - Submission rejects tags that no single configured worker carries together.
 - A job whose tagged workers are full remains queued; it never falls back to an untagged worker.
 - A tag describes the whole worker, including every GPU in its `gpus` list.
-- Tags are server policy kept in `workers.json`; changing them needs a server restart.
+- Tags are server policy kept in the server config; changing them needs a server restart.
 
 ## Task environment
 
@@ -227,7 +234,7 @@ Tasks may declare environment, secrets, network access, capabilities, and contro
 - `env` values are part of the job's specification and appear in job records, `run.json`, and the web UI.
   Names starting with `NVIDIA_` are reserved, since NVIDIA's container hooks read them to inject devices.
 - `secrets` lists names only, so task files in the world-readable Nix store hold no values.
-  The server supplies them: start it with a repeated `--secret NAME=FILE`, and a task listing `NAME` sees the file's content as `$NAME`.
+  The server supplies them from its config's `"secrets":{"NAME":"FILE"}`, where a relative `FILE` is beside the config, and a task listing `NAME` sees the file's content as `$NAME`.
   Each file is read once at startup, without one trailing newline; a value cannot be empty or contain NUL or line breaks, and is at most 32 KiB.
   Values stay in the server's memory, never in job records, the API, or `run.json`, which lists only names.
   Submission rejects a name the server was not given, and the server refuses to start without a secret that an unfinished job uses.
@@ -238,7 +245,7 @@ Tasks may declare environment, secrets, network access, capabilities, and contro
 - `network` is `none` (default, loopback only) or `egress` (rootless pasta with full outbound access).
   Domain filtering belongs in the image, for example with nftables under `NET_ADMIN`.
 - `cap_add` accepts only `NET_ADMIN`, which acts on the container's own network namespace under rootless Podman.
-- `services` names endpoints configured on the server with repeated `--service NAME=HOST:PORT`, resolved from the server.
+- `services` names endpoints in the server config's `"services":{"NAME":"HOST:PORT"}`, resolved from the server.
   The server's SSH connection to each worker forwards each one to a Unix socket, and the task sees it at `/services/NAME/socket`, even with `network` set to `none`.
   The directory is mounted rather than the socket, so a task keeps reaching the service after a reconnect; while the server is disconnected, connections fail and the task must retry.
   Only the container's root user (the worker user) can connect.

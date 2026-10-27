@@ -21,12 +21,15 @@ import (
 var stateDir = regexp.MustCompile(`^/[a-zA-Z0-9_./-]+$`)
 var serviceHost = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.-]*$`)
 
+// DefaultStateDir is relative to the worker user's home.
+const DefaultStateDir = ".local/state/ordo/worker"
+
 // Unix socket paths stop at 108 bytes, and ssh's temporary bind names are longer than the final path.
 const maxSocketPath = 100
 
 type Config struct {
 	Host      string   `json:"host"`
-	StateDir  string   `json:"state_dir"`
+	StateDir  string   `json:"state_dir,omitempty"`
 	CPUs      string   `json:"cpus"`
 	MemoryMiB int64    `json:"memory_mib"`
 	GPUs      []string `json:"gpus,omitempty"`

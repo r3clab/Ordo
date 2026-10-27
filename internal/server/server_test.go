@@ -637,3 +637,38 @@ func TestFailedUploadRequeuesWithoutAnAttempt(t *testing.T) {
 		t.Fatalf("requeued job did not launch: %+v", j)
 	}
 }
+
+func TestDefaultWorkerStateDirCachesHome(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	w := testWorker("worker")
+	w.StateDir = ""
+	calls := 0
+	c := Config{Root: root, Workers: []worker.Config{w}, Tools: testTools(), Home: func(_ context.Context, host string) (string, error) {
+		calls++
+		return "/home/" + host, nil
+	}}
+	for range 2 {
+		s, err := Open(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.workers[0].StateDir != "/home/worker/.local/state/ordo/worker" {
+			t.Fatalf("state dir %q", s.workers[0].StateDir)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		c.Home = func(context.Context, string) (string, error) { return "", errors.New("unreachable") }
+	}
+	if calls != 1 {
+		t.Fatalf("resolved home %d times", calls)
+	}
+	c.Root = filepath.Join(t.TempDir(), "fresh")
+	if _, err := Open(c); err == nil || !strings.Contains(err.Error(), "set state_dir") {
+		t.Fatalf("unresolved home: %v", err)
+	}
+	c.Home = func(context.Context, string) (string, error) { return "relative", nil }
+	if _, err := Open(c); err == nil {
+		t.Fatal("accepted a relative home")
+	}
+}

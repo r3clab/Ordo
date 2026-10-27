@@ -31,8 +31,8 @@ EOF
 }
 trap cleanup EXIT
 for pair in "vegeta:$root_a" "goku:$root_b"; do host=${pair%%:*}; root=${pair#*:}; ssh "$host" "if ! podman image exists '$ORDO_TEST_IMAGE'; then touch '$root/image-introduced'; fi"; done
-jq -n --arg a "$root_a" --arg b "$root_b" '[{host:"vegeta",state_dir:$a,cpus:"62,63,126,127",memory_mib:512},{host:"goku",state_dir:$b,cpus:"62,63,126,127",memory_mib:512}]' > "$work/workers.json"
-start() { "$ORDO_TEST_BINARY" server --state "$work/server" --workers "$work/workers.json" --listen 127.0.0.1:0 >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json" 2>/dev/null; then return; fi; sleep 0.2; done; return 1; }
+jq -n --arg a "$root_a" --arg b "$root_b" '{listen:"127.0.0.1:0",workers:[{host:"vegeta",state_dir:$a,cpus:"62,63,126,127",memory_mib:512},{host:"goku",state_dir:$b,cpus:"62,63,126,127",memory_mib:512}]}' > "$work/server.json"
+start() { "$ORDO_TEST_BINARY" server --state "$work/server" --config "$work/server.json" >> "$work/server.log" 2>&1 & pid=$!; for ((i=0;i<50;i++)); do if "$ORDO_TEST_BINARY" queue list --state "$work/server" > "$work/list.json" 2>/dev/null; then return; fi; sleep 0.2; done; return 1; }
 start
 for id in first second; do
  jq -nc --arg id "$id" --arg installable "$ORDO_TEST_INSTALLABLE" '{id:$id,image:$installable,resources:{cores:2,memory_mib:256},args:["-c","printf start; sleep 30; printf done > /outputs/result"]}' > "$work/$id.json"
