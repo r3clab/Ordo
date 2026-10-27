@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"sync"
+	"syscall"
 
 	"github.com/r3clab/Ordo/internal/image"
 	"github.com/r3clab/Ordo/internal/server"
@@ -79,7 +82,7 @@ func loadServerConfig(file string) (serverConfig, error) {
 	return c, nil
 }
 
-const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), port, services, ssh_config. Secrets are files in the secrets directory beside it."
+const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), port, services, ssh_config. Secrets are files in the secrets directory beside it. SIGHUP reloads the config; a new port takes effect on restart."
 
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("server")
@@ -103,6 +106,36 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	hangups := make(chan os.Signal, 1)
+	signal.Notify(hangups, syscall.SIGHUP)
+	defer signal.Stop(hangups)
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() { reloadOnHangup(ctx, hangups, s, *file, c.Port) })
 	err = s.Run(ctx, c.Port)
+	cancel()
+	wg.Wait()
 	return errors.Join(err, s.Close())
+}
+
+func reloadOnHangup(ctx context.Context, hangups <-chan os.Signal, s *server.Server, file string, port uint16) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hangups:
+		}
+		c, err := loadServerConfig(file)
+		if err == nil {
+			err = s.Reload(server.Config{Workers: c.Workers, Services: c.Services, SSHConfig: c.SSHConfig})
+		}
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "reload: %v\n", err)
+		case c.Port != port:
+			fmt.Fprintf(os.Stderr, "reloaded; port %d takes effect on restart\n", c.Port)
+		default:
+			fmt.Fprintln(os.Stderr, "reloaded")
+		}
+	}
 }

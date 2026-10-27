@@ -38,8 +38,8 @@ func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error)
 	gpuUsed := map[string]bool{}
 	remaining := h.MemoryMiB
 	for _, a := range held {
-		if a.MemoryMiB < 0 || a.MemoryMiB > remaining {
-			return Allocation{}, errors.New("reservations exceed the memory budget")
+		if a.MemoryMiB < 0 {
+			return Allocation{}, errors.New("negative memory reservation")
 		}
 		remaining -= a.MemoryMiB
 		for _, id := range a.GPUs {
@@ -49,6 +49,7 @@ func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error)
 			used[cpu] = true
 		}
 	}
+	// A reload can shrink the budget below what running jobs hold.
 	if req.MemoryMiB > remaining {
 		return Allocation{}, fmt.Errorf("%w memory", ErrCapacity)
 	}

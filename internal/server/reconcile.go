@@ -97,22 +97,54 @@ func (v *view) busyGPUs(ctx context.Context) ([]string, error) {
 	return v.gpusBusy, nil
 }
 
-func (s *Server) work(ctx context.Context, cfg worker.Config) {
-	for {
-		err := s.session(ctx, cfg)
-		s.forget(cfg.Host)
-		if ctx.Err() != nil {
-			return
-		}
-		s.workerStatus(cfg.Host, nil, err)
-		if !sleep(ctx, 2*time.Second) {
-			return
+var errReconfigured = errors.New("worker reconfigured")
+
+func (s *Server) spawn(ctx context.Context, wg *sync.WaitGroup) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, w := range s.settings.Load().workers {
+		if _, ok := s.sessions[w.Host]; !ok {
+			s.sessions[w.Host] = func(error) {}
+			wg.Go(func() { s.work(ctx, w.Host) })
 		}
 	}
 }
 
-func (s *Server) session(ctx context.Context, cfg worker.Config) error {
-	m, err := worker.Dial(ctx, cfg, s.services, s.sshConfig)
+// work runs host's sessions one after another, so two never share its hardware.
+func (s *Server) work(ctx context.Context, host string) {
+	for ctx.Err() == nil {
+		session, cancel := context.WithCancelCause(ctx)
+		c, cfg, ok := s.attach(host, cancel)
+		if !ok {
+			cancel(nil)
+			return
+		}
+		err := s.session(session, c, cfg)
+		s.forget(host)
+		if ctx.Err() == nil && !errors.Is(context.Cause(session), errReconfigured) {
+			s.workerStatus(host, nil, err)
+			sleep(session, 2*time.Second)
+		}
+		cancel(nil)
+	}
+}
+
+func (s *Server) attach(host string, cancel context.CancelCauseFunc) (*settings, worker.Config, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.settings.Load()
+	cfg, ok := c.worker(host)
+	if ok {
+		s.sessions[host] = cancel
+	} else {
+		delete(s.sessions, host)
+		delete(s.nodes, host)
+	}
+	return c, cfg, ok
+}
+
+func (s *Server) session(ctx context.Context, c *settings, cfg worker.Config) error {
+	m, err := worker.Dial(ctx, cfg, c.services, c.sshConfig)
 	if err != nil {
 		return err
 	}
@@ -382,7 +414,14 @@ func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
 	hw := v.probe.Hardware
 	j.Attempts = append(j.Attempts, Attempt{ID: newID(), Step: j.Step, Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
 	j.State, j.Avoid = Dispatching, ""
-	if err := s.save(*j); err != nil {
+	s.write.Lock()
+	// configure cancels a session it changes while holding write, so v.cfg is still current here.
+	err = context.Cause(ctx)
+	if err == nil {
+		err = s.saveLocked(*j)
+	}
+	s.write.Unlock()
+	if err != nil {
 		return false, err
 	}
 	v.held = append(v.held, allocation)

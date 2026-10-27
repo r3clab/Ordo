@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
@@ -149,6 +150,14 @@ type Job struct {
 
 func (j Job) spec() spec.Spec { return j.Steps[j.Step].Spec }
 
+// ahead is the steps j has yet to run; a delivering job stays on the last one it ran.
+func (j Job) ahead() []Stage {
+	if j.State == Delivering {
+		return nil
+	}
+	return j.Steps[j.Step:]
+}
+
 // Summary is how GET /v1/jobs lists a job; GET /v1/jobs/{id} returns all of it.
 type Summary struct {
 	ID              string         `json:"id"`
@@ -197,10 +206,13 @@ type Server struct {
 	root       string
 	store      *state.Store
 	id         string
-	workers    []worker.Config
-	services   map[string]string
 	secretsDir string
-	sshConfig  string
+	home       func(ctx context.Context, host string) (string, error)
+	// settings is replaced whole, under write and mu, and never changed in place.
+	settings atomic.Pointer[settings]
+	// sessions cancels each worker's current session; a worker has a goroutine while it has an entry.
+	sessions map[string]context.CancelCauseFunc
+	reloaded chan struct{}
 	// jobs holds only unfinished jobs, and outs maps their Out to their ID; a finished job is read back
 	// from the store.
 	jobs     map[string]Job
@@ -226,10 +238,28 @@ type Config struct {
 	Home func(ctx context.Context, host string) (string, error)
 }
 
-func Open(c Config) (_ *Server, err error) {
-	if len(c.Workers) == 0 {
-		return nil, errors.New("configure at least one worker")
+type settings struct {
+	workers   []worker.Config
+	services  map[string]string
+	sshConfig string
+}
+
+func (st *settings) worker(host string) (worker.Config, bool) {
+	i := slices.IndexFunc(st.workers, func(w worker.Config) bool { return w.Host == host })
+	if i < 0 {
+		return worker.Config{}, false
 	}
+	return st.workers[i], true
+}
+
+// restarts reports whether host's session must start over to use next.
+func (st *settings) restarts(next *settings, host string) bool {
+	old, _ := st.worker(host)
+	w, ok := next.worker(host)
+	return !ok || !reflect.DeepEqual(old, w) || !maps.Equal(st.services, next.services) || st.sshConfig != next.sshConfig
+}
+
+func Open(c Config) (_ *Server, err error) {
 	root, err := filepath.Abs(c.Root)
 	if err != nil {
 		return nil, err
@@ -243,11 +273,65 @@ func Open(c Config) (_ *Server, err error) {
 			_ = db.Close()
 		}
 	}()
-	home := c.Home
+	s := &Server{root: root, store: db, secretsDir: c.SecretsDir, home: c.Home, sessions: map[string]context.CancelCauseFunc{}, reloaded: make(chan struct{}, 1), jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}, pending: map[string]map[string]string{}}
+	s.settings.Store(&settings{})
+	// Containers carry this ID, so a worker account shared with another server is detected.
+	err = db.Get("meta", "server", &s.id)
+	if errors.Is(err, state.ErrNotFound) {
+		s.id = newID()
+		err = db.Put("meta", "server", s.id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := state.List[Job](db, "job")
+	if err != nil {
+		return nil, err
+	}
+	for _, j := range jobs {
+		if !spec.ValidName(j.ID) {
+			return nil, errors.New("invalid saved job ID")
+		}
+		s.installLocked(j)
+	}
+	if err := s.apply(c); err != nil {
+		return nil, err
+	}
+	s.images = image.NewResolver(filepath.Join(root, "blobs"), root, c.Tools, imageCache{db})
+	return s, nil
+}
+
+// Reload takes the workers, services and SSH config from c unless an unfinished job would lose what it
+// needs.
+func (s *Server) Reload(c Config) error {
+	if err := s.apply(c); err != nil {
+		return err
+	}
+	select {
+	case s.reloaded <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *Server) apply(c Config) error {
+	next, err := s.resolve(c)
+	if err != nil {
+		return err
+	}
+	return s.configure(next)
+}
+
+// resolve holds no lock, as finding a worker's home takes SSH.
+func (s *Server) resolve(c Config) (*settings, error) {
+	if len(c.Workers) == 0 {
+		return nil, errors.New("configure at least one worker")
+	}
+	home := s.home
 	if home == nil {
 		home = func(ctx context.Context, host string) (string, error) { return ssh.Home(ctx, host, c.SSHConfig) }
 	}
-	workers, err := stateDirs(db, c.Workers, home)
+	workers, err := stateDirs(s.store, c.Workers, home)
 	if err != nil {
 		return nil, err
 	}
@@ -266,38 +350,39 @@ func Open(c Config) (_ *Server, err error) {
 			}
 		}
 	}
-	s := &Server{root: root, store: db, workers: workers, services: maps.Clone(c.Services), secretsDir: c.SecretsDir, sshConfig: c.SSHConfig, jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}, pending: map[string]map[string]string{}}
-	// Containers carry this ID, so a worker account shared with another server is detected.
-	err = db.Get("meta", "server", &s.id)
-	if errors.Is(err, state.ErrNotFound) {
-		s.id = newID()
-		err = db.Put("meta", "server", s.id)
-	}
-	if err != nil {
-		return nil, err
-	}
-	jobs, err := state.List[Job](db, "job")
-	if err != nil {
-		return nil, err
-	}
-	for _, j := range jobs {
-		if !spec.ValidName(j.ID) {
-			return nil, errors.New("invalid saved job ID")
-		}
-		if !j.State.Terminal() {
-			if n := len(j.Attempts); n > 0 && j.live(n-1) && !seen[j.current().Worker] {
-				return nil, errors.New("configuration removes a worker with unfinished attempts")
+	return &settings{workers: workers, services: maps.Clone(c.Services), sshConfig: c.SSHConfig}, nil
+}
+
+// configure cancels the sessions it changes while holding write, so a session whose context is live may
+// still commit what it planned.
+func (s *Server) configure(next *settings) error {
+	s.write.Lock()
+	defer s.write.Unlock()
+	prev := s.settings.Load()
+	for _, j := range s.jobs {
+		if n := len(j.Attempts); n > 0 && j.live(n-1) {
+			host := j.current().Worker
+			w, ok := next.worker(host)
+			if !ok {
+				return fmt.Errorf("configuration removes worker %s, which has unfinished attempts", host)
 			}
-			for _, step := range j.Steps {
-				if err := s.checkConfig(step.Spec.Task); err != nil {
-					return nil, fmt.Errorf("unfinished job %s: %w", j.Out, err)
-				}
+			if old, ok := prev.worker(host); ok && old.StateDir != w.StateDir {
+				return fmt.Errorf("configuration moves the state_dir of worker %s, which has unfinished attempts", host)
 			}
 		}
-		s.installLocked(j)
+		if err := s.checkJob(next, j); err != nil {
+			return fmt.Errorf("unfinished job %s: %w", j.Out, err)
+		}
 	}
-	s.images = image.NewResolver(filepath.Join(root, "blobs"), root, c.Tools, imageCache{db})
-	return s, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settings.Store(next)
+	for host, cancel := range s.sessions {
+		if prev.restarts(next, host) {
+			cancel(errReconfigured)
+		}
+	}
+	return nil
 }
 
 // stateDirs caches each resolved home, so a restart while that worker is down still finds its state.
@@ -431,6 +516,11 @@ func (s *Server) unfinished() []string {
 func (s *Server) save(j Job) error {
 	s.write.Lock()
 	defer s.write.Unlock()
+	return s.saveLocked(j)
+}
+
+// The caller holds s.write.
+func (s *Server) saveLocked(j Job) error {
 	if _, unfinished := s.jobs[j.ID]; !unfinished {
 		return nil
 	}
@@ -635,8 +725,18 @@ func (s *Server) check(r Request) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
+	c := s.settings.Load()
 	for _, step := range r.steps() {
-		if err := s.checkConfig(step.Task); err != nil {
+		if err := s.checkConfig(c, step.Task); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) checkJob(c *settings, j Job) error {
+	for _, step := range j.ahead() {
+		if err := s.checkConfig(c, step.Spec.Task); err != nil {
 			return err
 		}
 	}
@@ -654,9 +754,9 @@ func (s *Server) secret(name string) (string, error) {
 	return string(data), spec.CheckSecret(name, string(data))
 }
 
-func (s *Server) checkConfig(t spec.Task) error {
+func (s *Server) checkConfig(c *settings, t spec.Task) error {
 	for _, name := range t.Services {
-		if _, ok := s.services[name]; !ok {
+		if _, ok := c.services[name]; !ok {
 			return fmt.Errorf("service %q is unknown; add it to \"services\" in the server config", name)
 		}
 	}
@@ -665,7 +765,7 @@ func (s *Server) checkConfig(t spec.Task) error {
 			return err
 		}
 	}
-	tagged := slices.DeleteFunc(slices.Clone(s.workers), func(w worker.Config) bool { return !w.Carries(t.Tags) })
+	tagged := slices.DeleteFunc(slices.Clone(c.workers), func(w worker.Config) bool { return !w.Carries(t.Tags) })
 	if len(tagged) == 0 {
 		return fmt.Errorf("no configured worker has all tags %q; add them to a worker's \"tags\" in the server config", t.Tags)
 	}
@@ -743,7 +843,7 @@ func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job
 			return Job{}, img.err
 		}
 		sp := spec.Spec{Image: img.value.ID, Inputs: inputs, Task: step.Task}.Normalize()
-		for _, w := range s.workers {
+		for _, w := range s.settings.Load().workers {
 			if w.Carries(sp.Tags) {
 				if err := w.CheckLaunch(sp, slices.Collect(maps.Keys(waiting))); err != nil {
 					return Job{}, err
@@ -760,6 +860,7 @@ func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job
 func (s *Server) admit(jobs []Job, results []*BatchResult) {
 	s.write.Lock()
 	defer s.write.Unlock()
+	c := s.settings.Load()
 	pending := map[string]record{}
 	fresh := []Job{}
 	for i, j := range jobs {
@@ -775,6 +876,11 @@ func (s *Server) admit(jobs []Job, results []*BatchResult) {
 		case ok:
 			result.Error = "out already has an unfinished job with a different request"
 		default:
+			// A reload while the request was staging may have dropped what check found.
+			if err := s.checkJob(c, j); err != nil {
+				result.Error = err.Error()
+				continue
+			}
 			if other := s.nested(j.Out, pending); other != "" {
 				result.Error = fmt.Sprintf("out nests with %s, which an unfinished job writes", other)
 				continue
@@ -861,18 +967,23 @@ func (s *Server) Run(ctx context.Context, port uint16) error {
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
-	for _, remote := range s.workers {
-		wg.Go(func() { s.work(child, remote) })
-	}
+	s.spawn(child, &wg)
 	wg.Go(func() { s.tidy(child) })
 	api := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	public := &http.Server{Handler: s.WebHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 2)
 	go func() { done <- api.Serve(listener) }()
 	go func() { done <- public.Serve(web) }()
-	select {
-	case <-ctx.Done():
-	case err = <-done:
+wait:
+	for {
+		select {
+		case <-s.reloaded:
+			s.spawn(child, &wg)
+		case <-ctx.Done():
+			break wait
+		case err = <-done:
+			break wait
+		}
 	}
 	cancel()
 	shutdown, end := context.WithTimeout(context.Background(), 5*time.Second)

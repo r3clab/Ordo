@@ -28,7 +28,10 @@ func TestAllocationRespectsHeld(t *testing.T) {
 	if _, err := Plan(h, spec.Resources{Cores: 1, MemoryMiB: 1}, []Allocation{first, second}); !errors.Is(err, ErrCapacity) {
 		t.Fatal("exceeded the memory budget or reused a core", err)
 	}
-	if _, err := Plan(h, spec.Resources{Cores: 1, MemoryMiB: 1}, []Allocation{{MemoryMiB: 1024}}); err == nil || errors.Is(err, ErrCapacity) {
-		t.Fatal("reservations beyond the budget must be an error, not a capacity wait", err)
+	if _, err := Plan(h, spec.Resources{Cores: 1, MemoryMiB: 1}, []Allocation{{MemoryMiB: 1024}}); !errors.Is(err, ErrCapacity) {
+		t.Fatal("reservations beyond a shrunk budget must wait for capacity", err)
+	}
+	if _, err := Plan(h, spec.Resources{Cores: 1, MemoryMiB: 1}, []Allocation{{MemoryMiB: -1}}); err == nil || errors.Is(err, ErrCapacity) {
+		t.Fatal("a negative reservation must be an error, not a capacity wait", err)
 	}
 }

@@ -775,8 +775,8 @@ func TestDefaultWorkerStateDirCachesHome(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.workers[0].StateDir != "/home/worker/.local/state/ordo/worker" {
-			t.Fatalf("state dir %q", s.workers[0].StateDir)
+		if dir := s.settings.Load().workers[0].StateDir; dir != "/home/worker/.local/state/ordo/worker" {
+			t.Fatalf("state dir %q", dir)
 		}
 		if err := s.Close(); err != nil {
 			t.Fatal(err)
@@ -840,8 +840,103 @@ func TestSecretMissingAtDispatchAbandonsTheAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newFakeHost(s.id)
-	mustTick(t, s, s.workers[0], h)
+	mustTick(t, s, s.settings.Load().workers[0], h)
 	if j := mustJob(t, s, id); len(h.launches) != 0 || !strings.Contains(j.Error, "secret TOKEN") {
 		t.Fatalf("launched without its secret: launches=%d error=%q", len(h.launches), j.Error)
+	}
+}
+
+func TestReloadRejectsStrandingUnfinishedJobs(t *testing.T) {
+	root := t.TempDir()
+	a, b := testWorker("a"), testWorker("b", "fast")
+	s := open(t, filepath.Join(root, "state"), []worker.Config{a, b}, nil)
+	defer func() { _ = s.Close() }()
+	running := submit(t, s, jobRequest(filepath.Join(root, "running")))
+	mustTick(t, s, a, newFakeHost(s.id))
+	fast := jobRequest(filepath.Join(root, "fast"))
+	fast.Tags = []string{"fast"}
+	submit(t, s, fast)
+	moved := a
+	moved.StateDir = "/srv/moved"
+	for want, workers := range map[string][]worker.Config{"removes worker a": {b}, "moves the state_dir": {moved, b}, "fast": {a, testWorker("b")}} {
+		if err := s.Reload(Config{Workers: workers}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("reload to %+v: %v, want %q", workers, err, want)
+		}
+	}
+	if j := mustJob(t, s, running); len(j.Attempts) != 1 || j.current().Worker != "a" {
+		t.Fatalf("running job %+v", j)
+	}
+}
+
+func TestReloadChecksOnlyStepsAhead(t *testing.T) {
+	root := t.TempDir()
+	s := open(t, filepath.Join(root, "state"), []worker.Config{testWorker("a", "fast")}, nil)
+	defer func() { _ = s.Close() }()
+	stage := func(tags ...string) Stage {
+		return Stage{Spec: spec.Spec{Task: spec.Task{Tags: tags, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}}
+	}
+	seed(t, s,
+		Job{ID: newID(), Out: filepath.Join(root, "second"), State: Queued, Step: 1, Steps: []Stage{stage("fast"), stage()}},
+		Job{ID: newID(), Out: filepath.Join(root, "delivering"), State: Delivering, Steps: []Stage{stage("fast")}},
+	)
+	if err := s.Reload(Config{Workers: []worker.Config{testWorker("a")}}); err != nil {
+		t.Fatal("a tag only finished steps used blocked the reload:", err)
+	}
+}
+
+func TestReloadRestartsOnlyChangedWorkers(t *testing.T) {
+	a, b := testWorker("a"), testWorker("b")
+	s := open(t, filepath.Join(t.TempDir(), "state"), []worker.Config{a, b}, nil)
+	defer func() { _ = s.Close() }()
+	sessions := map[string]context.Context{}
+	for _, host := range []string{"a", "b"} {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		sessions[host], s.sessions[host] = ctx, cancel
+	}
+	b.CPUs = "0-7"
+	if err := s.Reload(Config{Workers: []worker.Config{a, b, testWorker("c")}}); err != nil {
+		t.Fatal(err)
+	}
+	if context.Cause(sessions["a"]) != nil || !errors.Is(context.Cause(sessions["b"]), errReconfigured) {
+		t.Fatalf("restarted a=%v b=%v, want only b", context.Cause(sessions["a"]), context.Cause(sessions["b"]))
+	}
+	if workers := s.Workers(); len(workers) != 3 || workers[2].Host != "c" {
+		t.Fatalf("workers %+v", workers)
+	}
+}
+
+func TestAdmitChecksReloadedWorkers(t *testing.T) {
+	root := t.TempDir()
+	s := open(t, filepath.Join(root, "state"), []worker.Config{testWorker("a", "gone")}, nil)
+	defer func() { _ = s.Close() }()
+	if err := s.Reload(Config{Workers: []worker.Config{testWorker("a")}}); err != nil {
+		t.Fatal(err)
+	}
+	late := Job{ID: newID(), Out: filepath.Join(root, "late"), State: Queued, Steps: []Stage{{Spec: spec.Spec{Task: spec.Task{Tags: []string{"gone"}, Resources: spec.Resources{Cores: 1, MemoryMiB: 128}}}}}}
+	result := &BatchResult{}
+	s.admit([]Job{late}, []*BatchResult{result})
+	if !strings.Contains(result.Error, "tags") {
+		t.Fatalf("admitted a job the reloaded workers cannot run: %+v", result)
+	}
+}
+
+func TestRetiredSessionDoesNotDispatch(t *testing.T) {
+	cfg := testWorker("worker")
+	s := open(t, filepath.Join(t.TempDir(), "state"), []worker.Config{cfg}, nil)
+	defer func() { _ = s.Close() }()
+	id := submit(t, s, jobRequest(filepath.Join(t.TempDir(), "out")))
+	h := newFakeHost(s.id)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errReconfigured)
+	probe, err := h.Probe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pass(ctx, cfg, h, &probe, &steps{cancel: cancel}); !errors.Is(err, errReconfigured) {
+		t.Fatalf("pass ended with %v", err)
+	}
+	if j := mustJob(t, s, id); j.State != Queued || len(j.Attempts) != 0 {
+		t.Fatalf("a retired session dispatched %+v", j)
 	}
 }

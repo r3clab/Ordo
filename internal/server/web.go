@@ -60,8 +60,9 @@ func (s *Server) workerStatus(host string, info *WorkerInfo, err error) {
 func (s *Server) Workers() []WorkerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result := make([]WorkerStatus, 0, len(s.workers))
-	for _, cfg := range s.workers {
+	workers := s.settings.Load().workers
+	result := make([]WorkerStatus, 0, len(workers))
+	for _, cfg := range workers {
 		status := s.nodes[cfg.Host]
 		status.Host = cfg.Host
 		status.Tags = cfg.Tags
