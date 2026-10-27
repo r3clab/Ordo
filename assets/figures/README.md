@@ -9,11 +9,12 @@ The detailed [command reference](https://github.com/r3clab/Ordo/wiki/Command-map
 Start `ordo server` first; it reaches each configured worker over SSH and installs nothing there.
 Command labels identify actions, not complete invocations: required flags are omitted.
 
-1. **Submit:** on the controller, `ordo submit` sends JSONL jobs, each naming the `out` directory its results belong in, through the server's private Unix socket.
-2. **Schedule:** the server owns a durable queue, prepares pinned images and inputs, and dispatches eligible work over SSH when the jobs it takes inputs from have finished and resource requirements are satisfied.
-3. **Execute:** the server reserves the requested cores, GPUs, and memory budget on a worker, then starts the task there with `podman run` in rootless Podman.
-4. **Collect and verify:** after the container exits, the server streams its logs and outputs back over SSH and records them before marking success.
-5. **Deliver:** the server moves each finished job's outputs into its `out`, with Ordo's record and logs under `out/.ordo/`; `ordo submit --wait` waits for that and reports how each job ended.
+1. **Submit:** on the server host, `ordo submit` sends JSONL jobs, each naming the `out` directory its results belong in, through the server's private Unix socket.
+2. **Prepare and queue:** the server builds or pulls each pinned image, snapshots inputs by content digest, and records the jobs in its durable queue.
+3. **Dispatch:** once the jobs it takes inputs from have finished, the server reserves cores, GPUs, and memory on a worker carrying the job's tags, records the attempt, and uploads the image and inputs over SSH, each once per worker.
+4. **Run:** `podman run` starts the task in rootless Podman, limited to its reservation.
+5. **Collect:** after the container exits, the server streams its logs and outputs back over SSH, records the attempt, and removes the container; a job's next step returns to dispatch.
+6. **Deliver:** the server moves the job's outputs into its `out`, with Ordo's record and logs under `out/.ordo/`; `ordo submit --wait` reports how each job ended.
 
 Solid arrows show requests and dispatch; dashed gold arrows show returned results.
 
