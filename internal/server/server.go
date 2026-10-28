@@ -360,7 +360,7 @@ func (s *Server) configure(next *settings) error {
 	defer s.write.Unlock()
 	prev := s.settings.Load()
 	for _, j := range s.jobs {
-		if n := len(j.Attempts); n > 0 && j.live(n-1) {
+		if j.running() {
 			host := j.current().Worker
 			w, ok := next.worker(host)
 			if !ok {
@@ -433,10 +433,11 @@ func (c imageCache) Save(key string, e image.Entry) error { return c.store.Put("
 func (j *Job) current() *Attempt                          { return &j.Attempts[len(j.Attempts)-1] }
 func newID() string                                       { return strings.ToLower(rand.Text()) }
 
-// live reports whether attempt i may still run. A requeued job's last attempt is over: dispatch
-// replaces it in the same write that leaves the queued state. A delivering job's has been collected.
-func (j Job) live(i int) bool {
-	return i == len(j.Attempts)-1 && !j.State.Terminal() && j.State != Queued && j.State != Delivering
+// running reports whether the current attempt may still run. A requeued job's last attempt is over:
+// dispatch replaces it in the same write that leaves the queued state. A delivering job's has been
+// collected.
+func (j Job) running() bool {
+	return len(j.Attempts) > 0 && !j.State.Terminal() && j.State != Queued && j.State != Delivering
 }
 
 func (j Job) clone() Job {
@@ -806,19 +807,23 @@ func (s *Server) delivered(out string) (bool, error) {
 	return len(names) > 0, err
 }
 
-// waiting names, sorted, the inputs that lie in an unfinished job's Out or in one of outs, the earlier
-// lines of a batch: they are snapshotted once that job delivers, not now.
-func (s *Server) waiting(r Request, outs []string) []string {
+// waiting names, sorted, the inputs that lie in an unfinished job's Out or in one of earlier, the Outs
+// of a batch's earlier lines: they are snapshotted once that job delivers, not now. Validate keeps
+// inputs and Outs clean and absolute, so an input lies in an Out exactly when one of its ancestors is
+// that Out.
+func (s *Server) waiting(r Request, earlier map[string]bool) []string {
 	if len(r.Inputs) == 0 {
 		return nil
 	}
 	s.mu.Lock()
-	outs = slices.Concat(outs, slices.Collect(maps.Keys(s.outs)))
-	s.mu.Unlock()
+	defer s.mu.Unlock()
 	var waiting []string
 	for name, source := range r.Inputs {
-		if slices.ContainsFunc(outs, func(out string) bool { return within(source, out) }) {
-			waiting = append(waiting, name)
+		for dir := source; dir != "/"; dir = filepath.Dir(dir) {
+			if _, unfinished := s.outs[dir]; unfinished || earlier[dir] {
+				waiting = append(waiting, name)
+				break
+			}
 		}
 	}
 	slices.Sort(waiting)

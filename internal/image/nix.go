@@ -52,8 +52,7 @@ func (t Tools) run(ctx context.Context, name string, args ...string) ([]byte, er
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
+		if _, ok := errors.AsType[*exec.ExitError](err); ok {
 			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 		}
 		return nil, fmt.Errorf("%s: %w", filepath.Base(name), err)

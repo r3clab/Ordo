@@ -134,12 +134,13 @@ func (s *Server) finish(j Job, class Failure) error {
 	case exhausted:
 		j.State = Failed
 	default:
-		j.State, j.ReadyAt, j.Avoid = Queued, time.Now().UTC().Add(backoff(count)), at.Worker
+		j.requeue(backoff(count), at.Worker)
 	}
-	if err := s.save(j); err != nil {
-		return err
-	}
-	return nil
+	return s.save(j)
+}
+
+func (j *Job) requeue(delay time.Duration, avoid string) {
+	j.State, j.ReadyAt, j.Avoid = Queued, time.Now().UTC().Add(delay), avoid
 }
 
 // prune drops a finished job's output archives; Out holds what is kept of them.

@@ -56,12 +56,11 @@ func sections(text string) map[string]string {
 }
 
 func parseProbe(s map[string]string, cpus []int, memoryMiB int64) (Probe, error) {
-	h := pool.Hardware{Hostname: s["hostname"], MachineID: s["machine"], CPUModel: s["cpu"], MemoryMiB: memoryMiB}
-	p := Probe{BootID: s["boot"], Hardware: h}
-	if h.MachineID == "" || p.BootID == "" {
+	p := Probe{BootID: s["boot"], Hardware: pool.Hardware{Hostname: s["hostname"], MachineID: s["machine"], CPUModel: s["cpu"], MemoryMiB: memoryMiB}}
+	if p.Hardware.MachineID == "" || p.BootID == "" {
 		return p, errors.New("worker machine or boot ID is empty")
 	}
-	if _, model, ok := strings.Cut(h.CPUModel, ":"); ok {
+	if _, model, ok := strings.Cut(p.Hardware.CPUModel, ":"); ok {
 		p.Hardware.CPUModel = strings.TrimSpace(model)
 	}
 	p.Hardware.Arch = s["arch"]

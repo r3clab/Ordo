@@ -70,7 +70,7 @@ func (s *Server) collect(ctx context.Context, j Job, v *view) error {
 	if at.StopRequested == "" && j.spec().TimedOut(result.StartedAt, result.FinishedAt) {
 		at.StopRequested = Timeout
 	}
-	dest := filepath.Join(s.root, "results", j.ID, at.ID)
+	dest := filepath.Join(s.resultsDir(j.ID), at.ID)
 	if _, err := os.Stat(dest); errors.Is(err, os.ErrNotExist) {
 		record := Record{Job: j.ID, Out: j.Out, Step: j.Step, Attempt: at.ID, Worker: at.Worker, MachineID: at.MachineID, ContainerID: at.ContainerID, Spec: j.spec(), Allocation: at.Allocation, StopRequested: at.StopRequested, StopReason: at.StopReason, Result: result}
 		err := s.receive(ctx, v.host, &record, dest)

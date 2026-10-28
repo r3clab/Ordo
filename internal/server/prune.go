@@ -66,6 +66,14 @@ func (s *Server) pruneBlobs(now time.Time) error {
 // expire forgets finished jobs older than retention, except those an unfinished job takes inputs from,
 // as it reads their state.
 func (s *Server) expire(now time.Time) error {
+	old, err := s.forgetOld(now)
+	for _, id := range old {
+		err = cmp.Or(err, os.RemoveAll(s.resultsDir(id)))
+	}
+	return err
+}
+
+func (s *Server) forgetOld(now time.Time) ([]string, error) {
 	s.write.Lock()
 	defer s.write.Unlock()
 	s.mu.Lock()
@@ -83,7 +91,7 @@ func (s *Server) expire(now time.Time) error {
 	}
 	s.mu.Unlock()
 	if len(old) == 0 {
-		return nil
+		return nil, nil
 	}
 	err := s.store.Update(func(tx *state.Tx) error {
 		for _, id := range old {
@@ -94,15 +102,14 @@ func (s *Server) expire(now time.Time) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.mu.Lock()
 	for _, id := range old {
 		delete(s.records, id)
 	}
 	s.mu.Unlock()
-	for _, id := range old {
-		err = cmp.Or(err, os.RemoveAll(filepath.Join(s.root, "results", id)))
-	}
-	return err
+	return old, nil
 }
+
+func (s *Server) resultsDir(id string) string { return filepath.Join(s.root, "results", id) }

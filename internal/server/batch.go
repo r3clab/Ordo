@@ -27,8 +27,6 @@ type BatchEntry struct {
 	Line    int
 	Request Request
 	Err     error
-	done    bool
-	waiting []string
 }
 
 // BatchResult reports one line: the job it queued or found, or Done when Out already holds results.
@@ -67,10 +65,17 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 	return func(yield func(BatchResult) bool) {
 		s.staging.RLock()
 		defer s.staging.RUnlock()
+		type line struct {
+			BatchEntry
+			done    bool
+			waiting []string
+		}
+		lines := make([]line, len(entries))
 		var requests []Request
-		var outs []string
-		for i := range entries {
-			e := &entries[i]
+		outs := map[string]bool{}
+		for i := range lines {
+			e := &lines[i]
+			e.BatchEntry = entries[i]
 			if e.Err == nil {
 				e.Err = s.check(e.Request)
 			}
@@ -85,11 +90,11 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 					delete(staged.Inputs, name)
 				}
 				requests = append(requests, staged)
-				outs = append(outs, e.Request.Out)
+				outs[e.Request.Out] = true
 			}
 		}
 		st := s.stage(ctx, requests...)
-		for chunk := range slices.Chunk(entries, batchChunk) {
+		for chunk := range slices.Chunk(lines, batchChunk) {
 			results := make([]BatchResult, len(chunk))
 			var jobs []Job
 			var slots []*BatchResult

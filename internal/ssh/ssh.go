@@ -63,7 +63,6 @@ type Master struct {
 	host   string
 	config string
 	socket string
-	dir    string
 	input  *os.File
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -88,7 +87,7 @@ func Dial(ctx context.Context, alias, config string) (*Master, error) {
 	}
 	defer func() { _ = reader.Close() }()
 	child, cancel := context.WithCancel(ctx)
-	m := &Master{host: alias, config: config, socket: filepath.Join(dir, "master"), dir: dir, input: writer, cancel: cancel, done: make(chan struct{})}
+	m := &Master{host: alias, config: config, socket: filepath.Join(dir, "master"), input: writer, cancel: cancel, done: make(chan struct{})}
 	// Forwarded sockets are mode 0600, so only the worker user's containers can connect to a service.
 	cmd := client(child, config, "-M", "-S", m.socket, "-T", "-oBatchMode=yes", "-oControlPersist=no", "-oExitOnForwardFailure=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", alias, "exec cat >/dev/null")
 	cmd.Stdin = reader
@@ -161,8 +160,7 @@ func (m *Master) Run(ctx context.Context, script string, stdin io.Reader, stdout
 	}
 	// ssh exits 255 for its own failures, and a signal (status -1) ends ssh, not the remote command;
 	// any other status is the remote command's.
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() > 0 && exit.ExitCode() != 255 {
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok && exit.ExitCode() > 0 && exit.ExitCode() != 255 {
 		return &ExitError{Code: exit.ExitCode(), Stderr: strings.TrimSpace(tail.String())}
 	}
 	return transport(m.host, "%v: %s", err, strings.TrimSpace(tail.String()))
@@ -196,7 +194,7 @@ func (m *Master) Close() error {
 		_ = m.input.Close()
 		m.cancel()
 		<-m.done
-		_ = os.RemoveAll(m.dir)
+		_ = os.RemoveAll(filepath.Dir(m.socket))
 	})
 	return nil
 }

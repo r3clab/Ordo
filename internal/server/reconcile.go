@@ -261,11 +261,7 @@ func (s *Server) held(host string, containers map[string]podman.Container) ([]po
 	s.mu.Lock()
 	var held []pool.Allocation
 	for _, j := range s.jobs {
-		for i, at := range j.Attempts {
-			if _, present := containers[at.ID]; at.Worker == host && (j.live(i) || present) {
-				held = append(held, at.Allocation)
-			}
-		}
+		held = append(held, j.heldOn(host, containers)...)
 	}
 	finished := map[string]bool{}
 	for attempt := range containers {
@@ -281,13 +277,19 @@ func (s *Server) held(host string, containers map[string]podman.Container) ([]po
 		if err != nil {
 			return nil, err
 		}
-		for _, at := range j.Attempts {
-			if _, present := containers[at.ID]; present && at.Worker == host {
-				held = append(held, at.Allocation)
-			}
-		}
+		held = append(held, j.heldOn(host, containers)...)
 	}
 	return held, nil
+}
+
+func (j Job) heldOn(host string, containers map[string]podman.Container) []pool.Allocation {
+	var held []pool.Allocation
+	for i, at := range j.Attempts {
+		if _, present := containers[at.ID]; at.Worker == host && (present || i == len(j.Attempts)-1 && j.running()) {
+			held = append(held, at.Allocation)
+		}
+	}
+	return held
 }
 
 func (s *Server) note(id string, err error) {
@@ -508,7 +510,7 @@ func (s *Server) launch(ctx context.Context, j Job, v *view) error {
 		// Nothing ran yet, so the job goes back to the queue, where another worker may take it.
 		_ = v.host.Remove(ctx, at.ID)
 		j.Attempts = j.Attempts[:len(j.Attempts)-1]
-		j.State, j.ReadyAt, j.Avoid = Queued, time.Now().UTC().Add(retryDelay), v.cfg.Host
+		j.requeue(retryDelay, v.cfg.Host)
 		j.Error = err.Error()
 		return s.save(j)
 	}
@@ -567,7 +569,7 @@ func (s *Server) sweep(ctx context.Context, v *view) error {
 		if !ok || s.busy[id] || slices.Contains(done, attempt) {
 			continue
 		}
-		if j, unfinished := s.jobs[id]; unfinished && (j.current().ID == attempt && j.live(len(j.Attempts)-1) || j.kept() == attempt) {
+		if j, unfinished := s.jobs[id]; unfinished && (j.current().ID == attempt && j.running() || j.kept() == attempt) {
 			continue
 		}
 		done = append(done, attempt)

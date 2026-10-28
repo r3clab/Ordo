@@ -71,6 +71,12 @@ func (h *Host) ensure(key string, put func() error) error {
 	return nil
 }
 
+func (h *Host) forget() {
+	h.mu.Lock()
+	clear(h.present)
+	h.mu.Unlock()
+}
+
 func Dial(ctx context.Context, c Config, services map[string]string, sshConfig string) (*ssh.Master, error) {
 	m, err := ssh.Dial(ctx, c.Host, sshConfig)
 	if err != nil {
@@ -127,7 +133,7 @@ func (h *Host) output(ctx context.Context, script string, stdin io.Reader) ([]by
 // absent runs an existence probe, whose exit status 1 means absence.
 func (h *Host) absent(ctx context.Context, script string) (bool, error) {
 	err := h.run.Run(ctx, script, nil, nil, nil)
-	if exit := (*ssh.ExitError)(nil); errors.As(err, &exit) && exit.Code == 1 {
+	if exit, ok := errors.AsType[*ssh.ExitError](err); ok && exit.Code == 1 {
 		return true, nil
 	}
 	return false, err
@@ -218,7 +224,7 @@ func (h *Host) Seed(ctx context.Context, attempt, prev, archive string) error {
 	script := "set -eu; umask 077; test -d " + outputs + " && exit 0; mkdir -p -- " + ssh.Quote(run) + "; " +
 		"if test -d " + kept + "; then mv -T -- " + kept + " " + outputs + "; rm -rf -- " + ssh.Quote(h.runDir(prev)) + "; exit 0; fi; exit 3"
 	err := h.run.Run(ctx, script, nil, nil, nil)
-	if exit := (*ssh.ExitError)(nil); !errors.As(err, &exit) || exit.Code != 3 {
+	if exit, ok := errors.AsType[*ssh.ExitError](err); !ok || exit.Code != 3 {
 		return err
 	}
 	f, err := os.Open(archive)
@@ -286,9 +292,7 @@ func (h *Host) Launch(ctx context.Context, l Launch) (string, error) {
 	script, stdin := launchScript(h.Config, l, h.server)
 	data, err := h.output(ctx, script, stdin)
 	if err != nil {
-		h.mu.Lock()
-		clear(h.present)
-		h.mu.Unlock()
+		h.forget()
 		return "", err
 	}
 	id := strings.TrimSpace(string(data))
@@ -366,9 +370,7 @@ func (h *Host) Prune(ctx context.Context, keep []string, idle time.Duration) err
 		"if pm image rm -- \"$i\" >/dev/null 2>&1 || ! pm image exists -- \"$i\"; then rm -f -- " + images + "/\"$i\"; fi; done; " +
 		"find " + trees + " -mindepth 1 -maxdepth 1 -type d -mmin " + age + " ! -name '.*' -printf '%f\\n' | while IFS= read -r d; do grep -qxF -- \"$d\" \"$k\" || rm -rf -- " + trees + "/\"$d\"; done"
 	err := h.run.Run(ctx, script, strings.NewReader(strings.Join(keep, "\n")+"\n"), nil, nil)
-	h.mu.Lock()
-	clear(h.present)
-	h.mu.Unlock()
+	h.forget()
 	return err
 }
 
