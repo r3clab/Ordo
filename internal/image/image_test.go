@@ -145,6 +145,43 @@ func TestResolverPullsRegistryImagesOnceByReference(t *testing.T) {
 	if pull := fake.Argv("skopeo"); fake.Pulls.Load() != 1 || fake.Builds.Load() != 0 || !slices.Equal(pull[:3], []string{"--insecure-policy", "copy", string(src)}) {
 		t.Fatalf("pulls=%d builds=%d argv %q", fake.Pulls.Load(), fake.Builds.Load(), pull)
 	}
+	entry, ok, err := r.Cache.Load(string(src))
+	if err != nil || !ok {
+		t.Fatalf("missing registry cache entry: %v", err)
+	}
+	if err := os.Remove(filepath.Join(r.Blobs, entry.Blob)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Resolve(context.Background(), src); err != nil || fake.Pulls.Load() != 2 {
+		t.Fatalf("a lost registry blob must be pulled again: %v, pulls=%d", err, fake.Pulls.Load())
+	}
+}
+
+func TestCachedRegistryImageBypassesBuildSlots(t *testing.T) {
+	fake := fakeNix()
+	r := newResolver(t, fake)
+	src := Source("docker://ghcr.io/org/eval@sha256:" + strings.Repeat("0", 64))
+	first, err := r.Resolve(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range builds {
+		r.builds <- struct{}{}
+	}
+	defer func() {
+		for range builds {
+			<-r.builds
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	got, err := r.Resolve(ctx, src)
+	if err != nil || got.Entry != first.Entry || got.Origin == nil || *got.Origin != *first.Origin {
+		t.Fatalf("cached image waited for a build slot: %+v, %v", got, err)
+	}
+	if fake.Pulls.Load() != 1 || fake.Builds.Load() != 0 {
+		t.Fatalf("cache hit ran tools: pulls=%d, builds=%d", fake.Pulls.Load(), fake.Builds.Load())
+	}
 }
 
 func TestResolverSharesBuildsAndBoundsThem(t *testing.T) {

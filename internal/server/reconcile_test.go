@@ -4,11 +4,84 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/r3clab/Ordo/internal/pool"
 	"github.com/r3clab/Ordo/internal/worker"
 )
+
+func TestPassLeavesOtherWorkersActiveJobsAlone(t *testing.T) {
+	for _, state := range []State{Dispatching, Running, Collecting, Queued, Blocked, Delivering} {
+		t.Run(string(state), func(t *testing.T) {
+			f := newFixture(t)
+			id := f.submit(t, jobRequest(f.out("job")))
+			f.tick(t)
+			if state == Delivering {
+				running := f.job(t, id)
+				f.h.exit(running.current().ID, 0)
+				f.tick(t)
+			}
+			j := f.job(t, id)
+			j.State = state
+			j.CancelRequested = state == Blocked
+			if state == Queued {
+				f.h.exit(j.current().ID, 1)
+				j.current().Failure = InfrastructureFailure
+			}
+			seed(t, f.s, j)
+			other := testWorker("other")
+			h := newFakeHost(f.s.id)
+			mustTick(t, f.s, other, h)
+			got := f.job(t, id)
+			switch state {
+			case Dispatching, Running, Collecting:
+				if !reflect.DeepEqual(got, j) {
+					t.Fatalf("another worker changed an active job: %+v", got)
+				}
+			case Queued:
+				if got.State != Running || len(got.Attempts) != 2 || got.current().Worker != other.Host || len(h.launches) != 1 {
+					t.Fatalf("previous worker prevented retry placement: %+v", got)
+				}
+			case Blocked:
+				if got.State != Cancelled {
+					t.Fatalf("another worker must still process blocked cancellation: %+v", got)
+				}
+			case Delivering:
+				if got.State != Succeeded || readOut(t, got.Out, "score") != j.current().ID {
+					t.Fatalf("another worker must still deliver collected results: %+v", got)
+				}
+			}
+			if state != Queued && len(h.launches) != 0 || h.collects != 0 || len(h.stops) != 0 {
+				t.Fatal("another worker operated on the attempt")
+			}
+		})
+	}
+}
+
+func BenchmarkPassOtherWorkersJobs(b *testing.B) {
+	s := &Server{jobs: map[string]Job{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}}
+	for i := range 1000 {
+		id := strconv.Itoa(i)
+		s.jobs[id] = Job{ID: id, State: Running, CreatedAt: time.Unix(int64(i), 0), Attempts: []Attempt{{Worker: "other"}}}
+	}
+	cfg := testWorker("worker")
+	h := newFakeHost(s.id)
+	ctx := context.Background()
+	probe, err := h.Probe(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	bg := &steps{}
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := s.pass(ctx, cfg, h, &probe, bg); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
 
 type gpuHost struct {
 	*fakeHost

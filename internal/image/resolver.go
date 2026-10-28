@@ -54,6 +54,13 @@ func (r *Resolver) Close() {
 func (r *Resolver) Resolve(ctx context.Context, src Source) (Resolved, error) {
 	// A build outlives the request that started it, so a retry after a disconnect finds it cached.
 	return r.flight.do(ctx, string(src), func() (Resolved, error) {
+		// Registry references are immutable cache keys; nix installables must be built first.
+		if src.Registry() {
+			e, ok, err := r.cached(string(src))
+			if err != nil || ok {
+				return Resolved{Entry: e, Origin: &Origin{Reference: string(src)}}, err
+			}
+		}
 		select {
 		case r.builds <- struct{}{}:
 		case <-r.ctx.Done():
@@ -66,7 +73,6 @@ func (r *Resolver) Resolve(ctx context.Context, src Source) (Resolved, error) {
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
 		if src.Registry() {
-			// The reference's digest makes it immutable, so it is its own cache key.
 			return r.archive(string(src), string(src), &Origin{Reference: string(src)}, dir)
 		}
 		// The out-link is a GC root that keeps the output alive until skopeo has read it.
@@ -78,10 +84,15 @@ func (r *Resolver) Resolve(ctx context.Context, src Source) (Resolved, error) {
 	})
 }
 
+func (r *Resolver) cached(key string) (Entry, bool, error) {
+	e, ok, err := r.Cache.Load(key)
+	return e, err == nil && ok && content.Reuse(r.Blobs, e.Blob), err
+}
+
 // archive stores the OCI archive of src, unless the cache already holds key's.
 func (r *Resolver) archive(key, src string, origin *Origin, dir string) (Resolved, error) {
-	e, ok, err := r.Cache.Load(key)
-	if err != nil || (ok && content.Reuse(r.Blobs, e.Blob)) {
+	e, ok, err := r.cached(key)
+	if err != nil || ok {
 		return Resolved{Entry: e, Origin: origin}, err
 	}
 	file := filepath.Join(dir, "image.tar")

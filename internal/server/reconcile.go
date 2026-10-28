@@ -235,6 +235,11 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 		s.mu.Lock()
 		j, unfinished := s.jobs[id]
 		available := unfinished && !s.busy[id] && s.fault == nil
+		// Queued, blocked and delivering jobs can still make progress on any worker.
+		switch j.State {
+		case Dispatching, Running, Collecting:
+			available = available && j.current().Worker == cfg.Host
+		}
 		if available {
 			s.busy[id] = true
 		}
