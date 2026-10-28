@@ -139,9 +139,6 @@ func (s *Server) finish(j Job, class Failure) error {
 	if err := s.save(j); err != nil {
 		return err
 	}
-	if j.State.Terminal() {
-		prune(j)
-	}
 	return nil
 }
 

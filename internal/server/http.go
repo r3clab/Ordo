@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,25 @@ func WriteJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(append(data, '\n'))
+}
+
+func (s *Server) serveJobs(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	f := Filter{IDs: query["id"], Outs: query["out"], Under: query["under"]}
+	for _, state := range query["state"] {
+		f.States = append(f.States, State(state))
+	}
+	data, err := json.Marshal(s.List(f))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data = append(data, '\n')
+	// Hash the response so filters and transient pending reasons need no separate invalidation.
+	w.Header().Set("ETag", fmt.Sprintf(`"%x"`, sha256.Sum256(data)))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
 }
 
 type StopRequest struct {

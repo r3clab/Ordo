@@ -42,16 +42,10 @@ func Put(dir string, r io.Reader) (string, error) {
 	if err != nil || Reuse(dir, id) {
 		return id, err
 	}
-	if err := f.Sync(); err != nil {
+	if err := publish(f, filepath.Join(dir, id)); err != nil {
 		return "", err
 	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(f.Name(), filepath.Join(dir, id)); err != nil {
-		return "", err
-	}
-	return id, SyncDir(dir)
+	return id, nil
 }
 
 func digest(r io.Reader) (string, error) {
@@ -147,6 +141,10 @@ func WriteAtomic(path string, write func(io.Writer) error) error {
 	if err := write(f); err != nil {
 		return err
 	}
+	return publish(f, path)
+}
+
+func publish(f *os.File, path string) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
@@ -156,7 +154,7 @@ func WriteAtomic(path string, write func(io.Writer) error) error {
 	if err := os.Rename(f.Name(), path); err != nil {
 		return err
 	}
-	return SyncDir(dir)
+	return SyncDir(filepath.Dir(path))
 }
 
 // Archive publishes only a complete, synced tar that keeps modification times. Only directories and

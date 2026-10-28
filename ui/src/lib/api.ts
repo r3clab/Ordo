@@ -120,9 +120,9 @@ export interface WorkerStatus {
   tags?: string[];
 }
 
-export async function request(path: string, method = "GET"): Promise<Response> {
-  const response = await fetch(`/v1/${path}`, { method, credentials: "omit" });
-  if (!response.ok) {
+export async function request(path: string, method = "GET", headers?: HeadersInit): Promise<Response> {
+  const response = await fetch(`/v1/${path}`, { method, headers, credentials: "omit" });
+  if (!response.ok && response.status !== 304) {
     throw new Error((await response.text()).trim() || response.statusText);
   }
   return response;

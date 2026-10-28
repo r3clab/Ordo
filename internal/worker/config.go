@@ -67,9 +67,14 @@ func (c Config) Carries(tags []string) bool {
 	return true
 }
 
+// cpus trusts that Validate accepted CPUs.
+func (c Config) cpus() []int {
+	cpus, _ := spec.ParseCPUs(c.CPUs)
+	return cpus
+}
+
 func (c Config) Fits(r spec.Resources) bool {
-	cpus, err := spec.ParseCPUs(c.CPUs)
-	return err == nil && len(cpus) >= r.Cores && c.MemoryMiB >= r.MemoryMiB && len(c.GPUs) >= r.GPUs
+	return len(c.cpus()) >= r.Cores && c.MemoryMiB >= r.MemoryMiB && len(c.GPUs) >= r.GPUs
 }
 
 func (c Config) runDir(attempt string) string { return path.Join(c.StateDir, "runs", attempt) }
@@ -108,11 +113,7 @@ func (c Config) ServiceForward(name, address string) (string, error) {
 
 // CheckLaunch also counts imported, the inputs a job takes from other jobs' outputs at dispatch.
 func (c Config) CheckLaunch(s spec.Spec, imported []string) error {
-	cpus, err := spec.ParseCPUs(c.CPUs)
-	if err != nil {
-		return err
-	}
-	worst := pool.Allocation{CPUs: cpus, MemoryMiB: s.Resources.MemoryMiB}
+	worst := pool.Allocation{CPUs: c.cpus(), MemoryMiB: s.Resources.MemoryMiB}
 	for range s.Resources.GPUs {
 		worst.GPUs = append(worst.GPUs, "GPU-"+strings.Repeat("0", 36))
 	}

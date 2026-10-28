@@ -4,8 +4,10 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/r3clab/Ordo/internal/content"
@@ -29,12 +31,11 @@ func (s *Server) inUse() []string {
 	for _, j := range s.jobs {
 		for _, stage := range j.Steps {
 			keep = append(keep, stage.Spec.Image, stage.Archive)
-			for _, digest := range stage.Spec.Inputs {
-				keep = append(keep, digest)
-			}
+			keep = slices.AppendSeq(keep, maps.Values(stage.Spec.Inputs))
 		}
 	}
-	return keep
+	slices.Sort(keep)
+	return slices.Compact(keep)
 }
 
 func (s *Server) tidy(ctx context.Context) {

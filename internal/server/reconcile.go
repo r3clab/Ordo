@@ -44,9 +44,8 @@ type view struct {
 	now        time.Time
 	containers map[string]podman.Container
 	runs       []string
-	held       []pool.Allocation
+	planner    *pool.Planner
 	fault      string
-	gpusBusy   []string
 	gpusPolled bool
 	step       func() error
 }
@@ -86,15 +85,18 @@ func (s *Server) free(ctx context.Context, id string, err error) error {
 }
 
 // busyGPUs samples once per pass: each sample is an SSH round trip and about a second of nvidia-smi.
-func (v *view) busyGPUs(ctx context.Context) ([]string, error) {
+func (v *view) busyGPUs(ctx context.Context) error {
 	if !v.gpusPolled {
 		busy, err := v.host.GPUBusy(ctx, v.probe.Hardware.GPUs)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		v.gpusBusy, v.gpusPolled = busy, true
+		if err := v.planner.Reserve(pool.Allocation{GPUs: busy}); err != nil {
+			return err
+		}
+		v.gpusPolled = true
 	}
-	return v.gpusBusy, nil
+	return nil
 }
 
 var errReconfigured = errors.New("worker reconfigured")
@@ -221,10 +223,14 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 	if len(foreign) > 0 {
 		v.fault = "worker runs Ordo containers of another server (" + strings.Join(foreign, ", ") + "); one server must own each worker account"
 	}
-	if v.held, err = s.held(cfg.Host, v.containers); err != nil {
+	held, err := s.held(cfg.Host, v.containers)
+	if err != nil {
 		return err
 	}
-	s.workerStatus(cfg.Host, &WorkerInfo{BootID: v.boot, Hardware: v.probe.Hardware, Held: v.held, Error: v.fault}, nil)
+	if v.planner, err = pool.New(v.probe.Hardware, held); err != nil {
+		return err
+	}
+	s.workerStatus(cfg.Host, &WorkerInfo{BootID: v.boot, Hardware: v.probe.Hardware, Held: held, Error: v.fault}, nil)
 	for _, id := range s.unfinished() {
 		s.mu.Lock()
 		j, unfinished := s.jobs[id]
@@ -424,8 +430,7 @@ func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	v.held = append(v.held, allocation)
-	return true, nil
+	return true, v.planner.Reserve(allocation)
 }
 
 // place allocates j on v's worker, or says why the worker cannot take it now.
@@ -442,15 +447,13 @@ func (s *Server) place(ctx context.Context, j Job, v *view) (pool.Allocation, st
 		return pool.Allocation{}, prev.Worker + " keeps the previous step's outputs and has it until " + j.ReadyAt.Add(stepAffinity).Format(time.RFC3339), nil
 	}
 	resources := j.spec().Resources
-	hw := v.probe.Hardware
-	allocation, err := pool.Plan(hw, resources, v.held)
+	allocation, err := v.planner.Plan(resources)
 	if err == nil && resources.GPUs > 0 {
 		// A device busy outside Ordo would break the exclusive allocation the job asks for.
-		var busy []string
-		if busy, err = v.busyGPUs(ctx); err != nil {
+		if err := v.busyGPUs(ctx); err != nil {
 			return pool.Allocation{}, "", err
 		}
-		allocation, err = pool.Plan(hw, resources, append(slices.Clone(v.held), pool.Allocation{GPUs: busy}))
+		allocation, err = v.planner.Plan(resources)
 	}
 	if errors.Is(err, pool.ErrCapacity) {
 		return pool.Allocation{}, err.Error(), nil

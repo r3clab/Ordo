@@ -255,10 +255,7 @@ func launchScript(c Config, l Launch, server string) (string, io.Reader) {
 	for _, name := range l.Spec.Services {
 		r.Services[name] = c.serviceDir(name)
 	}
-	used := []string{c.imageMark(l.Spec.Image)}
-	for _, tree := range r.Inputs {
-		used = append(used, tree)
-	}
+	used := slices.AppendSeq([]string{c.imageMark(l.Spec.Image)}, maps.Values(r.Inputs))
 	// A task running as a non-root image user gets a subordinate UID, which must still write its outputs.
 	script := prelude() + "touch -c -- " + quoteAll(used) + "; mkdir -p -- " + ssh.Quote(r.Outputs) + "; chmod 777 -- " + ssh.Quote(r.Outputs) + "; "
 	var stdin io.Reader

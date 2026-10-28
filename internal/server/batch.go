@@ -28,7 +28,7 @@ type BatchEntry struct {
 	Request Request
 	Err     error
 	done    bool
-	waiting map[string]string
+	waiting []string
 }
 
 // BatchResult reports one line: the job it queued or found, or Done when Out already holds results.
@@ -81,7 +81,7 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 				e.waiting = s.waiting(e.Request, outs)
 				staged := e.Request
 				staged.Inputs = maps.Clone(staged.Inputs)
-				for name := range e.waiting {
+				for _, name := range e.waiting {
 					delete(staged.Inputs, name)
 				}
 				requests = append(requests, staged)

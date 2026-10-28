@@ -33,43 +33,62 @@ type Allocation struct {
 	GPUs      []string `json:"gpus,omitempty"`
 }
 
-func Plan(h Hardware, req spec.Resources, held []Allocation) (Allocation, error) {
-	used := map[int]bool{}
-	gpuUsed := map[string]bool{}
-	remaining := h.MemoryMiB
+// Planner accounts for reservations within one scheduling pass.
+// Plan only proposes an allocation; Reserve claims it after the caller commits it.
+type Planner struct {
+	hardware  Hardware
+	used      map[int]bool
+	gpuUsed   map[string]bool
+	remaining int64
+}
+
+func New(h Hardware, held []Allocation) (*Planner, error) {
+	p := &Planner{hardware: h, used: map[int]bool{}, gpuUsed: map[string]bool{}, remaining: h.MemoryMiB}
 	for _, a := range held {
-		if a.MemoryMiB < 0 {
-			return Allocation{}, errors.New("negative memory reservation")
-		}
-		remaining -= a.MemoryMiB
-		for _, id := range a.GPUs {
-			gpuUsed[id] = true
-		}
-		for _, cpu := range a.CPUs {
-			used[cpu] = true
+		if err := p.Reserve(a); err != nil {
+			return nil, err
 		}
 	}
+	return p, nil
+}
+
+// Reserve also accepts GPU-only reservations for devices busy outside Ordo.
+func (p *Planner) Reserve(a Allocation) error {
+	if a.MemoryMiB < 0 {
+		return errors.New("negative memory reservation")
+	}
+	p.remaining -= a.MemoryMiB
+	for _, id := range a.GPUs {
+		p.gpuUsed[id] = true
+	}
+	for _, cpu := range a.CPUs {
+		p.used[cpu] = true
+	}
+	return nil
+}
+
+func (p *Planner) Plan(req spec.Resources) (Allocation, error) {
 	// A reload can shrink the budget below what running jobs hold.
-	if req.MemoryMiB > remaining {
+	if req.MemoryMiB > p.remaining {
 		return Allocation{}, fmt.Errorf("%w memory", ErrCapacity)
 	}
 	a := Allocation{MemoryMiB: req.MemoryMiB}
-	for _, cpu := range h.CPUs {
+	for _, cpu := range p.hardware.CPUs {
 		if len(a.CPUs) == req.Cores {
 			break
 		}
-		if !used[cpu] {
+		if !p.used[cpu] {
 			a.CPUs = append(a.CPUs, cpu)
 		}
 	}
 	if len(a.CPUs) != req.Cores {
 		return Allocation{}, fmt.Errorf("%w cores", ErrCapacity)
 	}
-	for _, gpu := range h.GPUs {
+	for _, gpu := range p.hardware.GPUs {
 		if len(a.GPUs) == req.GPUs {
 			break
 		}
-		if !gpuUsed[gpu.UUID] {
+		if !p.gpuUsed[gpu.UUID] {
 			a.GPUs = append(a.GPUs, gpu.UUID)
 		}
 	}

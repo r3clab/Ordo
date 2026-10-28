@@ -461,7 +461,8 @@ func (s *Server) job(id string) (Job, bool, error) {
 
 // within reports whether file is dir or lies under it; both are clean absolute paths.
 func within(file, dir string) bool {
-	return file == dir || strings.HasPrefix(file, strings.TrimSuffix(dir, "/")+"/")
+	parent := strings.TrimSuffix(dir, "/")
+	return file == dir || len(file) > len(parent) && file[len(parent)] == '/' && strings.HasPrefix(file, parent)
 }
 
 // Filter keeps the jobs that match every field it sets, and any value within one.
@@ -499,7 +500,9 @@ func (s *Server) List(f Filter) []Summary {
 		}
 	}
 	s.mu.Unlock()
-	slices.SortFunc(jobs, func(a, b Summary) int { return a.CreatedAt.Compare(b.CreatedAt) })
+	slices.SortFunc(jobs, func(a, b Summary) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
+	})
 	return jobs
 }
 
@@ -580,6 +583,13 @@ func (s *Server) commit(jobs ...Job) error {
 		}
 		return nil
 	})
+	if err == nil {
+		for _, j := range jobs {
+			if j.State.Terminal() {
+				prune(j)
+			}
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err != nil {
@@ -632,9 +642,7 @@ func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
 		for _, step := range r.steps() {
 			images = append(images, step.Image)
 		}
-		for _, source := range r.Inputs {
-			inputs = append(inputs, source)
-		}
+		inputs = slices.AppendSeq(inputs, maps.Values(r.Inputs))
 	}
 	st := &staging{}
 	var wg sync.WaitGroup
@@ -798,35 +806,33 @@ func (s *Server) delivered(out string) (bool, error) {
 	return len(names) > 0, err
 }
 
-// waiting finds the inputs that lie in an unfinished job's Out or in one of outs, the earlier lines of
-// a batch: they are snapshotted once that job delivers, not now.
-func (s *Server) waiting(r Request, outs []string) map[string]string {
+// waiting names, sorted, the inputs that lie in an unfinished job's Out or in one of outs, the earlier
+// lines of a batch: they are snapshotted once that job delivers, not now.
+func (s *Server) waiting(r Request, outs []string) []string {
 	if len(r.Inputs) == 0 {
 		return nil
 	}
 	s.mu.Lock()
 	outs = slices.Concat(outs, slices.Collect(maps.Keys(s.outs)))
 	s.mu.Unlock()
-	var waiting map[string]string
+	var waiting []string
 	for name, source := range r.Inputs {
 		if slices.ContainsFunc(outs, func(out string) bool { return within(source, out) }) {
-			if waiting == nil {
-				waiting = map[string]string{}
-			}
-			waiting[name] = source
+			waiting = append(waiting, name)
 		}
 	}
+	slices.Sort(waiting)
 	return waiting
 }
 
 // prepare takes a request that passed check and was staged without the inputs that wait for other
 // jobs.
-func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job, error) {
+func (s *Server) prepare(r Request, waiting []string, st *staging) (Job, error) {
 	var inputs map[string]string
 	if len(r.Inputs) > len(waiting) {
 		inputs = map[string]string{}
 		for name, source := range r.Inputs {
-			if _, ok := waiting[name]; ok {
+			if slices.Contains(waiting, name) {
 				continue
 			}
 			input := st.inputs[source]
@@ -836,7 +842,7 @@ func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job
 			inputs[name] = input.value
 		}
 	}
-	j := Job{ID: newID(), Out: r.Out, State: Queued, CreatedAt: time.Now().UTC(), Retry: r.Retry, Inputs: maps.Clone(r.Inputs), Waiting: slices.Sorted(maps.Keys(waiting))}
+	j := Job{ID: newID(), Out: r.Out, State: Queued, CreatedAt: time.Now().UTC(), Retry: r.Retry, Inputs: maps.Clone(r.Inputs), Waiting: waiting}
 	for _, step := range r.steps() {
 		img := st.images[step.Image]
 		if img.err != nil {
@@ -845,7 +851,7 @@ func (s *Server) prepare(r Request, waiting map[string]string, st *staging) (Job
 		sp := spec.Spec{Image: img.value.ID, Inputs: inputs, Task: step.Task}.Normalize()
 		for _, w := range s.settings.Load().workers {
 			if w.Carries(sp.Tags) {
-				if err := w.CheckLaunch(sp, slices.Collect(maps.Keys(waiting))); err != nil {
+				if err := w.CheckLaunch(sp, waiting); err != nil {
 					return Job{}, err
 				}
 			}
@@ -1009,14 +1015,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/jobs/{id}/logs/{stream}", s.serveLogs)
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", stopHandler(s.Cancel))
 	mux.HandleFunc("POST /v1/jobs/{id}/stop", stopHandler(s.Stop))
-	mux.HandleFunc("GET /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
-		query := r.URL.Query()
-		f := Filter{IDs: query["id"], Outs: query["out"], Under: query["under"]}
-		for _, state := range query["state"] {
-			f.States = append(f.States, State(state))
-		}
-		WriteJSON(w, http.StatusOK, s.List(f))
-	})
+	mux.HandleFunc("GET /v1/jobs", s.serveJobs)
 	mux.HandleFunc("GET /v1/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		j, ok := s.lookup(w, r)
 		if !ok {

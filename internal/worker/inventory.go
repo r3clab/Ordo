@@ -21,10 +21,6 @@ type Probe struct {
 var architectures = map[string]string{"x86_64": "amd64", "aarch64": "arm64"}
 
 func (h *Host) Probe(ctx context.Context) (Probe, error) {
-	cpus, err := spec.ParseCPUs(h.CPUs)
-	if err != nil {
-		return Probe{}, err
-	}
 	script := prelude() + "S=" + ssh.Quote(h.StateDir) + "; mkdir -p -- \"$S\"; if [ \"$(stat -c %a \"$S\")\" != 700 ]; then echo \"$S must be mode 700\" >&2; exit 1; fi; " +
 		"mkdir -p -- \"$S/runs\" \"$S/trees\" \"$S/images\" \"$S/cdi\"; t() { printf '\\n@@%s\\n' \"$1\"; }; " +
 		"t machine; cat /etc/machine-id; t boot; cat /proc/sys/kernel/random/boot_id; t hostname; uname -n; t arch; uname -m; " +
@@ -35,7 +31,7 @@ func (h *Host) Probe(ctx context.Context) (Probe, error) {
 	if err != nil {
 		return Probe{}, err
 	}
-	p, err := parseProbe(sections(string(data)), cpus, h.MemoryMiB)
+	p, err := parseProbe(sections(string(data)), h.cpus(), h.MemoryMiB)
 	if err != nil || len(h.GPUs) == 0 {
 		return p, err
 	}

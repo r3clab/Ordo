@@ -243,11 +243,7 @@ func (s *Server) deliver(j Job) error {
 
 func (s *Server) settle(j Job, outcome State, reason string) error {
 	j.State, j.Error = outcome, reason
-	if err := s.save(j); err != nil {
-		return err
-	}
-	prune(j)
-	return nil
+	return s.save(j)
 }
 
 func unpackFile(archive, dest string) error {

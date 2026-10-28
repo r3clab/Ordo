@@ -88,12 +88,12 @@ func checkCDI(data []byte, ids []string) error {
 	if spec.Kind != "nvidia.com/gpu" || len(spec.Devices) != len(ids) {
 		return errors.New("CDI specification contains unexpected devices")
 	}
-	seen := map[string]bool{}
+	var names []string
 	for _, device := range spec.Devices {
-		if !slices.Contains(ids, device.Name) || seen[device.Name] {
-			return errors.New("CDI device identity mismatch")
-		}
-		seen[device.Name] = true
+		names = append(names, device.Name)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(names)), slices.Sorted(slices.Values(ids))) {
+		return errors.New("CDI device identity mismatch")
 	}
 	return nil
 }

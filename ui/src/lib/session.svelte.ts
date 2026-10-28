@@ -12,6 +12,7 @@ class Session {
   live = $state(true);
   #noticeTimer: ReturnType<typeof setTimeout> | undefined;
   #refreshing = false;
+  #jobsETag = "";
 
   start() {
     void this.refresh();
@@ -24,8 +25,15 @@ class Session {
     if (this.#refreshing) return;
     this.#refreshing = true;
     try {
-      const [jobs, workers] = await Promise.all([request("jobs").then((r) => r.json()), request("workers").then((r) => r.json()), this.#loadDetail()]);
-      this.jobs = jobs ?? [];
+      const [jobs, workers] = await Promise.all([
+        request("jobs", "GET", this.#jobsETag ? { "If-None-Match": this.#jobsETag } : undefined),
+        request("workers").then((r) => r.json()),
+        this.#loadDetail(),
+      ]);
+      if (jobs.status !== 304) {
+        this.jobs = (await jobs.json()) ?? [];
+        this.#jobsETag = jobs.headers.get("ETag") ?? "";
+      }
       this.workers = workers ?? [];
       this.updated = new Date();
       this.error = "";

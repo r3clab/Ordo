@@ -216,7 +216,7 @@ func submit(t *testing.T, s *Server, r Request) string {
 }
 
 // tick waits for the pass's background steps, as the next pass would find them still busy.
-func tick(s *Server, cfg worker.Config, h *fakeHost) error {
+func tick(s *Server, cfg worker.Config, h host) error {
 	probe, err := h.Probe(context.Background())
 	if err != nil {
 		return err
@@ -229,7 +229,7 @@ func tick(s *Server, cfg worker.Config, h *fakeHost) error {
 	return cmp.Or(err, context.Cause(ctx))
 }
 
-func mustTick(t *testing.T, s *Server, cfg worker.Config, h *fakeHost) {
+func mustTick(t *testing.T, s *Server, cfg worker.Config, h host) {
 	t.Helper()
 	if err := tick(s, cfg, h); err != nil {
 		t.Fatal(err)
