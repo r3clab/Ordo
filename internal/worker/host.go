@@ -130,10 +130,19 @@ func (h *Host) output(ctx context.Context, script string, stdin io.Reader) ([]by
 	return stdout.Bytes(), err
 }
 
-// absent runs an existence probe, whose exit status 1 means absence.
-func (h *Host) absent(ctx context.Context, script string) (bool, error) {
+func (h *Host) send(ctx context.Context, script, file string) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return h.output(ctx, script, f)
+}
+
+// absent runs an existence probe, whose exit status code means absence.
+func (h *Host) absent(ctx context.Context, script string, code int) (bool, error) {
 	err := h.run.Run(ctx, script, nil, nil, nil)
-	if exit, ok := errors.AsType[*ssh.ExitError](err); ok && exit.Code == 1 {
+	if exit, ok := errors.AsType[*ssh.ExitError](err); ok && exit.Code == code {
 		return true, nil
 	}
 	return false, err
@@ -171,15 +180,10 @@ func (h *Host) EnsureImage(ctx context.Context, archive, id string) error {
 }
 
 func (h *Host) loadImage(ctx context.Context, archive, id string) error {
-	if absent, err := h.absent(ctx, prelude()+"pm image exists -- "+ssh.Quote(id)); !absent {
+	if absent, err := h.absent(ctx, prelude()+"pm image exists -- "+ssh.Quote(id), 1); !absent {
 		return err
 	}
-	f, err := os.Open(archive)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	data, err := h.output(ctx, prelude()+"pm load >&2; mkdir -p -- "+ssh.Quote(h.imageDir())+"; : > "+ssh.Quote(h.imageMark(id))+"; pm image inspect --format=json -- "+ssh.Quote(id), f)
+	data, err := h.send(ctx, prelude()+"pm load >&2; mkdir -p -- "+ssh.Quote(h.imageDir())+"; : > "+ssh.Quote(h.imageMark(id))+"; pm image inspect --format=json -- "+ssh.Quote(id), archive)
 	if err != nil {
 		return err
 	}
@@ -200,18 +204,14 @@ func (h *Host) EnsureInput(ctx context.Context, blob, digest string) error {
 // unpackInput unpacks a snapshot tar, which the server built from a directory.
 func (h *Host) unpackInput(ctx context.Context, blob, digest string) error {
 	tree := ssh.Quote(h.treeDir(digest))
-	if absent, err := h.absent(ctx, "test -d "+tree); !absent {
+	if absent, err := h.absent(ctx, "test -d "+tree, 1); !absent {
 		return err
 	}
-	f, err := os.Open(blob)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	// A task running as a non-root image user gets a subordinate UID, which must still read its inputs.
 	script := "set -eu; umask 022; d=$(mktemp -d " + ssh.Quote(h.treeDir(".in.XXXXXX")) + "); trap 'rm -rf -- \"$d\"' EXIT; " +
 		"tar -x -f - -C \"$d\"; chmod -R a+rX -- \"$d\"; mv -T -- \"$d\" " + tree + " || test -d " + tree
-	return h.run.Run(ctx, script, f, nil, nil)
+	_, err := h.send(ctx, script, blob)
+	return err
 }
 
 // Seed gives an attempt the outputs of its job's earlier steps before it launches: it moves them out of
@@ -223,19 +223,14 @@ func (h *Host) Seed(ctx context.Context, attempt, prev, archive string) error {
 	kept := ssh.Quote(path.Join(h.runDir(prev), OutputsDir))
 	script := "set -eu; umask 077; test -d " + outputs + " && exit 0; mkdir -p -- " + ssh.Quote(run) + "; " +
 		"if test -d " + kept + "; then mv -T -- " + kept + " " + outputs + "; rm -rf -- " + ssh.Quote(h.runDir(prev)) + "; exit 0; fi; exit 3"
-	err := h.run.Run(ctx, script, nil, nil, nil)
-	if exit, ok := errors.AsType[*ssh.ExitError](err); !ok || exit.Code != 3 {
+	if absent, err := h.absent(ctx, script, 3); !absent {
 		return err
 	}
-	f, err := os.Open(archive)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	// -p keeps the modes the earlier step gave its files, which umask would otherwise narrow.
 	script = "set -eu; d=$(mktemp -d " + ssh.Quote(path.Join(run, ".seed.XXXXXX")) + "); trap 'rm -rf -- \"$d\"' EXIT; " +
 		"tar -x -p -f - -C \"$d\"; mv -T -- \"$d\" " + outputs
-	return h.run.Run(ctx, script, f, nil, nil)
+	_, err := h.send(ctx, script, archive)
+	return err
 }
 
 type Launch struct {
@@ -249,7 +244,7 @@ type Launch struct {
 // exist only while podman run does.
 func launchScript(c Config, l Launch, server string) (string, io.Reader) {
 	run := c.runDir(l.Attempt)
-	r := podman.Run{Attempt: l.Attempt, Server: server, Image: l.Spec.Image, Entrypoint: l.Spec.Entrypoint, Args: l.Spec.Args, Workdir: l.Spec.Workdir, CPUs: l.Allocation.CPUs, MemoryMiB: l.Allocation.MemoryMiB, Sandbox: l.Spec.Sandbox, Outputs: path.Join(run, OutputsDir), GPUs: l.Allocation.GPUs, CDISpecDir: c.cdiDir()}
+	r := podman.Run{Attempt: l.Attempt, Server: server, Image: l.Spec.Image, Command: l.Spec.Command, Allocation: l.Allocation, Sandbox: l.Spec.Sandbox, Outputs: path.Join(run, OutputsDir), CDISpecDir: c.cdiDir()}
 	if l.Spec.TimeoutSeconds > 0 {
 		r.Timeout = l.Spec.TimeoutSeconds + backstop
 	}
@@ -318,12 +313,27 @@ func (h *Host) Inspect(ctx context.Context, attempt string) (podman.Inspection, 
 	return podman.ParseInspect(data)
 }
 
-// A special file in the outputs fails collection, as content.Unpack refuses it.
+// A special file in the outputs fails collection, as content.Extract refuses it. The caller keeps dir's
+// outputs only as long as it takes to archive them, so they are not synced.
 func (h *Host) Collect(ctx context.Context, attempt, dir string) error {
-	err := writeFiles(filepath.Join(dir, StdoutFile), filepath.Join(dir, StderrFile), func(stdout, stderr io.Writer) error {
-		return h.run.Run(ctx, prelude()+"pm logs -- "+ssh.Quote(podman.Name(attempt)), nil, stdout, stderr)
-	})
+	stdout, err := os.OpenFile(filepath.Join(dir, StdoutFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
+		return err
+	}
+	defer func() { _ = stdout.Close() }()
+	stderr, err := os.OpenFile(filepath.Join(dir, StderrFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stderr.Close() }()
+	if err := h.run.Run(ctx, prelude()+"pm logs -- "+ssh.Quote(podman.Name(attempt)), nil, stdout, stderr); err != nil {
+		return err
+	}
+	if err := errors.Join(stdout.Sync(), stderr.Sync()); err != nil {
+		return err
+	}
+	outputs := filepath.Join(dir, OutputsDir)
+	if err := os.Mkdir(outputs, 0o700); err != nil {
 		return err
 	}
 	// sh has no pipefail, so the file list goes through a temporary file to keep find's failures. The
@@ -333,7 +343,7 @@ func (h *Host) Collect(ctx context.Context, attempt, dir string) error {
 	reader, writer := io.Pipe()
 	unpacked := make(chan error, 1)
 	go func() {
-		err := content.Unpack(reader, filepath.Join(dir, OutputsDir))
+		err := content.Extract(reader, outputs)
 		_ = reader.CloseWithError(err)
 		unpacked <- err
 	}()
@@ -341,23 +351,6 @@ func (h *Host) Collect(ctx context.Context, attempt, dir string) error {
 	_ = writer.CloseWithError(err)
 	unpackErr := <-unpacked
 	return cmp.Or(err, unpackErr)
-}
-
-func writeFiles(first, second string, write func(a, b io.Writer) error) error {
-	a, err := os.OpenFile(first, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = a.Close() }()
-	b, err := os.OpenFile(second, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = b.Close() }()
-	if err := write(a, b); err != nil {
-		return err
-	}
-	return errors.Join(a.Sync(), b.Sync())
 }
 
 // Prune removes the images Ordo loaded and the input trees it unpacked that keep does not name and no

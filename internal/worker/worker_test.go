@@ -106,7 +106,7 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 	h := testHost(t)
 	l := Launch{
 		Attempt:    "a1",
-		Spec:       spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Inputs: map[string]string{"data": strings.Repeat("c", 64)}, Task: spec.Task{Args: []string{"it's $HOME", "$(touch pwned)", "a\nb"}, Services: []string{"model"}, TimeoutSeconds: 10, Sandbox: spec.Sandbox{Env: map[string]string{"MODE": "eval"}}}},
+		Spec:       spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Inputs: map[string]string{"data": strings.Repeat("c", 64)}, Task: spec.Task{Command: spec.Command{Args: []string{"it's $HOME", "$(touch pwned)", "a\nb"}}, Services: []string{"model"}, TimeoutSeconds: 10, Sandbox: spec.Sandbox{Env: map[string]string{"MODE": "eval"}}}},
 		Allocation: pool.Allocation{CPUs: []int{0, 64}, MemoryMiB: 128},
 		Secrets:    map[string]string{"TOKEN": "hunter2\nline 2\n"},
 	}
@@ -115,7 +115,7 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 		t.Fatalf("launch: %q, %v", id, err)
 	}
 	run := filepath.Join(h.StateDir, "runs", "a1")
-	want := podman.Run{Attempt: "a1", Server: "server1", Image: l.Spec.Image, Args: l.Spec.Args, CPUs: []int{0, 64}, MemoryMiB: 128, Sandbox: l.Spec.Sandbox,
+	want := podman.Run{Attempt: "a1", Server: "server1", Image: l.Spec.Image, Command: l.Spec.Command, Allocation: l.Allocation, Sandbox: l.Spec.Sandbox,
 		Inputs: map[string]string{"data": filepath.Join(h.StateDir, "trees", strings.Repeat("c", 64))}, Services: map[string]string{"model": filepath.Join(h.StateDir, "services", "model")},
 		Outputs: filepath.Join(run, "outputs"), CDISpecDir: filepath.Join(h.StateDir, "cdi"), Secrets: []string{"TOKEN"}, Timeout: 10 + backstop}
 	podmanCalls := calls(t, log, "podman")
@@ -164,12 +164,12 @@ func TestRemoveDropsSecretsALaunchLeftBehind(t *testing.T) {
 
 func TestCheckLaunchBoundsTheRemoteCommand(t *testing.T) {
 	c := Config{Host: "worker", StateDir: "/home/w/ordo", CPUs: "0-63", MemoryMiB: 512}
-	s := spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Task: spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}, Args: []string{"x"}}}
-	if err := c.CheckLaunch(s, nil); err != nil {
+	task := spec.Task{Resources: spec.Resources{Cores: 1, MemoryMiB: 128}, Command: spec.Command{Args: []string{"x"}}}
+	if err := c.CheckLaunch(task, []string{"data"}); err != nil {
 		t.Fatal(err)
 	}
-	s.Args = []string{strings.Repeat("'", ssh.MaxCommand/4)}
-	if err := c.CheckLaunch(s, nil); err == nil {
+	task.Args = []string{strings.Repeat("'", ssh.MaxCommand/4)}
+	if err := c.CheckLaunch(task, nil); err == nil {
 		t.Fatal("accepted a launch command beyond the argument limit")
 	}
 }

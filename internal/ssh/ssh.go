@@ -205,11 +205,15 @@ type tailBuffer struct{ data []byte }
 const tailBytes = 4 << 10
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
-	b.data = append(b.data, p...)
-	if len(b.data) > tailBytes {
-		b.data = b.data[len(b.data)-tailBytes:]
+	n := len(p)
+	if n > tailBytes {
+		p = p[n-tailBytes:]
 	}
-	return len(p), nil
+	if drop := len(b.data) + len(p) - tailBytes; drop > 0 {
+		b.data = b.data[:copy(b.data, b.data[drop:])]
+	}
+	b.data = append(b.data, p...)
+	return n, nil
 }
 
 func (b *tailBuffer) String() string { return string(b.data) }

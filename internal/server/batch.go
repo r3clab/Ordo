@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"maps"
 	"net/http"
 	"slices"
+
+	"github.com/r3clab/Ordo/internal/image"
 )
 
 const maxBatch = 10000
@@ -71,7 +72,8 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 			waiting []string
 		}
 		lines := make([]line, len(entries))
-		var requests []Request
+		var images []image.Source
+		var inputs []string
 		outs := map[string]bool{}
 		for i := range lines {
 			e := &lines[i]
@@ -84,16 +86,18 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 			}
 			if e.Err == nil && !e.done {
 				e.waiting = s.waiting(e.Request, outs)
-				staged := e.Request
-				staged.Inputs = maps.Clone(staged.Inputs)
-				for _, name := range e.waiting {
-					delete(staged.Inputs, name)
+				for _, step := range e.Request.steps() {
+					images = append(images, step.Image)
 				}
-				requests = append(requests, staged)
+				for name, source := range e.Request.Inputs {
+					if !slices.Contains(e.waiting, name) {
+						inputs = append(inputs, source)
+					}
+				}
 				outs[e.Request.Out] = true
 			}
 		}
-		st := s.stage(ctx, requests...)
+		st := s.stage(ctx, images, inputs)
 		for chunk := range slices.Chunk(lines, batchChunk) {
 			results := make([]BatchResult, len(chunk))
 			var jobs []Job

@@ -1,7 +1,6 @@
 package image
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -48,12 +47,10 @@ func (t Tools) run(ctx context.Context, name string, args ...string) ([]byte, er
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 10 * time.Second
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		if _, ok := errors.AsType[*exec.ExitError](err); ok {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exit.Stderr)))
 		}
 		return nil, fmt.Errorf("%s: %w", filepath.Base(name), err)
 	}

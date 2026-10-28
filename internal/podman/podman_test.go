@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/r3clab/Ordo/internal/pool"
 	"github.com/r3clab/Ordo/internal/spec"
 )
 
 func TestRunArgv(t *testing.T) {
-	r := Run{Attempt: "a1", Server: "s1", Image: "sha256:" + strings.Repeat("a", 64), Args: []string{"argument with spaces", "$(not-a-shell)"}, CPUs: []int{0, 64}, MemoryMiB: 128, Outputs: "/w/runs/a1/outputs"}
+	r := Run{Attempt: "a1", Server: "s1", Image: "sha256:" + strings.Repeat("a", 64), Command: spec.Command{Args: []string{"argument with spaces", "$(not-a-shell)"}}, Allocation: pool.Allocation{CPUs: []int{0, 64}, MemoryMiB: 128}, Outputs: "/w/runs/a1/outputs"}
 	want := []string{
 		"run", "--detach", "--pull=never", "--name", "ordo-a1",
 		"--label", "io.r3clab.ordo.attempt=a1", "--label", "io.r3clab.ordo.server=s1",

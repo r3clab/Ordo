@@ -238,12 +238,7 @@ func Unpack(r io.Reader, dest string) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	if err := untar(r, dir); err != nil {
-		return err
-	}
-	// The tar reader stops at the end-of-archive marker, and a writer on a pipe still has the padding
-	// after it to send.
-	if _, err := io.Copy(io.Discard, io.LimitReader(r, 1<<20)); err != nil {
+	if err := extract(r, dir, true); err != nil {
 		return err
 	}
 	if err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
@@ -266,7 +261,20 @@ func Unpack(r io.Reader, dest string) error {
 	return SyncDir(filepath.Dir(dest))
 }
 
-func untar(r io.Reader, dir string) error {
+// Extract unpacks r into dir, an existing empty directory, without syncing what it writes.
+func Extract(r io.Reader, dir string) error { return extract(r, dir, false) }
+
+func extract(r io.Reader, dir string, sync bool) error {
+	if err := untar(r, dir, sync); err != nil {
+		return err
+	}
+	// The tar reader stops at the end-of-archive marker, and a writer on a pipe still has the padding
+	// after it to send.
+	_, err := io.Copy(io.Discard, io.LimitReader(r, 1<<20))
+	return err
+}
+
+func untar(r io.Reader, dir string, sync bool) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
@@ -322,7 +330,10 @@ func untar(r io.Reader, dir string) error {
 			return err
 		}
 		_, err = io.Copy(out, tr)
-		if err := errors.Join(err, out.Sync(), out.Close(), root.Chtimes(target, h.ModTime, h.ModTime)); err != nil {
+		if err == nil && sync {
+			err = out.Sync()
+		}
+		if err := errors.Join(err, out.Close(), root.Chtimes(target, h.ModTime, h.ModTime)); err != nil {
 			return err
 		}
 	}

@@ -5,7 +5,6 @@ package worker
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"net"
 	"path"
 	"regexp"
@@ -43,7 +42,7 @@ func (c Config) Validate() error {
 	if !ssh.ValidHost(c.Host) {
 		return errors.New("invalid SSH host alias")
 	}
-	if !stateDir.MatchString(c.StateDir) || path.Clean(c.StateDir) != c.StateDir || c.StateDir == "/" {
+	if !stateDir.MatchString(c.StateDir) || !spec.CleanAbsolute(c.StateDir) || c.StateDir == "/" {
 		return errors.New("remote state must be a clean absolute path without spaces or colons")
 	}
 	if _, err := spec.ParseCPUs(c.CPUs); err != nil {
@@ -111,24 +110,18 @@ func (c Config) ServiceForward(name, address string) (string, error) {
 	return socket + ":" + net.JoinHostPort(host, port), nil
 }
 
-// CheckLaunch also counts imported, the inputs a job takes from other jobs' outputs at dispatch.
-func (c Config) CheckLaunch(s spec.Spec, imported []string) error {
-	worst := pool.Allocation{CPUs: c.cpus(), MemoryMiB: s.Resources.MemoryMiB}
-	for range s.Resources.GPUs {
-		worst.GPUs = append(worst.GPUs, "GPU-"+strings.Repeat("0", 36))
+// CheckLaunch measures t's launch script with placeholders as long as real values: SHA-256 image IDs
+// and input digests, NVIDIA GPU UUIDs, and rand.Text() attempt and server IDs.
+func (c Config) CheckLaunch(t spec.Task, inputs []string) error {
+	digest := strings.Repeat("0", 64)
+	s := spec.Spec{Image: "sha256:" + digest, Inputs: map[string]string{}, Task: t}
+	for _, name := range inputs {
+		s.Inputs[name] = digest
 	}
-	// The placeholders are as long as real values: NVIDIA GPU UUIDs, SHA-256 hex digests of imported
-	// outputs, and rand.Text() attempt and server IDs.
-	s.Inputs = maps.Clone(s.Inputs)
-	if s.Inputs == nil && len(imported) > 0 {
-		s.Inputs = map[string]string{}
-	}
-	for _, name := range imported {
-		s.Inputs[name] = strings.Repeat("0", 64)
-	}
+	worst := pool.Allocation{CPUs: c.cpus(), MemoryMiB: t.Resources.MemoryMiB, GPUs: slices.Repeat([]string{"GPU-" + strings.Repeat("0", 36)}, t.Resources.GPUs)}
 	placeholder := strings.Repeat("x", 26)
 	secrets := map[string]string{}
-	for _, name := range s.Secrets {
+	for _, name := range t.Secrets {
 		secrets[name] = ""
 	}
 	script, _ := launchScript(c, Launch{Attempt: placeholder, Spec: s, Allocation: worst, Secrets: secrets}, placeholder)

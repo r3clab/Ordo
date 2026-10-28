@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"iter"
 	"maps"
 	"net/http"
 	"os"
@@ -538,8 +537,19 @@ func (s *Server) List(f Filter) []Summary {
 func (s *Server) unfinished() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ids := slices.Collect(maps.Keys(s.jobs))
-	slices.SortFunc(ids, func(a, b string) int { return s.jobs[a].CreatedAt.Compare(s.jobs[b].CreatedAt) })
+	type entry struct {
+		id      string
+		created time.Time
+	}
+	entries := make([]entry, 0, len(s.jobs))
+	for id, j := range s.jobs {
+		entries = append(entries, entry{id, j.CreatedAt})
+	}
+	slices.SortFunc(entries, func(a, b entry) int { return a.created.Compare(b.created) })
+	ids := make([]string, len(entries))
+	for i, e := range entries {
+		ids[i] = e.id
+	}
 	return ids
 }
 
@@ -663,16 +673,8 @@ type staging struct {
 // Snapshots read the submitter's files, so only a few share the disk at once.
 const snapshots = 4
 
-// stage takes only requests that passed check.
-func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
-	var images []image.Source
-	var inputs []string
-	for _, r := range requests {
-		for _, step := range r.steps() {
-			images = append(images, step.Image)
-		}
-		inputs = slices.AppendSeq(inputs, maps.Values(r.Inputs))
-	}
+// stage takes only sources of requests that passed check.
+func (s *Server) stage(ctx context.Context, images []image.Source, inputs []string) *staging {
 	st := &staging{}
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -712,9 +714,7 @@ func each[K comparable, V any](keys []K, limit int, do func(K) (V, error)) map[K
 	return out
 }
 
-func absolute(file string) bool {
-	return filepath.IsAbs(file) && filepath.Clean(file) == file && file != "/"
-}
+func absolute(file string) bool { return spec.CleanAbsolute(file) && file != "/" }
 
 func (r Request) Validate() error {
 	if !absolute(r.Out) {
@@ -766,9 +766,17 @@ func (s *Server) check(r Request) error {
 		return fmt.Errorf("out lies in %s, the out of another job", dir)
 	}
 	c := s.settings.Load()
+	inputs := slices.Collect(maps.Keys(r.Inputs))
 	for _, step := range r.steps() {
 		if err := s.checkConfig(c, step.Task); err != nil {
 			return err
+		}
+		for _, w := range c.workers {
+			if w.Carries(step.Tags) {
+				if err := w.CheckLaunch(step.Task, inputs); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -885,13 +893,6 @@ func (s *Server) prepare(r Request, waiting []string, st *staging) (Job, error) 
 			return Job{}, img.err
 		}
 		sp := spec.Spec{Image: img.value.ID, Inputs: inputs, Task: step.Task}.Normalize()
-		for _, w := range s.settings.Load().workers {
-			if w.Carries(sp.Tags) {
-				if err := w.CheckLaunch(sp, waiting); err != nil {
-					return Job{}, err
-				}
-			}
-		}
 		j.Steps = append(j.Steps, Stage{Name: step.Name, Spec: sp, Archive: img.value.Blob, ImageOrigin: img.value.Origin})
 	}
 	return j, nil
@@ -946,34 +947,14 @@ func (s *Server) admit(jobs []Job, results []*BatchResult) {
 	}
 }
 
-// The caller holds s.write.
-func (s *Server) claimed(pending map[string]record) iter.Seq2[string, string] {
-	return func(yield func(string, string) bool) {
-		for out, id := range s.outs {
-			if !yield(out, id) {
-				return
-			}
-		}
-		for out, r := range pending {
-			if !yield(out, r.ID) {
-				return
-			}
-		}
-	}
-}
-
 // upstream finds the unfinished jobs whose Out holds each of j's waiting inputs; the caller holds
 // s.write.
 func (s *Server) upstream(j Job, pending map[string]record) ([]string, error) {
 	var ids []string
 	for _, name := range j.Waiting {
-		source := j.Inputs[name]
 		id := ""
-		for out, other := range s.claimed(pending) {
-			if within(source, out) {
-				id = other
-				break
-			}
+		for dir := j.Inputs[name]; dir != "/" && id == ""; dir = filepath.Dir(dir) {
+			id = cmp.Or(s.outs[dir], pending[dir].ID)
 		}
 		if id == "" {
 			return nil, fmt.Errorf("input %s lies in an out that no unfinished job writes any more; submit again", name)
@@ -986,8 +967,14 @@ func (s *Server) upstream(j Job, pending map[string]record) ([]string, error) {
 
 // nested finds an unfinished job's Out that contains out or lies inside it; the caller holds s.write.
 func (s *Server) nested(out string, pending map[string]record) string {
-	for other := range s.claimed(pending) {
-		if within(out, other) || within(other, out) {
+	nests := func(other string) bool { return within(out, other) || within(other, out) }
+	for other := range s.outs {
+		if nests(other) {
+			return other
+		}
+	}
+	for other := range pending {
+		if nests(other) {
 			return other
 		}
 	}

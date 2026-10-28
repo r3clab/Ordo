@@ -39,7 +39,7 @@ const neverStarted = time.Minute
 type view struct {
 	cfg        worker.Config
 	host       host
-	probe      worker.Probe
+	hardware   pool.Hardware
 	boot       string
 	now        time.Time
 	containers map[string]podman.Container
@@ -87,7 +87,7 @@ func (s *Server) free(ctx context.Context, id string, err error) error {
 // busyGPUs samples once per pass: each sample is an SSH round trip and about a second of nvidia-smi.
 func (v *view) busyGPUs(ctx context.Context) error {
 	if !v.gpusPolled {
-		busy, err := v.host.GPUBusy(ctx, v.probe.Hardware.GPUs)
+		busy, err := v.host.GPUBusy(ctx, v.hardware.GPUs)
 		if err != nil {
 			return err
 		}
@@ -211,7 +211,7 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 		}
 		*probe = p
 	}
-	v := &view{cfg: cfg, host: h, probe: *probe, boot: snap.BootID, now: snap.Now, containers: map[string]podman.Container{}, runs: snap.Runs}
+	v := &view{cfg: cfg, host: h, hardware: probe.Hardware, boot: snap.BootID, now: snap.Now, containers: map[string]podman.Container{}, runs: snap.Runs}
 	var foreign []string
 	for _, c := range snap.Containers {
 		if c.Server() != s.id {
@@ -227,10 +227,10 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 	if err != nil {
 		return err
 	}
-	if v.planner, err = pool.New(v.probe.Hardware, held); err != nil {
+	if v.planner, err = pool.New(v.hardware, held); err != nil {
 		return err
 	}
-	s.workerStatus(cfg.Host, &WorkerInfo{BootID: v.boot, Hardware: v.probe.Hardware, Held: held, Error: v.fault}, nil)
+	s.workerStatus(cfg.Host, &WorkerInfo{BootID: v.boot, Hardware: v.hardware, Held: held, Error: v.fault}, nil)
 	for _, id := range s.unfinished() {
 		s.mu.Lock()
 		j, unfinished := s.jobs[id]
@@ -346,7 +346,7 @@ func (s *Server) reconcile(ctx context.Context, j Job, v *view) error {
 	if at.Worker != v.cfg.Host {
 		return nil
 	}
-	if at.MachineID != v.probe.Hardware.MachineID {
+	if at.MachineID != v.hardware.MachineID {
 		return s.block(j, "worker identity changed")
 	}
 	s.refresh(&j)
@@ -424,7 +424,7 @@ func (s *Server) dispatch(ctx context.Context, j *Job, v *view) (bool, error) {
 		s.wait(j.ID, v.cfg.Host, reason)
 		return false, nil
 	}
-	hw := v.probe.Hardware
+	hw := v.hardware
 	j.Attempts = append(j.Attempts, Attempt{ID: newID(), Step: j.Step, Worker: v.cfg.Host, MachineID: hw.MachineID, BootID: v.boot, Allocation: allocation, CreatedAt: time.Now().UTC()})
 	j.State, j.Avoid = Dispatching, ""
 	s.write.Lock()

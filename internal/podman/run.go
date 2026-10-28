@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/r3clab/Ordo/internal/pool"
 	"github.com/r3clab/Ordo/internal/spec"
 )
 
@@ -21,19 +22,15 @@ func Name(attempt string) string { return "ordo-" + attempt }
 func SecretName(attempt, name string) string { return Name(attempt) + "-" + name }
 
 type Run struct {
-	Attempt    string
-	Server     string
-	Image      string
-	Entrypoint []string
-	Args       []string
-	Workdir    string
-	CPUs       []int
-	MemoryMiB  int64
+	Attempt string
+	Server  string
+	Image   string
+	spec.Command
+	pool.Allocation
 	spec.Sandbox
 	Inputs     map[string]string
 	Services   map[string]string
 	Outputs    string
-	GPUs       []string
 	CDISpecDir string
 	Secrets    []string
 	Timeout    int64

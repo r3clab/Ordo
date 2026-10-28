@@ -39,19 +39,25 @@ func repeated[T comparable](values []T) (T, bool) {
 
 func ValidImageID(id string) bool { return imageID.MatchString(id) }
 
+func CleanAbsolute(p string) bool { return path.IsAbs(p) && path.Clean(p) == p }
+
 type Resources struct {
 	Cores     int   `json:"cores"`
 	MemoryMiB int64 `json:"memory_mib"`
 	GPUs      int   `json:"gpus,omitempty"`
 }
 
+type Command struct {
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Args       []string `json:"args,omitempty"`
+	Workdir    string   `json:"workdir,omitempty"`
+}
+
 // Task is the part of a job that its request states directly; a request names its image and inputs by
 // source, and the job by content.
 type Task struct {
-	Entrypoint []string  `json:"entrypoint,omitempty"`
-	Args       []string  `json:"args,omitempty"`
-	Workdir    string    `json:"workdir,omitempty"`
-	Resources  Resources `json:"resources"`
+	Command
+	Resources Resources `json:"resources"`
 	Sandbox
 	Secrets        []string `json:"secrets,omitempty"`
 	Services       []string `json:"services,omitempty"`
@@ -92,7 +98,7 @@ func (s Task) Validate() error {
 	if s.Entrypoint != nil && (len(s.Entrypoint) == 0 || s.Entrypoint[0] == "") {
 		return errors.New("entrypoint must start with a command")
 	}
-	if s.Workdir != "" && (!path.IsAbs(s.Workdir) || path.Clean(s.Workdir) != s.Workdir) {
+	if s.Workdir != "" && !CleanAbsolute(s.Workdir) {
 		return errors.New("workdir must be a clean absolute path")
 	}
 	if err := s.Sandbox.Validate(); err != nil {

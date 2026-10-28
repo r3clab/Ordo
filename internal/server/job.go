@@ -195,11 +195,9 @@ func (s *Server) snapshot(j Job) error {
 	}
 	j.Steps = slices.Clone(j.Steps)
 	for i := range j.Steps {
-		j.Steps[i].Spec.Inputs = maps.Clone(j.Steps[i].Spec.Inputs)
-		if j.Steps[i].Spec.Inputs == nil {
-			j.Steps[i].Spec.Inputs = map[string]string{}
-		}
-		maps.Copy(j.Steps[i].Spec.Inputs, inputs)
+		merged := maps.Clone(inputs)
+		maps.Copy(merged, j.Steps[i].Spec.Inputs)
+		j.Steps[i].Spec.Inputs = merged
 	}
 	j.Waiting = nil
 	return s.save(j)

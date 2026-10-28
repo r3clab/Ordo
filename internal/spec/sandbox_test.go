@@ -19,17 +19,17 @@ func TestSandboxValidation(t *testing.T) {
 		"reserved secret":    {Secrets: []string{"NVIDIA_DRIVER_CAPABILITIES"}},
 		"secret name":        {Secrets: []string{"1X"}},
 		"repeated secret":    {Secrets: []string{"TOKEN", "TOKEN"}},
-		"empty entrypoint":   {Entrypoint: []string{}},
-		"entrypoint command": {Entrypoint: []string{"", "x"}},
-		"relative workdir":   {Workdir: "work"},
-		"unclean workdir":    {Workdir: "/work/"},
+		"empty entrypoint":   {Command: Command{Entrypoint: []string{}}},
+		"entrypoint command": {Command: Command{Entrypoint: []string{"", "x"}}},
+		"relative workdir":   {Command: Command{Workdir: "work"}},
+		"unclean workdir":    {Command: Command{Workdir: "/work/"}},
 	} {
 		s.Resources = Resources{Cores: 1, MemoryMiB: 128}
 		if err := s.Validate(); err == nil {
 			t.Fatalf("%s: accepted invalid sandbox", name)
 		}
 	}
-	s := Task{Resources: Resources{Cores: 1, MemoryMiB: 128}, Sandbox: Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}, Secrets: []string{"TOKEN", "OTHER"}, Entrypoint: []string{"netlock", ""}, Workdir: "/work"}
+	s := Task{Resources: Resources{Cores: 1, MemoryMiB: 128}, Sandbox: Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}, Secrets: []string{"TOKEN", "OTHER"}, Command: Command{Entrypoint: []string{"netlock", ""}, Workdir: "/work"}}
 	if err := s.Validate(); err != nil {
 		t.Fatal(err)
 	}
