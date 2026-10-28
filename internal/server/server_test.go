@@ -490,6 +490,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	req := jobRequest(filepath.Join(dir, "agent"))
 	req.Sandbox = spec.Sandbox{Env: map[string]string{"MODE": "eval"}, Network: spec.Egress, CapAdd: []string{"NET_ADMIN"}}
 	req.Secrets, req.Services, req.Retry = []string{"TOKEN"}, []string{"model"}, RetryPolicy{Task: 2}
+	req.Entrypoint, req.Workdir = []string{"netlock", "agent"}, "/work"
 	for name, change := range map[string]func(*Request){
 		"an unconfigured service":                           func(r *Request) { r.Services = []string{"other"} },
 		"an unconfigured secret":                            func(r *Request) { r.Secrets = []string{"OTHER"} },
@@ -511,7 +512,7 @@ func TestSecretsServicesAndStop(t *testing.T) {
 	h := newFakeHost(s.id)
 	mustTick(t, s, workers[0], h)
 	launched := h.launches[0]
-	if !maps.Equal(launched.Secrets, map[string]string{"TOKEN": "hunter2\nline 2\n"}) || !slices.Equal(launched.Spec.Services, []string{"model"}) || launched.Spec.Network != spec.Egress {
+	if !maps.Equal(launched.Secrets, map[string]string{"TOKEN": "hunter2\nline 2\n"}) || !slices.Equal(launched.Spec.Services, []string{"model"}) || launched.Spec.Network != spec.Egress || !slices.Equal(launched.Spec.Entrypoint, req.Entrypoint) || launched.Spec.Workdir != "/work" {
 		t.Fatalf("launch lost the sandbox or configured secret: %+v", launched)
 	}
 

@@ -2,6 +2,7 @@
 package podman
 
 import (
+	"encoding/json"
 	"maps"
 	"slices"
 	"strconv"
@@ -20,12 +21,14 @@ func Name(attempt string) string { return "ordo-" + attempt }
 func SecretName(attempt, name string) string { return Name(attempt) + "-" + name }
 
 type Run struct {
-	Attempt   string
-	Server    string
-	Image     string
-	Args      []string
-	CPUs      []int
-	MemoryMiB int64
+	Attempt    string
+	Server     string
+	Image      string
+	Entrypoint []string
+	Args       []string
+	Workdir    string
+	CPUs       []int
+	MemoryMiB  int64
 	spec.Sandbox
 	Inputs     map[string]string
 	Services   map[string]string
@@ -61,6 +64,13 @@ func (r Run) Argv() []string {
 	}
 	for _, name := range slices.Sorted(maps.Keys(r.Env)) {
 		args = append(args, "--env", name+"="+r.Env[name])
+	}
+	if len(r.Entrypoint) > 0 {
+		entrypoint, _ := json.Marshal(r.Entrypoint)
+		args = append(args, "--entrypoint", string(entrypoint))
+	}
+	if r.Workdir != "" {
+		args = append(args, "--workdir", r.Workdir)
 	}
 	// Image VOLUMEs would add writable storage outside /outputs that outlives the container, and
 	// k8s-file logs stay readable by podman logs whatever the host's journald keeps.

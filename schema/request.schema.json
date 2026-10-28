@@ -30,6 +30,22 @@
             "maxLength": 4096,
             "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
           },
+          "entrypoint": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "prefixItems": [
+              {
+                "type": "string",
+                "minLength": 1
+              }
+            ],
+            "minItems": 1
+          },
           "args": {
             "type": [
               "null",
@@ -38,6 +54,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "workdir": {
+            "type": "string",
+            "pattern": "^/"
           },
           "resources": {
             "type": "object",
@@ -156,6 +176,22 @@
       "maxLength": 4096,
       "pattern": "^[^-\\x00\\r\\n][^\\x00\\r\\n]*$"
     },
+    "entrypoint": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "prefixItems": [
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ],
+      "minItems": 1
+    },
     "args": {
       "type": [
         "null",
@@ -164,6 +200,10 @@
       "items": {
         "type": "string"
       }
+    },
+    "workdir": {
+      "type": "string",
+      "pattern": "^/"
     },
     "resources": {
       "type": "object",

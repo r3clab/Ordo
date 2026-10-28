@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"path"
 	"regexp"
 	"slices"
 	"time"
@@ -47,8 +48,10 @@ type Resources struct {
 // Task is the part of a job that its request states directly; a request names its image and inputs by
 // source, and the job by content.
 type Task struct {
-	Args      []string  `json:"args,omitempty"`
-	Resources Resources `json:"resources"`
+	Entrypoint []string  `json:"entrypoint,omitempty"`
+	Args       []string  `json:"args,omitempty"`
+	Workdir    string    `json:"workdir,omitempty"`
+	Resources  Resources `json:"resources"`
 	Sandbox
 	Secrets        []string `json:"secrets,omitempty"`
 	Services       []string `json:"services,omitempty"`
@@ -69,6 +72,7 @@ func (s Spec) Normalize() Spec {
 }
 
 func (s Task) Normalize() Task {
+	s.Entrypoint = slices.Clone(s.Entrypoint)
 	s.Args = slices.Clone(s.Args)
 	s.Env = maps.Clone(s.Env)
 	s.CapAdd = slices.Sorted(slices.Values(s.CapAdd))
@@ -84,6 +88,12 @@ func (s Task) Validate() error {
 	}
 	if s.TimeoutSeconds < 0 || s.TimeoutSeconds > MaxTimeoutSeconds {
 		return fmt.Errorf("timeout must be 0..%d seconds", MaxTimeoutSeconds)
+	}
+	if s.Entrypoint != nil && (len(s.Entrypoint) == 0 || s.Entrypoint[0] == "") {
+		return errors.New("entrypoint must start with a command")
+	}
+	if s.Workdir != "" && (!path.IsAbs(s.Workdir) || path.Clean(s.Workdir) != s.Workdir) {
+		return errors.New("workdir must be a clean absolute path")
 	}
 	if err := s.Sandbox.Validate(); err != nil {
 		return err

@@ -116,6 +116,9 @@ func refineStep(s *jsonschema.Schema) {
 	at(s, "name").Pattern = spec.NamePattern
 	at(s, "image").MaxLength = jsonschema.Ptr(image.MaxInstallableBytes)
 	at(s, "image").Pattern = image.InstallablePattern
+	at(s, "entrypoint").MinItems = jsonschema.Ptr(1)
+	at(s, "entrypoint").PrefixItems = []*jsonschema.Schema{{Type: "string", MinLength: jsonschema.Ptr(1)}}
+	at(s, "workdir").Pattern = absolute
 	resources := at(s, "resources")
 	at(resources, "cores").Minimum = jsonschema.Ptr(1.0)
 	at(resources, "memory_mib").Minimum = jsonschema.Ptr(1.0)

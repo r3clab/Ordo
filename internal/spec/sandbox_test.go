@@ -9,23 +9,27 @@ import (
 func TestSandboxValidation(t *testing.T) {
 	large := strings.Repeat("x", MaxValueBytes+1)
 	for name, s := range map[string]Task{
-		"network":         {Sandbox: Sandbox{Network: "host"}},
-		"capability":      {Sandbox: Sandbox{CapAdd: []string{"SYS_ADMIN"}}},
-		"duplicate cap":   {Sandbox: Sandbox{CapAdd: []string{"NET_ADMIN", "NET_ADMIN"}}},
-		"env name":        {Sandbox: Sandbox{Env: map[string]string{"1X": ""}}},
-		"env NUL":         {Sandbox: Sandbox{Env: map[string]string{"X": "\x00"}}},
-		"env size":        {Sandbox: Sandbox{Env: map[string]string{"X": large}}},
-		"reserved env":    {Sandbox: Sandbox{Env: map[string]string{"NVIDIA_VISIBLE_DEVICES": "all"}}},
-		"reserved secret": {Secrets: []string{"NVIDIA_DRIVER_CAPABILITIES"}},
-		"secret name":     {Secrets: []string{"1X"}},
-		"repeated secret": {Secrets: []string{"TOKEN", "TOKEN"}},
+		"network":            {Sandbox: Sandbox{Network: "host"}},
+		"capability":         {Sandbox: Sandbox{CapAdd: []string{"SYS_ADMIN"}}},
+		"duplicate cap":      {Sandbox: Sandbox{CapAdd: []string{"NET_ADMIN", "NET_ADMIN"}}},
+		"env name":           {Sandbox: Sandbox{Env: map[string]string{"1X": ""}}},
+		"env NUL":            {Sandbox: Sandbox{Env: map[string]string{"X": "\x00"}}},
+		"env size":           {Sandbox: Sandbox{Env: map[string]string{"X": large}}},
+		"reserved env":       {Sandbox: Sandbox{Env: map[string]string{"NVIDIA_VISIBLE_DEVICES": "all"}}},
+		"reserved secret":    {Secrets: []string{"NVIDIA_DRIVER_CAPABILITIES"}},
+		"secret name":        {Secrets: []string{"1X"}},
+		"repeated secret":    {Secrets: []string{"TOKEN", "TOKEN"}},
+		"empty entrypoint":   {Entrypoint: []string{}},
+		"entrypoint command": {Entrypoint: []string{"", "x"}},
+		"relative workdir":   {Workdir: "work"},
+		"unclean workdir":    {Workdir: "/work/"},
 	} {
 		s.Resources = Resources{Cores: 1, MemoryMiB: 128}
 		if err := s.Validate(); err == nil {
 			t.Fatalf("%s: accepted invalid sandbox", name)
 		}
 	}
-	s := Task{Resources: Resources{Cores: 1, MemoryMiB: 128}, Sandbox: Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}, Secrets: []string{"TOKEN", "OTHER"}}
+	s := Task{Resources: Resources{Cores: 1, MemoryMiB: 128}, Sandbox: Sandbox{Network: "none", CapAdd: []string{"NET_ADMIN"}, Env: map[string]string{"A": "x=y"}}, Secrets: []string{"TOKEN", "OTHER"}, Entrypoint: []string{"netlock", ""}, Workdir: "/work"}
 	if err := s.Validate(); err != nil {
 		t.Fatal(err)
 	}

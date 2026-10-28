@@ -30,12 +30,14 @@ func TestRunArgv(t *testing.T) {
 	r.CDISpecDir = "/w/cdi"
 	r.Secrets = []string{"TOKEN"}
 	r.Timeout = 70
+	r.Entrypoint = []string{"wrap", "--flag", `"quoted"`}
+	r.Workdir = "/work"
 	got := r.Argv()
 	if !slices.Equal(got[:2], []string{"--cdi-spec-dir", "/w/cdi"}) {
 		t.Fatalf("CDI directory must be a global flag: %q", got)
 	}
 	for _, want := range [][]string{
-		{"--timeout", "70", "--network=pasta", "--cap-add=NET_ADMIN", "--env", "A=1", "--env", "B=2", "--image-volume=ignore"},
+		{"--timeout", "70", "--network=pasta", "--cap-add=NET_ADMIN", "--env", "A=1", "--env", "B=2", "--entrypoint", `["wrap","--flag","\"quoted\""]`, "--workdir", "/work", "--image-volume=ignore"},
 		{"--volume", "/w/trees/h:/inputs/data:ro", "--volume", "/w/services/model:/services/model:ro", "--volume", "/w/runs/a1/outputs:/outputs:rw"},
 		{"--device", "nvidia.com/gpu=GPU-11111111-1111-1111-1111-111111111111", "--env", "NVIDIA_VISIBLE_DEVICES=void", "--secret", "ordo-a1-TOKEN,type=mount,target=/run/secrets/TOKEN", "--"},
 	} {

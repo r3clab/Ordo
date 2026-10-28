@@ -249,7 +249,7 @@ type Launch struct {
 // exist only while podman run does.
 func launchScript(c Config, l Launch, server string) (string, io.Reader) {
 	run := c.runDir(l.Attempt)
-	r := podman.Run{Attempt: l.Attempt, Server: server, Image: l.Spec.Image, Args: l.Spec.Args, CPUs: l.Allocation.CPUs, MemoryMiB: l.Allocation.MemoryMiB, Sandbox: l.Spec.Sandbox, Outputs: path.Join(run, OutputsDir), GPUs: l.Allocation.GPUs, CDISpecDir: c.cdiDir()}
+	r := podman.Run{Attempt: l.Attempt, Server: server, Image: l.Spec.Image, Entrypoint: l.Spec.Entrypoint, Args: l.Spec.Args, Workdir: l.Spec.Workdir, CPUs: l.Allocation.CPUs, MemoryMiB: l.Allocation.MemoryMiB, Sandbox: l.Spec.Sandbox, Outputs: path.Join(run, OutputsDir), GPUs: l.Allocation.GPUs, CDISpecDir: c.cdiDir()}
 	if l.Spec.TimeoutSeconds > 0 {
 		r.Timeout = l.Spec.TimeoutSeconds + backstop
 	}

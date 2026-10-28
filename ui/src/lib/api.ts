@@ -30,7 +30,9 @@ export interface Hardware {
 
 export interface Spec {
   image: string;
+  entrypoint?: string[];
   args?: string[];
+  workdir?: string;
   resources: Resources;
   inputs?: Record<string, string>;
   env?: Record<string, string>;

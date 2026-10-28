@@ -76,7 +76,7 @@ It assumes `data/input.txt` exists and `/srv/eval#images.tools` provides a shell
 - `steps` runs containers in order, sharing `/outputs` between steps.
 - `image` accepts a [nix2container](https://github.com/nlewo/nix2container) installable or a registry image pinned as `docker://NAME@sha256:DIGEST`.
 - `resources` requests cores (CPUs from the worker's `cpus`), memory in MiB, and an optional GPU count.
-- `args` supplies arguments to the image's entrypoint.
+- `args` supplies arguments to the image's entrypoint, which an optional `entrypoint` replaces; `workdir` replaces its working directory with one that already exists, such as `/outputs`.
 
 For a single step, put its fields at the top level instead of using `steps`.
 Relative paths start where you run `ordo submit`.

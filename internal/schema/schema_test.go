@@ -34,6 +34,7 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 	for _, valid := range []string{
 		`{` + base + `,"image":"/nix/store/x.drv^*","args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"tags":["l40s"]}`,
 		`{` + base + `,"image":"/src#images.grep","secrets":["TOKEN"],"inputs":{"corpus":"/data"}}`,
+		`{` + base + `,"image":"/src#x","entrypoint":["netlock",""],"workdir":"/outputs"}`,
 	} {
 		if err := validate(valid); err != nil {
 			t.Errorf("rejected %s: %v", valid, err)
@@ -71,6 +72,9 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{` + base + `,"image":"/src#a\nb"}`,
 		`{` + base + `,"image":"/` + strings.Repeat("x", image.MaxInstallableBytes) + `"}`,
 		`{` + base + `,"image":"/src#x","env":{"MODE":"a\u0000b"}}`,
+		`{` + base + `,"image":"/src#x","entrypoint":[]}`,
+		`{` + base + `,"image":"/src#x","entrypoint":["","x"]}`,
+		`{` + base + `,"image":"/src#x","workdir":"outputs"}`,
 	} {
 		if err := validate(invalid); err == nil {
 			t.Errorf("accepted %s", invalid)
