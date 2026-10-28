@@ -118,7 +118,7 @@ func MoveFile(dir, file string) (string, error) {
 	return id, SyncDir(dir)
 }
 
-func PutTree(dir, tree string) (string, error) {
+func PutTree(dir string, tree fs.FS) (string, error) {
 	r, w := io.Pipe()
 	done := make(chan struct{})
 	go func() {
@@ -157,11 +157,11 @@ func publish(f *os.File, path string) error {
 	return SyncDir(filepath.Dir(path))
 }
 
-// Archive publishes only a complete, synced tar that keeps modification times. Only directories and
-// regular files are supported.
+// Archive publishes only a complete, synced tar that keeps modification times. Only directories,
+// regular files and symbolic links are supported.
 func Archive(dir, dest string) (string, error) {
 	hash := sha256.New()
-	err := WriteAtomic(dest, func(f io.Writer) error { return Tar(io.MultiWriter(f, hash), dir, true) })
+	err := WriteAtomic(dest, func(f io.Writer) error { return Tar(io.MultiWriter(f, hash), os.DirFS(dir), true) })
 	if err != nil {
 		return "", err
 	}
@@ -169,13 +169,13 @@ func Archive(dir, dest string) (string, error) {
 }
 
 // Without times every entry gets the epoch, so a snapshot's digest depends on its content alone.
-func Tar(w io.Writer, dir string, times bool) error {
+func Tar(w io.Writer, tree fs.FS, times bool) error {
 	tw := tar.NewWriter(w)
-	err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(tree, ".", func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if file == dir {
+		if name == "." {
 			if !entry.IsDir() {
 				return errors.New("snapshot source must be a directory")
 			}
@@ -185,29 +185,32 @@ func Tar(w io.Writer, dir string, times bool) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && !info.Mode().IsRegular() {
-			return fmt.Errorf("unsupported snapshot entry: %s", file)
+		link := info.Mode().Type() == fs.ModeSymlink
+		if !info.IsDir() && !info.Mode().IsRegular() && !link {
+			return fmt.Errorf("unsupported snapshot entry: %s", name)
 		}
-		rel, err := filepath.Rel(dir, file)
-		if err != nil {
-			return err
-		}
-		header := &tar.Header{Name: filepath.ToSlash(rel), Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg, Size: info.Size()}
-		if times {
+		header := &tar.Header{Name: name, Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg, Size: info.Size()}
+		if times && !link {
 			// Only PAX keeps the sub-second part, which results such as test timings rely on.
 			header.ModTime, header.Format = info.ModTime(), tar.FormatPAX
 		}
-		if info.IsDir() {
-			header.Typeflag = tar.TypeDir
-			header.Size = 0
+		switch {
+		case info.IsDir():
+			header.Typeflag, header.Size = tar.TypeDir, 0
+		case link:
+			target, err := fs.ReadLink(tree, name)
+			if err != nil {
+				return err
+			}
+			header.Typeflag, header.Size, header.Linkname = tar.TypeSymlink, 0, target
 		}
 		if err := tw.WriteHeader(header); err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if info.IsDir() || link {
 			return nil
 		}
-		in, err := os.Open(file)
+		in, err := tree.Open(name)
 		if err != nil {
 			return err
 		}
@@ -264,6 +267,11 @@ func Unpack(r io.Reader, dest string) error {
 }
 
 func untar(r io.Reader, dir string) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
 	tr := tar.NewReader(r)
 	var total int64
 	// Writing an entry changes its directory's time, so directories get theirs once all are written.
@@ -272,7 +280,7 @@ func untar(r io.Reader, dir string) error {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			for target, mtime := range dirs {
-				if err := os.Chtimes(target, mtime, mtime); err != nil {
+				if err := root.Chtimes(target, mtime, mtime); err != nil {
 					return err
 				}
 			}
@@ -285,30 +293,36 @@ func untar(r io.Reader, dir string) error {
 		if name == "" || name == "." || path.Clean(name) != name || !filepath.IsLocal(name) || strings.Contains(name, "\\") || strings.ContainsRune(name, 0) {
 			return errors.New("unsafe archive path")
 		}
-		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir {
-			return errors.New("archive links and special files are unsupported")
+		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeSymlink {
+			return errors.New("archive hard links and special files are unsupported")
 		}
 		if h.Size < 0 || h.Size > MaxSize-total {
 			return errors.New("expanded content exceeds limit")
 		}
 		total += h.Size
-		target := filepath.Join(dir, filepath.FromSlash(name))
-		if h.Typeflag == tar.TypeDir {
-			if err := os.MkdirAll(target, 0o755); err != nil {
+		target := filepath.FromSlash(name)
+		if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := root.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
 			dirs[target] = h.ModTime
 			continue
+		case tar.TypeSymlink:
+			if err := root.Symlink(h.Linkname, target); err != nil {
+				return err
+			}
+			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644|fs.FileMode(h.Mode)&0o111)
+		out, err := root.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644|fs.FileMode(h.Mode)&0o111)
 		if err != nil {
 			return err
 		}
 		_, err = io.Copy(out, tr)
-		if err := errors.Join(err, out.Sync(), out.Close(), os.Chtimes(target, h.ModTime, h.ModTime)); err != nil {
+		if err := errors.Join(err, out.Sync(), out.Close(), root.Chtimes(target, h.ModTime, h.ModTime)); err != nil {
 			return err
 		}
 	}

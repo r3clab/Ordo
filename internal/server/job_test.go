@@ -269,6 +269,37 @@ func TestInputsInAnotherJobsOutWaitForIt(t *testing.T) {
 	}
 }
 
+func TestPathsInADeliveredOutStayInIt(t *testing.T) {
+	f := newFixture(t)
+	up, outside := f.out("up"), t.TempDir()
+	for _, dir := range []string{filepath.Join(up, MetaDir), filepath.Join(up, "data", "train"), filepath.Join(outside, "train")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(up, MetaDir, JobFile), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"inside": "data", "escape": outside, "parent": ".."} {
+		if err := os.Symlink(target, filepath.Join(up, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	down := jobRequest(f.out("down"))
+	down.Inputs = map[string]string{"train": filepath.Join(up, "inside", "train")}
+	f.submit(t, down)
+	for _, input := range []string{"escape/train", "parent/up/data/train"} {
+		r := jobRequest(f.out("refused"))
+		r.Inputs = map[string]string{"train": filepath.Join(up, input)}
+		if _, err := f.s.Submit(context.Background(), r); err == nil {
+			t.Fatalf("snapshotted %s through a link that leaves its out", input)
+		}
+	}
+	if _, err := f.s.Submit(context.Background(), jobRequest(filepath.Join(up, "data", "nested"))); err == nil {
+		t.Fatal("accepted an out inside another job's out")
+	}
+}
+
 func TestRequestValidation(t *testing.T) {
 	both := twoSteps("/results/a")
 	both.Image = "/src#image"

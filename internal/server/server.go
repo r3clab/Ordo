@@ -466,6 +466,34 @@ func within(file, dir string) bool {
 	return file == dir || len(file) > len(parent) && file[len(parent)] == '/' && strings.HasPrefix(file, parent)
 }
 
+func enclosingOut(file string) string {
+	parts := strings.Split(file, "/")
+	for i := 2; i <= len(parts); i++ {
+		dir := strings.Join(parts[:i], "/")
+		if info, err := os.Lstat(filepath.Join(dir, MetaDir, JobFile)); err == nil && info.Mode().IsRegular() {
+			return dir
+		}
+	}
+	return ""
+}
+
+// A delivered out holds the links its job's image made, so they resolve only inside that out.
+func (s *Server) putTree(source string) (string, error) {
+	base := cmp.Or(enclosingOut(source), source)
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+	rel, _ := filepath.Rel(base, source)
+	tree, err := root.OpenRoot(rel)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tree.Close() }()
+	return content.PutTree(s.images.Blobs, tree.FS())
+}
+
 // Filter keeps the jobs that match every field it sets, and any value within one.
 type Filter struct {
 	IDs    []string
@@ -651,7 +679,7 @@ func (s *Server) stage(ctx context.Context, requests ...Request) *staging {
 		st.images = each(images, len(images), func(src image.Source) (image.Resolved, error) { return s.images.Resolve(ctx, src) })
 	})
 	wg.Go(func() {
-		st.inputs = each(inputs, snapshots, func(source string) (string, error) { return content.PutTree(s.images.Blobs, source) })
+		st.inputs = each(inputs, snapshots, s.putTree)
 	})
 	wg.Wait()
 	return st
@@ -733,6 +761,9 @@ func (r Request) Validate() error {
 func (s *Server) check(r Request) error {
 	if err := r.Validate(); err != nil {
 		return err
+	}
+	if dir := enclosingOut(filepath.Dir(r.Out)); dir != "" {
+		return fmt.Errorf("out lies in %s, the out of another job", dir)
 	}
 	c := s.settings.Load()
 	for _, step := range r.steps() {

@@ -99,6 +99,7 @@ Use a new output path to rerun a finished job.
 
 Inputs under another unfinished job's output directory make the job wait for it.
 Failure or cancellation skips dependent jobs.
+Symbolic links in an `out` were made by its job, so an input read through them must stay inside that `out`, and no `out` may lie inside another.
 See [job options](https://github.com/r3clab/Ordo/wiki/Configuration-and-jobs#job-options) for retries, dependencies, environment variables, and secrets.
 Submission fails if no worker matching the job's tags is configured with the requested resources.
 Run `ordo schema` for the full job format.

@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/r3clab/Ordo/internal/content"
 	"github.com/r3clab/Ordo/internal/spec"
 )
 
@@ -187,7 +186,7 @@ func (s *Server) snapshot(j Job) error {
 	defer s.staging.RUnlock()
 	inputs := map[string]string{}
 	for _, name := range j.Waiting {
-		digest, err := content.PutTree(s.images.Blobs, j.Inputs[name])
+		digest, err := s.putTree(j.Inputs[name])
 		if err != nil {
 			j.State, j.Error = Failed, fmt.Sprintf("input %s: %v", name, err)
 			return s.save(j)

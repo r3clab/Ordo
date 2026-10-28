@@ -416,7 +416,7 @@ func TestFailedCollectionBlocksOnce(t *testing.T) {
 	f.tick(t)
 	at := f.job(t, id).Attempts[0]
 	f.h.exit(at.ID, 0)
-	f.h.broken = errors.New("archive links and special files are unsupported")
+	f.h.broken = errors.New("archive hard links and special files are unsupported")
 	f.tick(t)
 	f.tick(t)
 	if j := f.job(t, id); j.State != Blocked || f.h.collects != 1 || !strings.Contains(j.Error, "special files") {

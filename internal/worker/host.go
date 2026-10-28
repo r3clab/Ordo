@@ -197,7 +197,7 @@ func (h *Host) EnsureInput(ctx context.Context, blob, digest string) error {
 	return h.ensure(h.treeDir(digest), func() error { return h.unpackInput(ctx, blob, digest) })
 }
 
-// unpackInput unpacks a snapshot tar, which the server built from regular files and directories only.
+// unpackInput unpacks a snapshot tar, which the server built from a directory.
 func (h *Host) unpackInput(ctx context.Context, blob, digest string) error {
 	tree := ssh.Quote(h.treeDir(digest))
 	if absent, err := h.absent(ctx, "test -d "+tree); !absent {
@@ -318,7 +318,7 @@ func (h *Host) Inspect(ctx context.Context, attempt string) (podman.Inspection, 
 	return podman.ParseInspect(data)
 }
 
-// A link or special file in the outputs fails collection, as content.Unpack accepts neither.
+// A special file in the outputs fails collection, as content.Unpack refuses it.
 func (h *Host) Collect(ctx context.Context, attempt, dir string) error {
 	err := writeFiles(filepath.Join(dir, StdoutFile), filepath.Join(dir, StderrFile), func(stdout, stderr io.Writer) error {
 		return h.run.Run(ctx, prelude()+"pm logs -- "+ssh.Quote(podman.Name(attempt)), nil, stdout, stderr)

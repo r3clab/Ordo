@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -202,8 +203,18 @@ func TestCollectStreamsLogsAndOutputs(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", filepath.Join(outputs, "link")); err != nil {
 		t.Fatal(err)
 	}
+	dir = t.TempDir()
+	if err := h.Collect(context.Background(), "a1", dir); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(filepath.Join(dir, "outputs", "link")); err != nil || target != "/etc/passwd" {
+		t.Fatalf("symbolic link collected as %q: %v", target, err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(outputs, "fifo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := h.Collect(context.Background(), "a1", t.TempDir()); err == nil {
-		t.Fatal("collected a symbolic link")
+		t.Fatal("collected a special file")
 	}
 }
 
@@ -213,8 +224,15 @@ func TestEnsureInputUnpacksOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "value"), []byte("data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
 	blobs := t.TempDir()
-	digest, err := content.PutTree(blobs, src)
+	digest, err := content.PutTree(blobs, os.DirFS(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +247,12 @@ func TestEnsureInputUnpacksOnce(t *testing.T) {
 	file := filepath.Join(h.StateDir, "trees", digest, "value")
 	if info, err := os.Stat(file); err != nil || info.Mode().Perm()&0o044 != 0o044 {
 		t.Fatalf("input must be readable by mapped container users: %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(h.StateDir, "trees", digest, "link")); err != nil || target != outside {
+		t.Fatalf("input link unpacked as %q: %v", target, err)
+	}
+	if info, err := os.Stat(outside); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("unpacking an input changed the file its link points to: %v", err)
 	}
 }
 
