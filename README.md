@@ -14,8 +14,13 @@ Running containers survive server restarts and SSH disconnects.
 ## Worker setup
 
 Workers need Linux, rootless Podman, cgroup v2, and a systemd user manager with lingering enabled.
-The server must reach them over SSH without prompts.
-No Ordo installation is needed on workers.
+The server must reach them over SSH without prompts, with local Unix-socket forwarding allowed (`AllowStreamLocalForwarding local` or `yes`).
+No manual Ordo installation is needed on workers: the server caches a matching executable under `${XDG_CACHE_HOME:-$HOME/.cache}/ordo/helpers` and starts a disposable worker helper.
+This cache must allow writing and executing files.
+One SSH session owns the helper; concurrent operations use HTTP through private, owner-only Unix sockets on the same SSH connection, so `MaxSessions 1` is sufficient.
+The helper exits when its connection closes; detached containers and worker state remain available for reconciliation after reconnecting.
+Packaged builds include Linux amd64 and arm64 helpers.
+Native Linux source builds can deploy themselves (build with `CGO_ENABLED=0`); cross-architecture workers require the packaged helpers.
 See [worker preparation](https://github.com/r3clab/Ordo/wiki/Getting-started#1-prepare-workers) for setup commands.
 
 ## Configuration

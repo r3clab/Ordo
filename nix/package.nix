@@ -16,6 +16,18 @@ pkgs.buildGoModule (finalAttrs: {
   subPackages = [ "cmd/ordo" ];
   ldflags = [ "-X main.defaultSkopeo=${perSystem.nix2container.skopeo-nix2container}/bin/skopeo" ];
 
+  # Helpers run on Linux, independently of the controller's OS and architecture.
+  postBuild = ''
+    mkdir -p helpers
+    for arch in amd64 arm64; do
+      GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o helpers/ordo-$arch ./cmd/ordo
+    done
+  '';
+  postInstall = ''
+    mkdir -p $out/libexec/ordo
+    cp helpers/ordo-* $out/libexec/ordo/
+  '';
+
   checkPhase = ''
     runHook preCheck
     CGO_ENABLED=1 go test -race ./...

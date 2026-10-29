@@ -14,6 +14,27 @@ The server builds the test image from `ORDO_TEST_INSTALLABLE`.
 `ORDO_TEST_IMAGE` is that image's immutable configuration ID, which the scripts use to clean up workers; `ordo queue get` shows it as `steps[0].spec.image` once the server has built it.
 The pinned fixture currently has the ID below; rebuilding with changed flake inputs/configuration can change it.
 
+## Single-session SSH transport
+
+On Linux, run the isolated SSH integration test:
+
+```sh
+ORDO_TEST_SSHD=1 go test -race -count=1 -timeout=2m -run '^TestSSHMaxSessions$' ./internal/worker
+```
+
+It starts an unprivileged `sshd` on loopback with temporary keys and `MaxSessions 1`, without changing the host's SSH configuration.
+It checks automatic helper deployment, cached reconnects, overlapping transfers and control requests, rejection of a second exec session, and cleanup after controller SIGKILL with an active service forward.
+Podman commands are faked by default.
+
+To also prove container survival, stopping, and output collection after reconnecting, set `ORDO_TEST_PODMAN_IMAGE` to the full `sha256:` ID of an **already present** image with a shell entrypoint, `echo`, and `sleep` (for example the fixture below).
+This variant uses one CPU and 128 MiB, requires the real worker prerequisites on the local host (including delegated cpuset/memory controllers), and removes only its own test container.
+It never enables lingering or changes cgroup delegation.
+
+Packaged builds bundle static Linux amd64 and arm64 executables in `libexec/ordo`.
+The server deploys the appropriate executable by digest; the helper protocol is checked before exposing its API.
+Worker state and container labels retain their existing format, so rolling back the controller does not require a data migration.
+Stop the old controller before starting another version against the same worker account.
+
 ## Server, jobs, and browser
 
 ```sh

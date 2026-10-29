@@ -3,9 +3,9 @@ package worker
 import (
 	"archive/tar"
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -46,8 +46,7 @@ type Host struct {
 	server string
 
 	mu sync.Mutex
-	// present caches what EnsureImage and EnsureInput confirmed. Something outside Ordo may remove an
-	// image or tree, so a failed launch forgets them all.
+	// External deletion is possible, so a failed launch invalidates these presence probes.
 	present map[string]bool
 }
 
@@ -55,56 +54,26 @@ func New(c Config, run Runner, server string) *Host {
 	return &Host{Config: c, run: run, server: server, present: map[string]bool{}}
 }
 
-func (h *Host) ensure(key string, put func() error) error {
+func (h *Host) cached(key string, probe func() (bool, error)) (bool, error) {
 	h.mu.Lock()
 	known := h.present[key]
 	h.mu.Unlock()
 	if known {
-		return nil
+		return true, nil
 	}
-	if err := put(); err != nil {
-		return err
+	present, err := probe()
+	if present && err == nil {
+		h.mu.Lock()
+		h.present[key] = true
+		h.mu.Unlock()
 	}
-	h.mu.Lock()
-	h.present[key] = true
-	h.mu.Unlock()
-	return nil
+	return present, err
 }
 
 func (h *Host) forget() {
 	h.mu.Lock()
 	clear(h.present)
 	h.mu.Unlock()
-}
-
-func Dial(ctx context.Context, c Config, services map[string]string, sshConfig string) (*ssh.Master, error) {
-	m, err := ssh.Dial(ctx, c.Host, sshConfig)
-	if err != nil {
-		return nil, err
-	}
-	if len(services) == 0 {
-		return m, nil
-	}
-	// sshd keeps a stale socket file by default (StreamLocalBindUnlink no), which would fail the bind.
-	prepare := "set -eu; umask 077"
-	var forwards []string
-	for _, name := range slices.Sorted(maps.Keys(services)) {
-		forward, err := c.ServiceForward(name, services[name])
-		if err != nil {
-			return nil, errors.Join(err, m.Close())
-		}
-		prepare += "; mkdir -p -- " + ssh.Quote(c.serviceDir(name)) + "; rm -f -- " + ssh.Quote(c.serviceSocket(name))
-		forwards = append(forwards, forward)
-	}
-	if err := m.Run(ctx, prepare, nil, nil, nil); err != nil {
-		return nil, errors.Join(err, m.Close())
-	}
-	for _, forward := range forwards {
-		if err := m.Forward(ctx, forward); err != nil {
-			return nil, errors.Join(err, m.Close())
-		}
-	}
-	return m, nil
 }
 
 // prelude defines pm, which runs Podman in its own transient scope: conmon and fuse-overlayfs stay in
@@ -128,15 +97,6 @@ func (h *Host) output(ctx context.Context, script string, stdin io.Reader) ([]by
 	var stdout bytes.Buffer
 	err := h.run.Run(ctx, script, stdin, &stdout, nil)
 	return stdout.Bytes(), err
-}
-
-func (h *Host) send(ctx context.Context, script, file string) ([]byte, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	return h.output(ctx, script, f)
 }
 
 // absent runs an existence probe, whose exit status code means absence.
@@ -175,15 +135,8 @@ func (h *Host) Poll(ctx context.Context) (Snapshot, error) {
 	return Snapshot{BootID: strings.TrimSpace(lines[0]), Now: time.Unix(now, 0).UTC(), Containers: containers, Runs: strings.Fields(lines[2])}, err
 }
 
-func (h *Host) EnsureImage(ctx context.Context, archive, id string) error {
-	return h.ensure(id, func() error { return h.loadImage(ctx, archive, id) })
-}
-
-func (h *Host) loadImage(ctx context.Context, archive, id string) error {
-	if absent, err := h.absent(ctx, prelude()+"pm image exists -- "+ssh.Quote(id), 1); !absent {
-		return err
-	}
-	data, err := h.send(ctx, prelude()+"pm load >&2; mkdir -p -- "+ssh.Quote(h.imageDir())+"; : > "+ssh.Quote(h.imageMark(id))+"; pm image inspect --format=json -- "+ssh.Quote(id), archive)
+func (h *Host) importImage(ctx context.Context, archive io.Reader, id string) error {
+	data, err := h.output(ctx, prelude()+"pm load >&2; mkdir -p -- "+ssh.Quote(h.imageDir())+"; : > "+ssh.Quote(h.imageMark(id))+"; pm image inspect --format=json -- "+ssh.Quote(id), archive)
 	if err != nil {
 		return err
 	}
@@ -197,40 +150,52 @@ func (h *Host) loadImage(ctx context.Context, archive, id string) error {
 	return nil
 }
 
-func (h *Host) EnsureInput(ctx context.Context, blob, digest string) error {
-	return h.ensure(h.treeDir(digest), func() error { return h.unpackInput(ctx, blob, digest) })
-}
-
-// unpackInput unpacks a snapshot tar, which the server built from a directory.
-func (h *Host) unpackInput(ctx context.Context, blob, digest string) error {
-	tree := ssh.Quote(h.treeDir(digest))
-	if absent, err := h.absent(ctx, "test -d "+tree, 1); !absent {
-		return err
-	}
-	// A task running as a non-root image user gets a subordinate UID, which must still read its inputs.
-	script := "set -eu; umask 022; d=$(mktemp -d " + ssh.Quote(h.treeDir(".in.XXXXXX")) + "); trap 'rm -rf -- \"$d\"' EXIT; " +
-		"tar -x -f - -C \"$d\"; chmod -R a+rX -- \"$d\"; mv -T -- \"$d\" " + tree + " || test -d " + tree
-	_, err := h.send(ctx, script, blob)
-	return err
-}
-
-// Seed gives an attempt the outputs of its job's earlier steps before it launches: it moves them out of
-// prev's run directory when prev ran here and left them, or unpacks archive otherwise. A repeated seed
-// of one attempt finds its outputs in place.
-func (h *Host) Seed(ctx context.Context, attempt, prev, archive string) error {
+// seed reuses outputs left on this worker; false asks the controller to upload its saved archive.
+func (h *Host) seed(ctx context.Context, attempt, prev string) (bool, error) {
 	run := h.runDir(attempt)
 	outputs := ssh.Quote(path.Join(run, OutputsDir))
 	kept := ssh.Quote(path.Join(h.runDir(prev), OutputsDir))
 	script := "set -eu; umask 077; test -d " + outputs + " && exit 0; mkdir -p -- " + ssh.Quote(run) + "; " +
 		"if test -d " + kept + "; then mv -T -- " + kept + " " + outputs + "; rm -rf -- " + ssh.Quote(h.runDir(prev)) + "; exit 0; fi; exit 3"
-	if absent, err := h.absent(ctx, script, 3); !absent {
+	absent, err := h.absent(ctx, script, 3)
+	return !absent, err
+}
+
+// receiveTree never publishes a partial upload or follows an archive's links outside its staging tree.
+func receiveTree(ctx context.Context, dest string, in io.Reader, digest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
-	// -p keeps the modes the earlier step gave its files, which umask would otherwise narrow.
-	script = "set -eu; d=$(mktemp -d " + ssh.Quote(path.Join(run, ".seed.XXXXXX")) + "); trap 'rm -rf -- \"$d\"' EXIT; " +
-		"tar -x -p -f - -C \"$d\"; mv -T -- \"$d\" " + outputs
-	_, err := h.send(ctx, script, archive)
-	return err
+	dir, err := os.MkdirTemp(filepath.Dir(dest), ".upload-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	hash := sha256.New()
+	in = io.TeeReader(in, hash)
+	if err := content.Extract(in, dir); err != nil {
+		return err
+	}
+	if _, err := io.Copy(io.Discard, in); err != nil {
+		return err
+	}
+	if digest != "" && fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		return errors.New("input archive digest mismatch")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Mapped container users must be able to traverse the input root.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(dir, dest); err != nil {
+		if info, statErr := os.Stat(dest); statErr == nil && info.IsDir() {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 type Launch struct {
@@ -313,44 +278,15 @@ func (h *Host) Inspect(ctx context.Context, attempt string) (podman.Inspection, 
 	return podman.ParseInspect(data)
 }
 
-// A special file in the outputs fails collection, as content.Extract refuses it. The caller keeps dir's
-// outputs only as long as it takes to archive them, so they are not synced.
-func (h *Host) Collect(ctx context.Context, attempt, dir string) error {
-	stdout, err := os.OpenFile(filepath.Join(dir, StdoutFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stdout.Close() }()
-	stderr, err := os.OpenFile(filepath.Join(dir, StderrFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stderr.Close() }()
-	if err := h.run.Run(ctx, prelude()+"pm logs -- "+ssh.Quote(podman.Name(attempt)), nil, stdout, stderr); err != nil {
-		return err
-	}
-	if err := errors.Join(stdout.Sync(), stderr.Sync()); err != nil {
-		return err
-	}
-	outputs := filepath.Join(dir, OutputsDir)
-	if err := os.Mkdir(outputs, 0o700); err != nil {
-		return err
-	}
-	// sh has no pipefail, so the file list goes through a temporary file to keep find's failures. The
-	// POSIX format keeps sub-second modification times.
+func (h *Host) logs(ctx context.Context, attempt string, stdout, stderr io.Writer) error {
+	return h.run.Run(ctx, prelude()+"pm logs -- "+ssh.Quote(podman.Name(attempt)), nil, stdout, stderr)
+}
+
+func (h *Host) outputs(ctx context.Context, attempt string, out io.Writer) error {
+	// Keep find's failures and sub-second timestamps without relying on shell pipefail.
 	script := "set -eu; cd -- " + ssh.Quote(path.Join(h.runDir(attempt), OutputsDir)) + "; l=$(mktemp); trap 'rm -f -- \"$l\"' EXIT; " +
 		"find . -mindepth 1 -printf '%P\\0' > \"$l\"; tar -c -f - --format=posix --pax-option=delete=atime,delete=ctime --null --no-recursion --hard-dereference -T \"$l\""
-	reader, writer := io.Pipe()
-	unpacked := make(chan error, 1)
-	go func() {
-		err := content.Extract(reader, outputs)
-		_ = reader.CloseWithError(err)
-		unpacked <- err
-	}()
-	err = h.run.Run(ctx, script, nil, writer, nil)
-	_ = writer.CloseWithError(err)
-	unpackErr := <-unpacked
-	return cmp.Or(err, unpackErr)
+	return h.run.Run(ctx, script, nil, out, nil)
 }
 
 // Prune removes the images Ordo loaded and the input trees it unpacked that keep does not name and no

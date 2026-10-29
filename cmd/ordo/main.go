@@ -10,6 +10,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/r3clab/Ordo/internal/ssh"
+	"github.com/r3clab/Ordo/internal/worker"
 )
 
 func main() {
@@ -39,6 +42,15 @@ var commands = map[string]func(context.Context, []string, io.Writer) error{
 }
 
 func dispatch(ctx context.Context, args []string, output io.Writer) error {
+	// Internal subprocesses: supervise SSH locally and execute worker operations remotely.
+	if len(args) > 1 && args[0] == "__ssh" {
+		return ssh.Supervise(ctx, args[1:])
+	}
+	if len(args) == 1 && args[0] == "worker" {
+		ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP)
+		defer stop()
+		return worker.Serve(ctx, os.Stdin, output)
+	}
 	flags := newFlags("ordo")
 	err := flags.Parse(args)
 	if err != nil && !errors.Is(err, flag.ErrHelp) {

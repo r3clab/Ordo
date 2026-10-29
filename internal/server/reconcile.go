@@ -146,18 +146,17 @@ func (s *Server) attach(host string, cancel context.CancelCauseFunc) (*settings,
 }
 
 func (s *Server) session(ctx context.Context, c *settings, cfg worker.Config) error {
-	m, err := worker.Dial(ctx, cfg, c.services, c.sshConfig)
+	h, err := worker.Dial(ctx, cfg, c.services, c.sshConfig, s.id)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = m.Close() }()
+	defer func() { _ = h.Close() }()
 	ctx, cancel := context.WithCancelCause(ctx)
 	bg := &steps{cancel: cancel}
 	defer func() {
 		cancel(nil)
 		bg.wg.Wait()
 	}()
-	h := worker.New(cfg, m, s.id)
 	probe, err := h.Probe(ctx)
 	if err != nil {
 		return err

@@ -1,5 +1,4 @@
-// Package worker drives rootless Podman on an SSH worker with shell scripts; nothing of Ordo is
-// installed there.
+// Package worker executes local Podman operations and exposes them through a connection-scoped API.
 package worker
 
 import (

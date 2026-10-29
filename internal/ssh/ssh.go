@@ -1,10 +1,12 @@
-// Package ssh runs shell scripts on a worker through one multiplexed OpenSSH connection.
+// Package ssh bootstraps a connection-scoped worker and forwards its private API socket.
 package ssh
 
 import (
+	"bufio"
 	"bytes"
-	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,21 +19,19 @@ import (
 	"time"
 )
 
-// MaxCommand stays below Linux's 128 KiB limit on one argv string, which the remote shell's -c receives.
+// MaxCommand stays below Linux's 128 KiB limit on one argv string.
 const MaxCommand = 120 << 10
 
-// ErrTransport marks failures that say nothing about the remote command, so callers reconnect.
-var ErrTransport = errors.New("SSH transport failed")
+// ErrTransport marks failures that say nothing about the remote operation's outcome.
+var ErrTransport = errors.New("worker transport failed")
 
 var host = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]*$`)
+var socketPath = regexp.MustCompile(`^/[a-zA-Z0-9_./-]+$`)
 
-func ValidHost(alias string) bool { return host.MatchString(alias) }
-
-func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
+func ValidHost(alias string) bool  { return host.MatchString(alias) }
+func Quote(s string) string        { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 func command(script string) string { return "exec sh -c " + Quote(script) }
 
-// config is an ssh_config file that replaces the user's, so workers stay out of everyday SSH aliases.
 func client(ctx context.Context, config string, args ...string) *exec.Cmd {
 	if config != "" {
 		args = append([]string{"-F", config}, args...)
@@ -41,7 +41,7 @@ func client(ctx context.Context, config string, args ...string) *exec.Cmd {
 
 func CheckScript(script string) error {
 	if size := len(command(script)); size > MaxCommand {
-		return fmt.Errorf("remote command is %d bytes; the limit is %d", size, MaxCommand)
+		return fmt.Errorf("worker command is %d bytes; the limit is %d", size, MaxCommand)
 	}
 	return nil
 }
@@ -56,13 +56,13 @@ type ExitError struct {
 }
 
 func (e *ExitError) Error() string {
-	return fmt.Sprintf("remote command exited with status %d: %s", e.Code, e.Stderr)
+	return fmt.Sprintf("worker command exited with status %d: %s", e.Code, e.Stderr)
 }
 
 type Master struct {
-	host   string
-	config string
-	socket string
+	host, config, control string
+	// Socket is the local, owner-only endpoint of the worker's HTTP API.
+	Socket string
 	input  *os.File
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -71,9 +71,38 @@ type Master struct {
 	once   sync.Once
 }
 
-// Dial starts a master connection whose remote command ends when this process closes its stdin, so a
-// killed server leaves no SSH session or forward behind.
-func Dial(ctx context.Context, alias, config string) (*Master, error) {
+// bootstrap uses one exec session for discovery, an atomic binary upload, and the helper itself.
+// The digest names the executable, so a reconnect or concurrent upgrade never replaces a running file.
+const bootstrap = `set -eu
+umask 077
+uname -m
+IFS=' ' read -r digest size
+case "$digest" in *[!0-9a-f]*|'') exit 2;; esac
+[ "${#digest}" = 64 ]
+case "$size" in *[!0-9]*|'') exit 2;; esac
+[ "$size" -gt 0 ] && [ "$size" -le 268435456 ]
+d="${XDG_CACHE_HOME:-$HOME/.cache}/ordo/helpers"
+mkdir -p -- "$d"
+[ "$(stat -c %a "$d")" = 700 ]
+bin="$d/$digest"
+if [ -f "$bin" ] && [ "$(sha256sum "$bin" | cut -d ' ' -f 1)" = "$digest" ]; then
+  printf 'cached\n'
+else
+  f=$(mktemp "$d/.upload.XXXXXXXX")
+  trap 'rm -f -- "$f"' EXIT
+  printf 'upload\n'
+  head -c "$size" > "$f"
+  [ "$(sha256sum "$f" | cut -d ' ' -f 1)" = "$digest" ]
+  chmod 700 "$f"
+  mv -f -- "$f" "$bin"
+  trap - EXIT
+fi
+exec "$bin" worker
+`
+
+// Dial keeps stdin open as a lifetime lease. The helper exits on EOF, including when Ordo is killed.
+// executable selects a Linux executable for the architecture reported by the worker.
+func Dial(ctx context.Context, alias, config string, init any, executable func(string) (string, error)) (_ *Master, err error) {
 	if !ValidHost(alias) {
 		return nil, errors.New("invalid SSH host alias")
 	}
@@ -87,83 +116,100 @@ func Dial(ctx context.Context, alias, config string) (*Master, error) {
 	}
 	defer func() { _ = reader.Close() }()
 	child, cancel := context.WithCancel(ctx)
-	m := &Master{host: alias, config: config, socket: filepath.Join(dir, "master"), input: writer, cancel: cancel, done: make(chan struct{})}
-	// Forwarded sockets are mode 0600, so only the worker user's containers can connect to a service.
-	cmd := client(child, config, "-M", "-S", m.socket, "-T", "-oBatchMode=yes", "-oControlPersist=no", "-oExitOnForwardFailure=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", alias, "exec cat >/dev/null")
-	cmd.Stdin = reader
-	cmd.Stderr = &m.stderr
-	cmd.WaitDelay = 2 * time.Second
-	if err := cmd.Start(); err != nil {
+	m := &Master{host: alias, config: config, control: filepath.Join(dir, "master"), Socket: filepath.Join(dir, "api"), input: writer, cancel: cancel, done: make(chan struct{})}
+	cmd := client(child, config, "-M", "-S", m.control, "-T", "-oBatchMode=yes", "-oControlPersist=no", "-oExitOnForwardFailure=yes", "-oStreamLocalBindMask=0177", "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-oConnectTimeout=10", alias, command(bootstrap))
+	self, err := os.Executable()
+	if err != nil {
 		cancel()
 		return nil, errors.Join(err, writer.Close(), os.RemoveAll(dir))
 	}
-	go func() {
-		m.err = cmd.Wait()
-		close(m.done)
+	cmd = exec.CommandContext(child, self, append([]string{"__ssh"}, cmd.Args[1:]...)...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.Stdin, cmd.Stderr = reader, &m.stderr
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, errors.Join(err, writer.Close(), os.RemoveAll(dir))
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, errors.Join(err, out.Close(), writer.Close(), os.RemoveAll(dir))
+	}
+	go func() { m.err = cmd.Wait(); close(m.done) }()
+	defer func() {
+		if err != nil {
+			_ = m.Close()
+			err = transport(alias, "%v: %s", err, strings.TrimSpace(m.stderr.String()))
+		}
 	}()
-	ready, stop := context.WithTimeout(child, 20*time.Second)
-	defer stop()
-	for {
-		check := client(ready, config, "-S", m.socket, "-O", "check", alias)
-		if check.Run() == nil {
-			return m, nil
+	// Bound discovery and upload without imposing a deadline on the established connection.
+	timer := time.AfterFunc(2*time.Minute, cancel)
+	defer timer.Stop()
+	scan := bufio.NewScanner(out)
+	line := func() (string, error) {
+		if scan.Scan() {
+			return scan.Text(), nil
 		}
-		select {
-		case <-m.done:
-			_ = m.Close()
-			return nil, transport(alias, "%v: %s", m.err, strings.TrimSpace(m.stderr.String()))
-		case <-ready.Done():
-			_ = m.Close()
-			return nil, transport(alias, "master not ready: %v", ready.Err())
-		case <-time.After(100 * time.Millisecond):
+		if err := scan.Err(); err != nil {
+			return "", err
 		}
+		return "", errors.New("worker bootstrap ended before readiness")
 	}
-}
-
-// The last 4 KiB of stderr also reach the returned error, even when stderr is nil.
-func (m *Master) Run(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if err := CheckScript(script); err != nil {
-		return err
+	arch, err := line()
+	if err != nil {
+		return nil, err
 	}
-	// ssh silently connects directly when the master is gone, which would bypass its forwards.
-	select {
-	case <-m.done:
-		return transport(m.host, "master connection closed")
+	binary, err := executable(arch)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(binary)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	hash := sha256.New()
+	size, err := io.Copy(hash, f)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 || size > 256<<20 {
+		return nil, errors.New("invalid helper executable size")
+	}
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	if _, err = fmt.Fprintf(writer, "%x %d\n", hash.Sum(nil), size); err != nil {
+		return nil, err
+	}
+	status, err := line()
+	if err != nil {
+		return nil, err
+	}
+	switch status {
+	case "upload":
+		if _, err = io.CopyN(writer, f, size); err != nil {
+			return nil, err
+		}
+	case "cached":
 	default:
+		return nil, fmt.Errorf("unexpected bootstrap response %q", status)
 	}
-	tail := &tailBuffer{}
-	cmd := client(ctx, m.config, "-S", m.socket, "-oControlMaster=no", "-T", "-oBatchMode=yes", "-oLogLevel=ERROR", m.host, command(script))
-	cmd.Stdin = stdin
-	var local []*sink
-	catch := func(w io.Writer) io.Writer {
-		s := &sink{w: w}
-		local = append(local, s)
-		return s
+	if err = json.NewEncoder(writer).Encode(init); err != nil {
+		return nil, err
 	}
-	if stdout != nil {
-		cmd.Stdout = catch(stdout)
+	remote, err := line()
+	if err != nil {
+		return nil, err
 	}
-	cmd.Stderr = tail
-	if stderr != nil {
-		cmd.Stderr = io.MultiWriter(catch(stderr), tail)
+	if !socketPath.MatchString(remote) || len(remote) > 100 {
+		return nil, errors.New("invalid worker API socket")
 	}
-	cmd.WaitDelay = 3 * time.Second
-	err := cmd.Run()
-	if err == nil || ctx.Err() != nil {
-		return cmp.Or(ctx.Err(), err)
+	if err = m.forward(child, "-L", m.Socket+":"+remote); err != nil {
+		return nil, err
 	}
-	// A failed local write kills ssh like a broken connection would, but the fault is the caller's.
-	for _, s := range local {
-		if s.err != nil {
-			return s.err
-		}
-	}
-	// ssh exits 255 for its own failures, and a signal (status -1) ends ssh, not the remote command;
-	// any other status is the remote command's.
-	if exit, ok := errors.AsType[*exec.ExitError](err); ok && exit.ExitCode() > 0 && exit.ExitCode() != 255 {
-		return &ExitError{Code: exit.ExitCode(), Stderr: strings.TrimSpace(tail.String())}
-	}
-	return transport(m.host, "%v: %s", err, strings.TrimSpace(tail.String()))
+	return m, nil
 }
 
 func Home(ctx context.Context, alias, config string) (string, error) {
@@ -180,53 +226,28 @@ func Home(ctx context.Context, alias, config string) (string, error) {
 	return string(out), nil
 }
 
-// remote is ssh's -R argument, such as SOCKET:HOST:PORT; the forward lives as long as the master.
-func (m *Master) Forward(ctx context.Context, remote string) error {
-	out, err := client(ctx, m.config, "-S", m.socket, "-O", "forward", "-R", remote, m.host).CombinedOutput()
+func (m *Master) forward(ctx context.Context, flag, address string) error {
+	out, err := client(ctx, m.config, "-S", m.control, "-O", "forward", flag, address, m.host).CombinedOutput()
 	if err != nil {
-		return transport(m.host, "forward %s: %v: %s", remote, err, strings.TrimSpace(string(out)))
+		return transport(m.host, "forward: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func (m *Master) Forward(ctx context.Context, remote string) error {
+	return m.forward(ctx, "-R", remote)
 }
 
 func (m *Master) Close() error {
 	m.once.Do(func() {
 		_ = m.input.Close()
+		select {
+		case <-m.done:
+		case <-time.After(3 * time.Second):
+		}
 		m.cancel()
 		<-m.done
-		_ = os.RemoveAll(filepath.Dir(m.socket))
+		_ = os.RemoveAll(filepath.Dir(m.control))
 	})
 	return nil
-}
-
-// tailBuffer keeps the end of stderr, where tools print the error that ended them.
-type tailBuffer struct{ data []byte }
-
-const tailBytes = 4 << 10
-
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if n > tailBytes {
-		p = p[n-tailBytes:]
-	}
-	if drop := len(b.data) + len(p) - tailBytes; drop > 0 {
-		b.data = b.data[:copy(b.data, b.data[drop:])]
-	}
-	b.data = append(b.data, p...)
-	return n, nil
-}
-
-func (b *tailBuffer) String() string { return string(b.data) }
-
-type sink struct {
-	w   io.Writer
-	err error
-}
-
-func (s *sink) Write(p []byte) (int, error) {
-	n, err := s.w.Write(p)
-	if err != nil && s.err == nil {
-		s.err = err
-	}
-	return n, err
 }

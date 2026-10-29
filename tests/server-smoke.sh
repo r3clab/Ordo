@@ -46,7 +46,8 @@ for ((i=0;i<90;i++)); do
  sleep 1
 done
 jq -e 'all(.state=="running")' "$work/list.json" >/dev/null
-pgrep -P "$pid" > "$work/ssh-pids.txt" || true
+# Capture both the lifetime supervisors and their SSH children.
+{ for child in $(pgrep -P "$pid"); do printf '%s\n' "$child"; pgrep -P "$child" || true; done; } > "$work/ssh-pids.txt"
 kill -KILL "$pid"; wait "$pid" 2>/dev/null || true; pid=
 sleep 3
 while IFS= read -r child; do if kill -0 "$child" 2>/dev/null; then printf 'Orphan transport %s\n' "$child" >&2; exit 1; fi; done < "$work/ssh-pids.txt"

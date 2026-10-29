@@ -177,6 +177,7 @@ func TestCheckLaunchBoundsTheRemoteCommand(t *testing.T) {
 func TestCollectStreamsLogsAndOutputs(t *testing.T) {
 	fakes(t)
 	h := testHost(t)
+	c := apiClient(t, newAPI(h))
 	outputs := filepath.Join(h.StateDir, "runs", "a1", "outputs")
 	if err := os.MkdirAll(filepath.Join(outputs, "nested", "empty"), 0o755); err != nil {
 		t.Fatal(err)
@@ -188,7 +189,7 @@ func TestCollectStreamsLogsAndOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	if err := h.Collect(context.Background(), "a1", dir); err != nil {
+	if err := c.Collect(context.Background(), "a1", dir); err != nil {
 		t.Fatal(err)
 	}
 	for file, want := range map[string]string{StdoutFile: "task stdout\n", StderrFile: "task stderr\n", "outputs/nested/value": "42", "outputs/hard": "42"} {
@@ -204,7 +205,7 @@ func TestCollectStreamsLogsAndOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir = t.TempDir()
-	if err := h.Collect(context.Background(), "a1", dir); err != nil {
+	if err := c.Collect(context.Background(), "a1", dir); err != nil {
 		t.Fatal(err)
 	}
 	if target, err := os.Readlink(filepath.Join(dir, "outputs", "link")); err != nil || target != "/etc/passwd" {
@@ -213,13 +214,14 @@ func TestCollectStreamsLogsAndOutputs(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(outputs, "fifo"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.Collect(context.Background(), "a1", t.TempDir()); err == nil {
+	if err := c.Collect(context.Background(), "a1", t.TempDir()); err == nil {
 		t.Fatal("collected a special file")
 	}
 }
 
 func TestEnsureInputUnpacksOnce(t *testing.T) {
 	h := testHost(t)
+	c := apiClient(t, newAPI(h))
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "value"), []byte("data"), 0o600); err != nil {
 		t.Fatal(err)
@@ -240,7 +242,7 @@ func TestEnsureInputUnpacksOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := h.EnsureInput(context.Background(), filepath.Join(blobs, digest), digest); err != nil {
+		if err := c.EnsureInput(context.Background(), filepath.Join(blobs, digest), digest); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -258,6 +260,7 @@ func TestEnsureInputUnpacksOnce(t *testing.T) {
 
 func TestSeedMovesKeptOutputsOrUnpacksTheArchive(t *testing.T) {
 	h := testHost(t)
+	c := apiClient(t, newAPI(h))
 	kept := filepath.Join(h.StateDir, "runs", "a", OutputsDir)
 	if err := os.MkdirAll(kept, 0o700); err != nil {
 		t.Fatal(err)
@@ -266,7 +269,7 @@ func TestSeedMovesKeptOutputsOrUnpacksTheArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := h.Seed(context.Background(), "b", "a", "/missing.tar"); err != nil {
+		if err := c.Seed(context.Background(), "b", "a", "/missing.tar"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -289,7 +292,7 @@ func TestSeedMovesKeptOutputsOrUnpacksTheArchive(t *testing.T) {
 	if _, err := content.Archive(src, archive); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.Seed(context.Background(), "c", "a", archive); err != nil {
+	if err := c.Seed(context.Background(), "c", "a", archive); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(h.StateDir, "runs", "c", OutputsDir, "test000001.ktest"))
@@ -301,24 +304,26 @@ func TestSeedMovesKeptOutputsOrUnpacksTheArchive(t *testing.T) {
 func TestEnsureImageLoadsOnlyWhenMissing(t *testing.T) {
 	log := fakes(t)
 	h := testHost(t)
+	c := apiClient(t, newAPI(h))
 	id := "sha256:" + strings.Repeat("a", 64)
 	archive := filepath.Join(t.TempDir(), "image.tar")
 	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := h.EnsureImage(context.Background(), archive, id); err != nil || len(calls(t, log, "podman")) != 1 {
+		if err := c.EnsureImage(context.Background(), archive, id); err != nil || len(calls(t, log, "podman")) != 1 {
 			t.Fatal("present image reloaded or probed again", err)
 		}
 	}
 	h = testHost(t)
+	c = apiClient(t, newAPI(h))
 	t.Setenv("ORDO_FAKE_IMAGE_EXISTS", "1")
 	t.Setenv("ORDO_FAKE_IMAGE", "sha256:"+strings.Repeat("d", 64))
-	if err := h.EnsureImage(context.Background(), archive, id); err == nil {
+	if err := c.EnsureImage(context.Background(), archive, id); err == nil {
 		t.Fatal("accepted a loaded image with another ID")
 	}
 	t.Setenv("ORDO_FAKE_IMAGE", id)
-	if err := h.EnsureImage(context.Background(), archive, id); err != nil {
+	if err := c.EnsureImage(context.Background(), archive, id); err != nil {
 		t.Fatal(err)
 	}
 	if data, _ := os.ReadFile(log + ".loaded"); string(data) != "archive" {

@@ -1,25 +1,36 @@
 package ssh
 
 import (
-	"bytes"
 	"context"
-	"errors"
+	"crypto/sha256"
+	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// fakeSSH runs the remote command locally and keeps a master alive until its stdin closes.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__ssh" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		if err := Supervise(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// Only bootstrap executes a shell. Forwarding is a local control request, not another session.
 const fakeSSH = `#!/bin/sh
 test -z "$FAKE_SSH_LOG" || echo "$*" >> "$FAKE_SSH_LOG"
 for last; do :; done
-prev=
-for arg; do test "$prev" = -S && socket=$arg; prev=$arg; done
 case " $* " in
-*" -O check "*) test -e "$socket" && exit 0; exit 1 ;;
 *" -O forward "*) exit 0 ;;
-*" -M "*) : > "$socket"; cat >/dev/null; rm -f "$socket"; exit 0 ;;
 esac
 exec /bin/sh -c "$last"
 `
@@ -31,63 +42,80 @@ func installFakeSSH(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 }
 
-type failingWriter struct{ err error }
-
-func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
-
-func TestRunClassifiesRemoteAndTransportFailures(t *testing.T) {
-	installFakeSSH(t)
-	ctx := context.Background()
-	if _, err := Dial(ctx, "-oProxyCommand=x", ""); err == nil {
-		t.Fatal("allowed SSH option injection")
+func helper(t *testing.T) (string, []byte) {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "ordo")
+	data := []byte("#!/bin/sh\n[ \"$1\" = worker ] || exit 1\nread init\nprintf '/tmp/ordo-test/api\\n'\ncat >/dev/null\n")
+	if err := os.WriteFile(file, data, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	m, err := Dial(ctx, "worker", "")
+	return file, data
+}
+
+func TestBootstrapCachesAnExactExecutableAndKeepsOneSession(t *testing.T) {
+	installFakeSSH(t)
+	binary, data := helper(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	selectBinary := func(arch string) (string, error) {
+		if arch != "x86_64" && arch != "aarch64" {
+			t.Errorf("architecture %q", arch)
+		}
+		return binary, nil
+	}
+	if _, err := Dial(ctx, "-oProxyCommand=x", "", nil, selectBinary); err == nil {
+		t.Fatal("accepted option injection")
+	}
+	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "ordo", "helpers", fmt.Sprintf("%x", sha256.Sum256(data)))
+	var first time.Time
+	for i := range 2 {
+		m, err := Dial(ctx, "worker", "", map[string]string{"server": "test"}, selectBinary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(cache)
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("cached helper: %v, %v", info, err)
+		}
+		if i == 0 {
+			first = info.ModTime()
+		} else if !first.Equal(info.ModTime()) {
+			t.Fatal("cached helper was uploaded again")
+		}
+		if err := m.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Dir(m.Socket)); !os.IsNotExist(err) {
+			t.Fatalf("local sockets survived Close: %v", err)
+		}
+	}
+	// A corrupted cache entry is replaced, not executed.
+	if err := os.WriteFile(cache, []byte("corrupt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Dial(ctx, "worker", "", nil, selectBinary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out bytes.Buffer
-	if err := m.Run(ctx, `printf '%s' "$1" | cat; read line; printf ' %s' "$line"`, strings.NewReader("in\n"), &out, nil); err != nil || out.String() != " in" {
-		t.Fatalf("run: %q, %v", out.String(), err)
-	}
-	out.Reset()
-	if err := m.Run(ctx, "printf 'a'\\''b $x'", nil, &out, nil); err != nil || out.String() != "a'b $x" {
-		t.Fatalf("quoting: %q, %v", out.String(), err)
-	}
-	var exit *ExitError
-	if err := m.Run(ctx, "echo broken >&2; exit 3", nil, nil, nil); !errors.As(err, &exit) || exit.Code != 3 || exit.Stderr != "broken" || errors.Is(err, ErrTransport) {
-		t.Fatalf("remote failure: %v", err)
-	}
-	if err := m.Run(ctx, "exit 255", nil, nil, nil); !errors.Is(err, ErrTransport) {
-		t.Fatalf("ssh's own exit status must be a transport failure: %v", err)
-	}
-	if err := m.Run(ctx, strings.Repeat("x", MaxCommand), nil, nil, nil); err == nil || errors.Is(err, ErrTransport) {
-		t.Fatalf("oversized script: %v", err)
-	}
-	broken := errors.New("disk full")
-	if err := m.Run(ctx, "yes | head -c 1048576", nil, failingWriter{broken}, nil); !errors.Is(err, broken) || errors.Is(err, ErrTransport) {
-		t.Fatalf("a local write failure is not the connection's: %v", err)
-	}
-	if err := m.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Run(ctx, "true", nil, nil, nil); !errors.Is(err, ErrTransport) {
-		t.Fatalf("closed master must be a transport failure: %v", err)
+	_ = m.Close()
+	got, err := os.ReadFile(cache)
+	if err != nil || string(got) != string(data) {
+		t.Fatal("corrupted helper was reused", err)
 	}
 }
 
-func TestConfigFileReachesEveryCall(t *testing.T) {
+func TestConfigFileReachesBootstrapForwardsAndHome(t *testing.T) {
 	installFakeSSH(t)
+	binary, _ := helper(t)
 	dir := t.TempDir()
 	config, log := filepath.Join(dir, "ssh_config"), filepath.Join(dir, "log")
 	t.Setenv("FAKE_SSH_LOG", log)
 	ctx := context.Background()
-	m, err := Dial(ctx, "worker", config)
+	m, err := Dial(ctx, "worker", config, nil, func(string) (string, error) { return binary, nil })
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Run(ctx, "true", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Forward(ctx, "/s:127.0.0.1:1"); err != nil {
@@ -96,20 +124,27 @@ func TestConfigFileReachesEveryCall(t *testing.T) {
 	if _, err := Home(ctx, "worker", config); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Close(); err != nil {
-		t.Fatal(err)
-	}
+	_ = m.Close()
 	data, err := os.ReadFile(log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
-	for _, call := range calls {
-		if !strings.HasPrefix(call, "-F "+config+" ") {
-			t.Fatalf("ssh ran without the config file: %q", call)
+	// The bootstrap script contains newlines; only invocations start with the config option.
+	var calls []string
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.HasPrefix(line, "-F ") {
+			calls = append(calls, line)
 		}
 	}
-	if len(calls) < 5 {
-		t.Fatalf("expected master, check, run, forward and home calls: %q", calls)
+	if len(calls) != 4 {
+		t.Fatalf("expected bootstrap, two forwards and home: %q", calls)
+	}
+	for _, call := range calls {
+		if !strings.HasPrefix(call, "-F "+config+" ") {
+			t.Fatalf("lost config: %q", call)
+		}
+	}
+	if strings.Count(string(data), " -M ") != 1 {
+		t.Fatal("more than one master")
 	}
 }
