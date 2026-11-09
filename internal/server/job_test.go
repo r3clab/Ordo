@@ -334,6 +334,48 @@ func TestRequestValidation(t *testing.T) {
 	if err := jobRequest("/results/a").Validate(); err != nil {
 		t.Fatal(err)
 	}
+	if err := input.Validate(); err == nil {
+		t.Fatal("accepted an input inside out")
+	}
+	input.Out = ""
+	if err := input.Validate(); err != nil {
+		t.Fatalf("a job without out may take any input: %v", err)
+	}
+}
+
+func TestJobsWithoutOutDeliverNothingAndNeverMatch(t *testing.T) {
+	f := newFixture(t)
+	data := f.out("data")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := jobRequest("")
+	r.Inputs = map[string]string{"data": data}
+	delivered := f.submit(t, jobRequest(f.out("a")))
+	ok, failed := f.submit(t, r), f.submit(t, r)
+	if ok == failed || ok == delivered {
+		t.Fatal("a job without out matched another")
+	}
+	f.s.mu.Lock()
+	_, keyed := f.s.outs[""]
+	f.s.mu.Unlock()
+	if keyed {
+		t.Fatal("a job without out claimed the empty out")
+	}
+	f.tick(t)
+	f.h.exit(last(f.job(t, ok)).ID, 0)
+	f.h.exit(last(f.job(t, failed)).ID, 3)
+	f.tick(t)
+	for id, want := range map[string]State{ok: Succeeded, failed: Failed} {
+		j := f.job(t, id)
+		at := last(j)
+		if j.State != want || at.Result == nil || readOut(t, at.ResultDir, worker.StdoutFile) != "out" {
+			t.Fatalf("a job without out must end on its last step's status and keep its logs: %+v", j)
+		}
+		if _, err := os.Stat(filepath.Join(at.ResultDir, OutputsArchive)); !os.IsNotExist(err) {
+			t.Fatalf("a job without out kept its outputs: %v", err)
+		}
+	}
 }
 
 func last(j Job) Attempt { return j.Attempts[len(j.Attempts)-1] }

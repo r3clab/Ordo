@@ -28,7 +28,7 @@ const (
 // Record is run.json. It holds no secret values: Spec lists only their names.
 type Record struct {
 	Job           string          `json:"job"`
-	Out           string          `json:"out"`
+	Out           string          `json:"out,omitempty"`
 	Step          int             `json:"step"`
 	Attempt       string          `json:"attempt"`
 	Worker        string          `json:"worker"`
@@ -189,10 +189,7 @@ func (j Job) resultDir(index int) string {
 // into Out by one rename. A rename that a crash interrupted before the job was saved left a job.json
 // naming this job, which counts as delivered.
 func (s *Server) deliver(j Job) error {
-	outcome := Succeeded
-	if j.current().Failure != "" {
-		outcome = Failed
-	}
+	outcome := j.outcome()
 	var published Job
 	if readJSON(filepath.Join(j.Out, MetaDir, JobFile), &published) == nil && published.ID == j.ID {
 		return s.settle(j, outcome, "")

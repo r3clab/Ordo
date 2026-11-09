@@ -36,6 +36,7 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{` + base + `,"image":"/src#images.grep","secrets":["TOKEN"],"inputs":{"corpus":"/data"}}`,
 		`{` + base + `,"image":"/src#x","entrypoint":["netlock",""],"workdir":"/outputs"}`,
 		`{` + base + `,"image":"docker://registry:5000/org/eval:v1","disable_aslr":true}`,
+		`{"image":"/src#x","resources":{"cores":1,"memory_mib":1}}`,
 	} {
 		if err := validate(valid); err != nil {
 			t.Errorf("rejected %s: %v", valid, err)

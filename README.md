@@ -97,8 +97,10 @@ ordo submit --file jobs.jsonl --wait
 Each line is a job.
 `--wait` reports final results and exits nonzero if a submission fails or a tracked job does not succeed.
 
-Results appear in `out`, with job history and logs under `.ordo/`.
+Results appear in `out`, with job history in `.ordo/job.json`.
+Each step's output is in `.ordo/STEP.stdout` and `.ordo/STEP.stderr`, from its last attempt, where `STEP` is its name or its position from 1.
 The server forgets finished jobs after 30 days.
+A job without `out` delivers nothing and no job can wait on it; its logs stay on the server until it is forgotten.
 Task failures still deliver collected outputs, while cancelled and skipped jobs deliver nothing.
 A nonempty `out` with no unfinished job counts as done, even after a task failure.
 Use a new output path to rerun a finished job.

@@ -29,7 +29,7 @@ func build(name string) (*jsonschema.Schema, error) {
 	}
 	refineRequest(s)
 	s.Title = "Ordo job request"
-	s.Description = "One job, a line of ordo submit, which writes its results into out. A job of one step may give that step's fields at the top level instead of in steps."
+	s.Description = "One job, a line of ordo submit, which writes its results into out, or without one delivers nothing. A job of one step may give that step's fields at the top level instead of in steps."
 	s.Schema = draft
 	return s, nil
 }
@@ -104,7 +104,7 @@ func refineRequest(s *jsonschema.Schema) {
 	steps.MinItems, steps.MaxItems = jsonschema.Ptr(1), jsonschema.Ptr(server.MaxSteps)
 	refineStep(at(steps, "[]"))
 	refineStep(s)
-	s.Required = []string{"out"}
+	s.Required = nil
 	s.OneOf = []*jsonschema.Schema{{Required: []string{"steps"}}, {Required: []string{"image", "resources"}}}
 	for _, field := range []string{"task", "infrastructure"} {
 		at(s, "retry", field).Minimum = jsonschema.Ptr(0.0)

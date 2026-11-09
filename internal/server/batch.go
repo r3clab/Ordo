@@ -94,7 +94,7 @@ func (s *Server) SubmitBatch(ctx context.Context, entries []BatchEntry) iter.Seq
 						inputs = append(inputs, source)
 					}
 				}
-				outs[e.Request.Out] = true
+				claim(outs, e.Request.Out, true)
 			}
 		}
 		st := s.stage(ctx, images, inputs)

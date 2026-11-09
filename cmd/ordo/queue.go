@@ -13,7 +13,7 @@ import (
 	"github.com/r3clab/Ordo/internal/server"
 )
 
-const queueUsage = "Usage: ordo queue <list|get|cancel|stop> [--state DIR] [--id ID | --out DIR | --under DIR] [--reason TEXT]\n\nlist shows every job, or those whose out lies under --under. get shows one job: by ID, or the latest\nthat writes --out. cancel and stop act on one job, or on every unfinished job under --under. stop ends\nthe running step early and keeps its result, classified by exit status, so later steps still run;\ncancel abandons the job, which then delivers nothing."
+const queueUsage = "Usage: ordo queue <list|get|cancel|stop> [--state DIR] [--id ID | --out DIR | --under DIR] [--reason TEXT]\n\nlist shows every job, or those whose out lies under --under. get shows one job: by ID, or the latest\nthat writes --out. cancel and stop act on one job, or on every unfinished job under --under. stop ends\nthe running step early and keeps its result, classified by exit status, so later steps still run;\ncancel abandons the job, which then delivers nothing. A job without an out is selected by --id only."
 
 type selector struct{ id, out, under string }
 

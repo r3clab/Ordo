@@ -78,7 +78,7 @@ export interface Attempt {
 
 export interface Job {
   id: string;
-  out: string;
+  out?: string;
   steps: Stage[];
   step: number;
   ready_at?: string;
@@ -99,7 +99,7 @@ export interface Job {
 
 export interface JobSummary {
   id: string;
-  out: string;
+  out?: string;
   state: JobState;
   step: number;
   steps: number;

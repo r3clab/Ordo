@@ -39,6 +39,10 @@ export function shortOut(out: string): string {
   return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : out;
 }
 
+export const jobTitle = (job: { id: string; out?: string }) => job.out ?? job.id;
+
+export const jobLabel = (job: { id: string; out?: string }) => (job.out ? shortOut(job.out) : job.id);
+
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 export function relative(time: string | Date | null | undefined): string {

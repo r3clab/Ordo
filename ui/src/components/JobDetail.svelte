@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Job } from "../lib/api";
-  import { duration, isActive, relative, resources, shortImage, shortOut } from "../lib/format";
+  import { duration, isActive, jobLabel, jobTitle, relative, resources, shortImage } from "../lib/format";
   import { session } from "../lib/session.svelte";
   import CancelButton from "./CancelButton.svelte";
   import Icon from "./Icon.svelte";
@@ -38,8 +38,8 @@
 <aside class="fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-900" aria-label="Job details">
   <header class="flex items-start justify-between gap-4 border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
     <div class="min-w-0 space-y-1">
-      <h2 class="text-lg font-semibold break-all">{job.out}</h2>
-      <p class="muted truncate font-mono text-xs" title="Job ID">{job.id}</p>
+      <h2 class="text-lg font-semibold break-all">{jobTitle(job)}</h2>
+      {#if job.out}<p class="muted truncate font-mono text-xs" title="Job ID">{job.id}</p>{/if}
       <div class="flex flex-wrap items-center gap-2">
         <StateBadge state={job.state} />
         {#if job.cancel_requested && isActive(job.state)}<span class="text-xs text-amber-600 dark:text-amber-400">Cancellation requested</span>{/if}
@@ -103,8 +103,8 @@
         <div class="flex flex-wrap gap-1.5">
           {#each job.after as id (id)}
             {@const dep = session.jobs.find((j) => j.id === id)}
-            <button class="btn-secondary max-w-full py-1 text-xs" title={dep?.out ?? id} onclick={() => onselect(id)}>
-              <span class="truncate">{dep ? shortOut(dep.out) : id}</span>
+            <button class="btn-secondary max-w-full py-1 text-xs" title={dep ? jobTitle(dep) : id} onclick={() => onselect(id)}>
+              <span class="truncate">{dep ? jobLabel(dep) : id}</span>
               {#if dep}<span class="text-zinc-400">· {dep.state}</span>{/if}
             </button>
           {/each}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { filters, relative, resources, shortImage, shortOut } from "../lib/format";
+  import { filters, jobLabel, jobTitle, relative, resources, shortImage } from "../lib/format";
   import { session } from "../lib/session.svelte";
   import Icon from "./Icon.svelte";
   import StateBadge from "./StateBadge.svelte";
@@ -12,7 +12,7 @@
     const needle = query.trim().toLowerCase();
     return session.jobs
       .filter(filter.match)
-      .filter((j) => !needle || [j.out, j.id, j.image, j.worker ?? ""].some((field) => field.toLowerCase().includes(needle)))
+      .filter((j) => !needle || [j.out ?? "", j.id, j.image, j.worker ?? ""].some((field) => field.toLowerCase().includes(needle)))
       .toReversed();
   });
 </script>
@@ -56,7 +56,7 @@
             {#each visible as job (job.id)}
               <tr data-job-id={job.id} data-job-out={job.out} class="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50" onclick={() => onselect(job.id)}>
                 <td class="max-w-80 px-4 py-3">
-                  <button class="block max-w-full truncate text-left font-medium hover:underline" title={job.out}>{shortOut(job.out)}</button>
+                  <button class="block max-w-full truncate text-left font-medium hover:underline" title={jobTitle(job)}>{jobLabel(job)}</button>
                   <div class="muted truncate text-xs">
                     {#if job.steps > 1}<span class="font-medium text-zinc-600 dark:text-zinc-300">step {job.step + 1}/{job.steps}</span> · {/if}<span class="font-mono">{shortImage(job.image)}</span>
                   </div>

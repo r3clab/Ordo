@@ -36,10 +36,10 @@ type Step struct {
 	spec.Task
 }
 
-// Request is a job that writes its results into Out. A job of one step may give that step's fields at
-// the top level instead of in Steps.
+// Request is a job that writes its results into Out, or without one delivers nothing. A job of one step
+// may give that step's fields at the top level instead of in Steps.
 type Request struct {
-	Out    string            `json:"out"`
+	Out    string            `json:"out,omitempty"`
 	Inputs map[string]string `json:"inputs,omitempty"`
 	Steps  []Step            `json:"steps,omitempty"`
 	Step
@@ -124,7 +124,7 @@ type Stage struct {
 
 type Job struct {
 	ID      string    `json:"id"`
-	Out     string    `json:"out"`
+	Out     string    `json:"out,omitempty"`
 	Steps   []Stage   `json:"steps"`
 	Step    int       `json:"step"`
 	ReadyAt time.Time `json:"ready_at,omitzero"`
@@ -160,7 +160,7 @@ func (j Job) ahead() []Stage {
 // Summary is how GET /v1/jobs lists a job; GET /v1/jobs/{id} returns all of it.
 type Summary struct {
 	ID              string         `json:"id"`
-	Out             string         `json:"out"`
+	Out             string         `json:"out,omitempty"`
 	State           State          `json:"state"`
 	Step            int            `json:"step"`
 	Steps           int            `json:"steps"`
@@ -370,7 +370,7 @@ func (s *Server) configure(next *settings) error {
 			}
 		}
 		if err := s.checkJob(next, j); err != nil {
-			return fmt.Errorf("unfinished job %s: %w", j.Out, err)
+			return fmt.Errorf("unfinished job %s: %w", cmp.Or(j.Out, j.ID), err)
 		}
 	}
 	s.mu.Lock()
@@ -459,10 +459,11 @@ func (s *Server) job(id string) (Job, bool, error) {
 	return j, err == nil, err
 }
 
-// within reports whether file is dir or lies under it; both are clean absolute paths.
+// within reports whether file is dir or lies under it; both are clean absolute paths, or "" for the
+// out of a job without one, which holds nothing.
 func within(file, dir string) bool {
 	parent := strings.TrimSuffix(dir, "/")
-	return file == dir || len(file) > len(parent) && file[len(parent)] == '/' && strings.HasPrefix(file, parent)
+	return dir != "" && (file == dir || len(file) > len(parent) && file[len(parent)] == '/' && strings.HasPrefix(file, parent))
 }
 
 func enclosingOut(file string) string {
@@ -656,7 +657,15 @@ func (s *Server) installLocked(j Job) {
 		}
 	} else {
 		s.jobs[j.ID] = j.clone()
-		s.outs[j.Out] = j.ID
+		claim(s.outs, j.Out, j.ID)
+	}
+}
+
+// claim records an out that an unfinished job writes. A job without one claims none, so no map of outs
+// holds "".
+func claim[V any](outs map[string]V, out string, v V) {
+	if out != "" {
+		outs[out] = v
 	}
 }
 
@@ -717,7 +726,7 @@ func each[K comparable, V any](keys []K, limit int, do func(K) (V, error)) map[K
 func absolute(file string) bool { return spec.CleanAbsolute(file) && file != "/" }
 
 func (r Request) Validate() error {
-	if !absolute(r.Out) {
+	if r.Out != "" && !absolute(r.Out) {
 		return errors.New("out must be a clean absolute path other than /")
 	}
 	if len(r.Steps) > 0 && !reflect.ValueOf(r.Step).IsZero() {
@@ -762,8 +771,10 @@ func (s *Server) check(r Request) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
-	if dir := enclosingOut(filepath.Dir(r.Out)); dir != "" {
-		return fmt.Errorf("out lies in %s, the out of another job", dir)
+	if r.Out != "" {
+		if dir := enclosingOut(filepath.Dir(r.Out)); dir != "" {
+			return fmt.Errorf("out lies in %s, the out of another job", dir)
+		}
 	}
 	c := s.settings.Load()
 	inputs := slices.Collect(maps.Keys(r.Inputs))
@@ -825,6 +836,9 @@ func (s *Server) checkConfig(c *settings, t spec.Task) error {
 
 // delivered reports whether out already holds results that no unfinished job is writing.
 func (s *Server) delivered(out string) (bool, error) {
+	if out == "" {
+		return false, nil
+	}
 	s.mu.Lock()
 	_, unfinished := s.outs[out]
 	s.mu.Unlock()
@@ -899,7 +913,7 @@ func (s *Server) prepare(r Request, waiting []string, st *staging) (Job, error) 
 }
 
 // admit keys jobs by Out: an unfinished job there with the same request is returned, and a different
-// one, or one whose Out nests with this one's, refuses it.
+// one, or one whose Out nests with this one's, refuses it. A job without an Out is always new.
 func (s *Server) admit(jobs []Job, results []*BatchResult) {
 	s.write.Lock()
 	defer s.write.Unlock()
@@ -933,7 +947,7 @@ func (s *Server) admit(jobs []Job, results []*BatchResult) {
 				result.Error = err.Error()
 				continue
 			}
-			pending[j.Out] = record{Summary: j.summary(), key: j.Key}
+			claim(pending, j.Out, record{Summary: j.summary(), key: j.Key})
 			fresh = append(fresh, j)
 			result.ID, result.State = j.ID, j.State
 		}

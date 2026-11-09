@@ -108,8 +108,8 @@ func (s *Server) requestStop(id, reason string, mark func(*Job)) error {
 }
 
 // finish settles the current attempt. A step that succeeds hands the job to the next one; the last
-// step's outcome, success or the task's own failure, is delivered to Out. A stop ends only the step it
-// reaches, so the later steps still run.
+// step's outcome, success or the task's own failure, is delivered to Out, or ends a job that has none.
+// A stop ends only the step it reaches, so the later steps still run.
 func (s *Server) finish(j Job, class Failure) error {
 	s.refresh(&j)
 	at := j.current()
@@ -121,6 +121,7 @@ func (s *Server) finish(j Job, class Failure) error {
 		}
 	}
 	exhausted := j.StopRequested || count > j.Retry.limit(class)
+	done := class == "" || (exhausted && at.Result != nil)
 	switch {
 	case j.CancelRequested || class == CancelFailure:
 		j.State = Cancelled
@@ -128,7 +129,9 @@ func (s *Server) finish(j Job, class Failure) error {
 		j.Step++
 		j.State, j.Error, j.ReadyAt = Queued, "", time.Now().UTC()
 		j.StopRequested, j.StopReason = false, ""
-	case class == "" || (exhausted && at.Result != nil):
+	case done && j.Out == "":
+		j.State = j.outcome()
+	case done:
 		j.State = Delivering
 	case exhausted:
 		j.State = Failed
@@ -138,11 +141,18 @@ func (s *Server) finish(j Job, class Failure) error {
 	return s.save(j)
 }
 
+func (j Job) outcome() State {
+	if j.current().Failure != "" {
+		return Failed
+	}
+	return Succeeded
+}
+
 func (j *Job) requeue(delay time.Duration, avoid string) {
 	j.State, j.ReadyAt, j.Avoid = Queued, time.Now().UTC().Add(delay), avoid
 }
 
-// prune drops a finished job's output archives; Out holds what is kept of them.
+// prune drops a finished job's output archives; Out, if it has one, holds what is kept of them.
 func prune(j Job) {
 	for _, at := range j.Attempts {
 		if at.ResultDir != "" {

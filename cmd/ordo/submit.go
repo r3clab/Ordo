@@ -19,7 +19,7 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const submitUsage = "Usage: ordo submit [--state DIR] [--file JOBS.jsonl] [--wait]\n\nReads one job per line (stdin by default) and prints one result per line. Relative out and input\npaths are taken from the current directory. A line whose out already holds results is done and\nqueues nothing; resubmitting a line whose job is unfinished returns that job. --wait then prints each\njob's line again with its final state as it finishes, and fails if any did not succeed."
+const submitUsage = "Usage: ordo submit [--state DIR] [--file JOBS.jsonl] [--wait]\n\nReads one job per line (stdin by default) and prints one result per line. Relative out and input\npaths are taken from the current directory. A line whose out already holds results is done and\nqueues nothing; resubmitting a line whose job is unfinished returns that job. A line without out\ndelivers nothing and is never matched to another. --wait then prints each job's line again with its\nfinal state as it finishes, and fails if any did not succeed."
 
 func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("submit")

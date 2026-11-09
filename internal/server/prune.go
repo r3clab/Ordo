@@ -19,7 +19,8 @@ const (
 	// idle is how long an image or input nothing unfinished needs stays, on workers and the server, for
 	// later jobs to reuse.
 	idle = 24 * time.Hour
-	// retention is how long the server keeps a finished job's record and logs; Out keeps its own copy.
+	// retention is how long the server keeps a finished job's record and logs; Out, if the job has one,
+	// keeps its own copy.
 	retention = 30 * 24 * time.Hour
 )
 

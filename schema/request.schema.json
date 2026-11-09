@@ -331,10 +331,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Ordo job request",
-  "description": "One job, a line of ordo submit, which writes its results into out. A job of one step may give that step's fields at the top level instead of in steps.",
-  "required": [
-    "out"
-  ],
+  "description": "One job, a line of ordo submit, which writes its results into out, or without one delivers nothing. A job of one step may give that step's fields at the top level instead of in steps.",
   "additionalProperties": false,
   "oneOf": [
     {
