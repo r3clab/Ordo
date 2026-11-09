@@ -5,7 +5,7 @@ on:
   pull_request:
 concurrency:
   group: check-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # The runner user's nix.conf may not enable flakes.
 env:
   NIX_CONFIG: experimental-features = nix-command flakes

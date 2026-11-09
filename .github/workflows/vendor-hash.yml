@@ -1,0 +1,32 @@
+name: Vendor hash
+on:
+  pull_request:
+    paths: [go.mod, go.sum]
+permissions:
+  contents: read
+env:
+  NIX_CONFIG: experimental-features = nix-command flakes
+jobs:
+  update:
+    # Dependabot runs get a read-only GITHUB_TOKEN, and pushes made with
+    # GITHUB_TOKEN would not trigger Check on the new head. The write deploy key
+    # comes from a Dependabot secret, which only Dependabot-triggered runs see.
+    if: github.actor == 'dependabot[bot]' && startsWith(github.head_ref, 'dependabot/go_modules/')
+    runs-on:
+      group: cirrus
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+          ssh-key: ${{ secrets.VENDOR_HASH_DEPLOY_KEY }}
+      - run: |
+          sed -i 's|vendorHash = ".*";|vendorHash = "";|' nix/package.nix
+          hash=$(nix build --no-link .#default.goModules 2>&1 | tee /dev/stderr | sed -n 's|.*got: *\(sha256-[A-Za-z0-9+/=]*\).*|\1|p')
+          test -n "$hash"
+          sed -i "s|vendorHash = \"\";|vendorHash = \"$hash\";|" nix/package.nix
+      - run: |
+          git diff --quiet && exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -am 'fix(nix): update vendorHash'
+          git push
