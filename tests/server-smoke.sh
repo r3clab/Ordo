@@ -94,9 +94,11 @@ test -f "$dag/steps/.ordo/one.stdout" && test -f "$dag/steps/.ordo/two.stdout"
 test "$(<"$dag/fail/value")" = partial
 jq -e '.state=="failed"' "$dag/fail/.ordo/job.json" >/dev/null
 test ! -e "$dag/skip" && test ! -e "$dag/cancel"
+status=0; "$ORDO_TEST_BINARY" run --state "$work/server" --job '{"resources":{"cores":1,"memory_mib":128},"disable_aslr":true}' "$ORDO_TEST_INSTALLABLE" -c 'ulimit -c; cat /proc/self/personality; printf probe >&2; exit 7' > "$work/run.out" 2> "$work/run.err" || status=$?
+test "$status" = 7 && test "$(<"$work/run.out")" = $'0\n00040000' && test "$(<"$work/run.err")" = probe
 if [[ -n ${ORDO_TEST_CHROMIUM:-} ]]; then
  url=$(awk '/Web UI:/{url=$3}END{print url}' "$work/server.log")
  node tests/web-smoke.mjs "$url" "$work/server" "$work"
 fi
 passed=true
-printf 'PASS: queue recovery, delivery into out, path dependencies, steps, bounded retry, timeout, cancellation, --wait\n'
+printf 'PASS: queue recovery, delivery into out, path dependencies, steps, bounded retry, timeout, cancellation, --wait, ordo run\n'

@@ -122,6 +122,20 @@ See [job options](https://github.com/r3clab/Ordo/wiki/Configuration-and-jobs#job
 Submission fails if no worker matching the job's tags is configured with the requested resources.
 Run `ordo schema` for the full job format.
 
+### One-off runs
+
+`ordo run` runs one image as a job without `out`, streams its output to the terminal while it runs, and exits with the container's status:
+
+```sh
+ordo run docker://registry.example/eval:v1 sh -c 'cat /src/*.diff'
+ordo run --job '{"resources":{"cores":4,"memory_mib":8192},"tags":["gpu"]}' /srv/eval#images.tools -c nproc
+```
+
+`--job` takes any other job fields, except `out`, `steps`, `image` and `args`; resources default to 1 core and 1024 MiB.
+A retry streams its new attempt after a line on stderr.
+An interrupt cancels the job and exits 130.
+`ordo run` leaves the statuses below 125 to the container and exits 125 when it fails itself: misused, refused, unanswered, or when the job ends without a status of its own, being cancelled, skipped, blocked, timed out, or out of retries for worker failures.
+
 ## Monitor and control
 
 Open the [web UI](http://127.0.0.1:7331) to view workers, jobs, and collected logs.

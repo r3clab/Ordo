@@ -12,6 +12,7 @@ const (
 	exitUnsuccessful = 1
 	exitRefused      = 2
 	exitUnavailable  = 3
+	exitRunFailed    = 125
 	exitInterrupted  = 130
 )
 

@@ -45,7 +45,7 @@ bash tests/server-smoke.sh
 ```
 
 It uses the workers `vegeta` and `goku`, each with the verified pool `62,63,126,127` (four cores) and a 512 MiB aggregate admission budget.
-It checks server SIGKILL/restart without orphaned SSH processes or duplicate executions, delivery into each job's `out` (including `.ordo/`), a job waiting on an input in another job's `out`, a two-step job with different resources per step, bounded retries, skipped dependents, timeout, cancellation, and `ordo submit --wait`.
+It checks server SIGKILL/restart without orphaned SSH processes or duplicate executions, delivery into each job's `out` (including `.ordo/`), a job waiting on an input in another job's `out`, a two-step job with different resources per step, bounded retries, skipped dependents, timeout, cancellation, `ordo submit --wait`, and `ordo run` streaming a container with core dumps off and `disable_aslr` set.
 Add `ORDO_TEST_CHROMIUM=/path/to/chromium` (and Node.js 22+ on PATH) to drive the real UI: status of jobs queued by `ordo submit`, running-job cancellation, and safe log rendering.
 Browser logs and a screenshot join the evidence directory.
 The headless browser uses a private profile and disabled sandbox only for this local test; no browser/runtime dependency is added to Ordo.

@@ -67,7 +67,7 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		var job json.RawMessage
-		if err := server.Call(ctx, client, http.MethodGet, "/v1/jobs/"+ids[len(ids)-1], nil, &job); err != nil {
+		if err := server.Call(ctx, client, http.MethodGet, jobPath(ids[len(ids)-1]), nil, &job); err != nil {
 			return err
 		}
 		return printJSON(out, job)
@@ -78,7 +78,7 @@ func queueCommand(ctx context.Context, args []string, out io.Writer) error {
 		}
 		encoder := json.NewEncoder(out)
 		for _, id := range ids {
-			if err := server.Call(ctx, client, http.MethodPost, "/v1/jobs/"+id+"/"+operation, server.StopRequest{Reason: reason}, nil); err != nil {
+			if err := server.Call(ctx, client, http.MethodPost, jobPath(id)+"/"+operation, server.StopRequest{Reason: reason}, nil); err != nil {
 				return err
 			}
 			if err := encoder.Encode(map[string]any{"id": id, "requested": operation}); err != nil {
@@ -100,6 +100,8 @@ func (sel selector) list(ctx context.Context, client *http.Client) ([]server.Sum
 	}
 	return listJobs(ctx, client, query)
 }
+
+func jobPath(id string) string { return "/v1/jobs/" + url.PathEscape(id) }
 
 func listJobs(ctx context.Context, client *http.Client, query url.Values) ([]server.Summary, error) {
 	var jobs []server.Summary

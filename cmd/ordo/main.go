@@ -41,6 +41,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 var commands = map[string]func(context.Context, []string, io.Writer) error{
 	"server": serverCommand,
 	"submit": submitCommand,
+	"run":    runCommand,
 	"schema": schemaCommand,
 	"queue":  queueCommand,
 }
@@ -68,7 +69,7 @@ func dispatch(ctx context.Context, args []string, output io.Writer) error {
 		return command(ctx, flags.Args()[1:], output)
 	}
 
-	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL jobs, each delivering its results into its out (submit --help for options)\n  queue    Inspect, stop or cancel jobs\n  schema   Print the JSON Schema for jobs")
+	_, err = fmt.Fprintln(output, "Usage: ordo <command> [flags]\n\nCommands:\n  server   Run the durable queue and worker reconciliation\n  submit   Queue JSONL jobs, each delivering its results into its out (submit --help for options)\n  run      Run one image as a job, streaming its output and exiting with its status\n  queue    Inspect, stop or cancel jobs\n  schema   Print the JSON Schema for jobs")
 	return err
 }
 
