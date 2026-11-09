@@ -80,7 +80,7 @@ for ((i=0;i<60;i++)); do
 done
 "$ORDO_TEST_BINARY" queue cancel --state "$work/server" --out "$dag/cancel" > "$work/cancel-request.json"
 status=0; wait "$waiter" || status=$?
-test "$status" = 2
+test "$status" = 1
 grep -Fx '4 of 7 jobs did not succeed' "$work/dag-waited.err"
 jq -se --arg dag "$dag" 'length==14 and (.[7:] | map({key:(.out|ltrimstr("\($dag)/")),value:.state}) | from_entries) ==
  {produce:"succeeded",consume:"succeeded",steps:"succeeded",fail:"failed",skip:"skipped",timeout:"failed",cancel:"cancelled"}' "$work/dag-waited.json" >/dev/null

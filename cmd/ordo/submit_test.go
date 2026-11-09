@@ -121,24 +121,24 @@ func TestSubmitResolvesPathsAndSkipsDeliveredJobs(t *testing.T) {
 	}
 }
 
-func TestSubmitWaitReportsHowJobsEnded(t *testing.T) {
-	root, _ := testServer(t)
+type submitOutcome struct {
+	results []server.BatchResult
+	err     error
+}
+
+func waitCancelled(t *testing.T, root, out string, lines ...string) submitOutcome {
+	t.Helper()
 	pollInterval = 10 * time.Millisecond
 	t.Cleanup(func() { pollInterval = 2 * time.Second })
-	out := filepath.Join(t.TempDir(), "a")
 	file := filepath.Join(t.TempDir(), "jobs.jsonl")
-	if err := os.WriteFile(file, []byte(`{"out":"`+out+`","image":"/src#image","resources":{"cores":1,"memory_mib":128}}`), 0o644); err != nil {
+	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	type outcome struct {
-		results []server.BatchResult
-		err     error
-	}
-	done := make(chan outcome, 1)
+	done := make(chan submitOutcome, 1)
 	go func() {
 		var buf bytes.Buffer
 		err := submitCommand(context.Background(), []string{"--state", root, "--file", file, "--wait"}, &buf)
-		done <- outcome{decodeLines[server.BatchResult](t, buf.Bytes()), err}
+		done <- submitOutcome{decodeLines[server.BatchResult](t, buf.Bytes()), err}
 	}()
 	for {
 		if err := queueCommand(context.Background(), []string{"cancel", "--state", root, "--out", out}, io.Discard); err == nil {
@@ -146,11 +146,29 @@ func TestSubmitWaitReportsHowJobsEnded(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	got := <-done
-	if got.err == nil || got.err.Error() != "1 of 1 jobs did not succeed" || len(got.results) != 2 {
+	return <-done
+}
+
+func TestSubmitWaitReportsHowJobsEnded(t *testing.T) {
+	root, _ := testServer(t)
+	out := filepath.Join(t.TempDir(), "a")
+	got := waitCancelled(t, root, out, `{"out":"`+out+`","image":"/src#image","resources":{"cores":1,"memory_mib":128}}`)
+	if got.err == nil || got.err.Error() != "1 of 1 jobs did not succeed" || exitStatus(got.err) != exitUnsuccessful || len(got.results) != 2 {
 		t.Fatalf("wait: %+v %v", got.results, got.err)
 	}
 	if first, last := got.results[0], got.results[1]; first.State != server.Queued || last.ID != first.ID || last.State != server.Cancelled {
 		t.Fatalf("wait did not report the job's end: %+v", got.results)
+	}
+}
+
+func TestSubmitWaitFollowsAcceptedLinesPastRefusedOnes(t *testing.T) {
+	root, _ := testServer(t)
+	out := filepath.Join(t.TempDir(), "a")
+	got := waitCancelled(t, root, out, `{"out":"`+out+`","image":"/src#image","resources":{"cores":1,"memory_mib":128}}`, `not json`)
+	if exitStatus(got.err) != exitRefused || !strings.Contains(got.err.Error(), "1 of 2 lines failed to submit") || !strings.Contains(got.err.Error(), "1 of 1 jobs did not succeed") {
+		t.Fatalf("a refused line must outrank a failed job: %v", got.err)
+	}
+	if len(got.results) != 3 || got.results[1].Error == "" || got.results[2].State != server.Cancelled {
+		t.Fatalf("wait must still report the accepted line: %+v", got.results)
 	}
 }

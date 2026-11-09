@@ -24,11 +24,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		if errors.Is(err, context.Canceled) {
-			os.Exit(130)
+		if message := err.Error(); message != "" {
+			fmt.Fprintln(os.Stderr, message)
 		}
-		os.Exit(2)
+		os.Exit(exitStatus(err))
 	}
 }
 

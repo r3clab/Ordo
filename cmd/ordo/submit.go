@@ -19,7 +19,7 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const submitUsage = "Usage: ordo submit [--state DIR] [--file JOBS.jsonl] [--wait]\n\nReads one job per line (stdin by default) and prints one result per line. Relative out and input\npaths are taken from the current directory. A line whose out already holds results is done and\nqueues nothing; resubmitting a line whose job is unfinished returns that job. A line without out\ndelivers nothing and is never matched to another. --wait then prints each job's line again with its\nfinal state as it finishes, and fails if any did not succeed."
+const submitUsage = "Usage: ordo submit [--state DIR] [--file JOBS.jsonl] [--wait]\n\nReads one job per line (stdin by default) and prints one result per line. Relative out and input\npaths are taken from the current directory. A line whose out already holds results is done and\nqueues nothing; resubmitting a line whose job is unfinished returns that job. A line without out\ndelivers nothing and is never matched to another. --wait then prints each job's line again with its\nfinal state as it finishes.\n\nExits 1 if a job did not succeed, 2 if a line was refused, and 3 if the server did not answer."
 
 func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("submit")
@@ -49,22 +49,10 @@ func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 	}
 	client := server.Client(server.Socket(root))
 	defer client.CloseIdleConnections()
-	resp, err := server.Send(ctx, client, http.MethodPost, "/v1/batches", "application/x-ndjson", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	decoder := json.NewDecoder(resp.Body)
 	encoder := json.NewEncoder(out)
 	total, failed := 0, 0
 	var queued []server.BatchResult
-	for {
-		var result server.BatchResult
-		if err := decoder.Decode(&result); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			return err
-		}
+	err = post(ctx, client, body, func(result server.BatchResult) error {
 		total++
 		if result.ID != "" {
 			queued = append(queued, result)
@@ -72,20 +60,57 @@ func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 		if result.Error != "" {
 			failed++
 		}
-		if err := encoder.Encode(result); err != nil {
+		return encoder.Encode(result)
+	})
+	if err != nil {
+		return err
+	}
+	var refused, waited error
+	if failed > 0 {
+		refused = &exitError{exitRefused, fmt.Errorf("%d of %d lines failed to submit", failed, total)}
+	}
+	if wait {
+		waited = await(ctx, client, encoder, queued)
+	}
+	switch {
+	case refused == nil:
+		return waited
+	case waited == nil:
+		return refused
+	}
+	return &exitError{max(exitStatus(refused), exitStatus(waited)), errors.Join(refused, waited)}
+}
+
+func post(ctx context.Context, client *http.Client, body []byte, each func(server.BatchResult) error) error {
+	resp, err := server.Send(ctx, client, http.MethodPost, "/v1/batches", "application/x-ndjson", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	decoder := json.NewDecoder(resp.Body)
+	for {
+		var result server.BatchResult
+		if err := decoder.Decode(&result); errors.Is(err, io.EOF) {
+			return nil
+		} else if err != nil {
+			return server.Unanswered(err)
+		}
+		if err := each(result); err != nil {
 			return err
 		}
 	}
-	if failed > 0 {
-		return fmt.Errorf("%d of %d lines failed to submit", failed, total)
-	}
-	if wait {
-		return await(ctx, client, encoder, queued)
-	}
-	return nil
 }
 
 var pollInterval = 2 * time.Second
+
+func sleep(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
 
 // await prints each queued line again once its job ends, in the order they end.
 func await(ctx context.Context, client *http.Client, encoder *json.Encoder, queued []server.BatchResult) error {
@@ -120,14 +145,12 @@ func await(ctx context.Context, client *http.Client, encoder *json.Encoder, queu
 		if len(pending) == 0 {
 			break
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(pollInterval):
+		if err := sleep(ctx, pollInterval); err != nil {
+			return err
 		}
 	}
 	if unsuccessful > 0 {
-		return fmt.Errorf("%d of %d jobs did not succeed", unsuccessful, len(queued))
+		return &exitError{exitUnsuccessful, fmt.Errorf("%d of %d jobs did not succeed", unsuccessful, len(queued))}
 	}
 	return nil
 }

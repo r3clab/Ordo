@@ -119,11 +119,34 @@ func Call(ctx context.Context, client *http.Client, method, endpoint string, inp
 	defer func() { _ = response.Body.Close() }()
 	if output != nil {
 		if err := json.NewDecoder(response.Body).Decode(output); err != nil {
-			return err
+			return Unanswered(err)
 		}
 	}
-	_, err = io.Copy(io.Discard, response.Body)
-	return err
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		return Unanswered(err)
+	}
+	return nil
+}
+
+// ErrUnavailable marks a request the server did not answer: it could not be reached, the connection
+// broke, or the server failed on its side.
+var ErrUnavailable = errors.New("server unavailable")
+
+func Unanswered(err error) error { return fmt.Errorf("%w: %w", ErrUnavailable, err) }
+
+// StatusError is a response outside 2xx; a 5xx one is also ErrUnavailable.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Code, e.Body) }
+
+func (e *StatusError) Unwrap() error {
+	if e.Code >= 500 {
+		return ErrUnavailable
+	}
+	return nil
 }
 
 func Send(ctx context.Context, client *http.Client, method, endpoint, contentType string, body io.Reader) (*http.Response, error) {
@@ -136,11 +159,11 @@ func Send(ctx context.Context, client *http.Client, method, endpoint, contentTyp
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, Unanswered(err)
 	}
 	if response.StatusCode/100 != 2 {
 		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, errors.Join(fmt.Errorf("HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(data))), response.Body.Close())
+		return nil, errors.Join(&StatusError{Code: response.StatusCode, Body: strings.TrimSpace(string(data))}, response.Body.Close())
 	}
 	return response, nil
 }

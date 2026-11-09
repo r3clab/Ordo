@@ -95,7 +95,15 @@ ordo submit --file jobs.jsonl --wait
 ```
 
 Each line is a job.
-`--wait` reports final results and exits nonzero if a submission fails or a tracked job does not succeed.
+`--wait` reports final results, still following the accepted jobs when other lines are refused.
+Its exit status tells callers which outcome they got, and when several apply the highest wins:
+
+| Status | Meaning |
+| --- | --- |
+| 0 | Every line was accepted, and with `--wait` every job succeeded |
+| 1 | With `--wait`, a job did not succeed |
+| 2 | A line was refused, or the command was misused |
+| 3 | The server did not answer |
 
 Results appear in `out`, with job history in `.ordo/job.json`.
 Each step's output is in `.ordo/STEP.stdout` and `.ordo/STEP.stderr`, from its last attempt, where `STEP` is its name or its position from 1.
