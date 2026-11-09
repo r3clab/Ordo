@@ -91,6 +91,12 @@ func (c Config) serviceSocket(name string) string { return path.Join(c.serviceDi
 
 func (c Config) cdiDir() string { return path.Join(c.StateDir, "cdi") }
 
+func (c Config) initPath(digest string) string { return path.Join(c.StateDir, "init", digest) }
+
+func (c Config) seccompPath(digest string) string {
+	return path.Join(c.StateDir, "seccomp", digest+".json")
+}
+
 func (c Config) ServiceForward(name, address string) (string, error) {
 	if !spec.ValidName(name) {
 		return "", fmt.Errorf("invalid service name %q", name)
@@ -109,8 +115,8 @@ func (c Config) ServiceForward(name, address string) (string, error) {
 	return socket + ":" + net.JoinHostPort(host, port), nil
 }
 
-// CheckLaunch measures t's launch script with placeholders as long as real values: SHA-256 image IDs
-// and input digests, NVIDIA GPU UUIDs, and rand.Text() attempt and server IDs.
+// CheckLaunch measures t's launch script with placeholders as long as real values: SHA-256 image IDs,
+// input digests and ASLR files, NVIDIA GPU UUIDs, and rand.Text() attempt and server IDs.
 func (c Config) CheckLaunch(t spec.Task, inputs []string) error {
 	digest := strings.Repeat("0", 64)
 	s := spec.Spec{Image: "sha256:" + digest, Inputs: map[string]string{}, Task: t}
@@ -123,7 +129,8 @@ func (c Config) CheckLaunch(t spec.Task, inputs []string) error {
 	for _, name := range t.Secrets {
 		secrets[name] = ""
 	}
-	script, _ := launchScript(c, Launch{Attempt: placeholder, Spec: s, Allocation: worst, Secrets: secrets}, placeholder)
+	aslr := aslrFiles{init: c.initPath(digest), seccomp: c.seccompPath(digest)}
+	script, _ := launchScript(c, Launch{Attempt: placeholder, Spec: s, Allocation: worst, Secrets: secrets}, placeholder, aslr)
 	if err := ssh.CheckScript(script); err != nil {
 		return fmt.Errorf("arguments and environment are too long for %s: %w", c.Host, err)
 	}

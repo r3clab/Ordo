@@ -34,6 +34,9 @@ type Run struct {
 	CDISpecDir string
 	Secrets    []string
 	Timeout    int64
+	// Init and Seccomp replace Podman's container init and seccomp profile when set.
+	Init    string
+	Seccomp string
 }
 
 // Argv follows `podman --remote=false`; CDI's spec directory is a global flag, so it precedes `run`.
@@ -72,6 +75,12 @@ func (r Run) Argv() []string {
 	// Image VOLUMEs would add writable storage outside /outputs that outlives the container, and
 	// k8s-file logs stay readable by podman logs whatever the host's journald keeps.
 	args = append(args, "--image-volume=ignore", "--log-driver=k8s-file")
+	if r.Init != "" {
+		args = append(args, "--init", "--init-path", r.Init)
+	}
+	if r.Seccomp != "" {
+		args = append(args, "--security-opt", "seccomp="+r.Seccomp)
+	}
 	for _, name := range slices.Sorted(maps.Keys(r.Inputs)) {
 		args = append(args, "--volume", r.Inputs[name]+":/inputs/"+name+":ro")
 	}

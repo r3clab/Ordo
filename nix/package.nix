@@ -7,6 +7,7 @@ pkgs.buildGoModule (finalAttrs: {
     fileset = pkgs.lib.fileset.unions [
       ../go.mod
       ../internal/server/web
+      ../internal/worker/seccomp.json
       (pkgs.lib.fileset.maybeMissing ../go.sum)
       (pkgs.lib.fileset.fileFilter (file: file.hasExt "go") ../.)
     ];

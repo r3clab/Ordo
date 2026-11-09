@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/r3clab/Ordo/internal/ssh"
@@ -16,6 +17,10 @@ import (
 )
 
 func main() {
+	if filepath.Base(os.Args[0]) == worker.InitName {
+		fmt.Fprintln(os.Stderr, "ordo init:", worker.Init(os.Args[1:]))
+		os.Exit(127)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {

@@ -116,6 +116,9 @@
             },
             "uniqueItems": true
           },
+          "disable_aslr": {
+            "type": "boolean"
+          },
           "secrets": {
             "type": [
               "null",
@@ -261,6 +264,9 @@
         ]
       },
       "uniqueItems": true
+    },
+    "disable_aslr": {
+      "type": "boolean"
     },
     "secrets": {
       "type": [

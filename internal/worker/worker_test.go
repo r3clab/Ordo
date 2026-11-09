@@ -1,7 +1,9 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -62,6 +64,7 @@ image)
 	inspect) printf '[{"Id":"%s"}]' "$ORDO_FAKE_IMAGE" ;;
 	esac ;;
 load) cat > "$ORDO_FAKE_LOG.loaded" ;;
+info) printf '%s\n' "${ORDO_FAKE_SECCOMP:-}" ;;
 esac
 `
 
@@ -142,6 +145,69 @@ func TestLaunchQuotesArgumentsAndKeepsSecretsOffArgv(t *testing.T) {
 	}
 	if info, err := os.Stat(want.Outputs); err != nil || info.Mode().Perm() != 0o777 {
 		t.Fatalf("outputs directory: %v", err)
+	}
+}
+
+func TestLaunchDisablesASLRWithOrdoInitOnlyWhenAsked(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "seccomp.json")
+	if err := os.WriteFile(custom, []byte(`{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundled := bytes.Count(defaultSeccomp, []byte(`"names"`)) + 1
+	for _, c := range []struct {
+		disable bool
+		profile string
+		rules   int
+	}{{false, "", 0}, {true, "", bundled}, {true, custom, 2}} {
+		log := fakes(t)
+		t.Setenv("ORDO_FAKE_SECCOMP", c.profile)
+		h := testHost(t)
+		l := Launch{Attempt: "a1", Spec: spec.Spec{Image: "sha256:" + strings.Repeat("a", 64), Task: spec.Task{Sandbox: spec.Sandbox{DisableASLR: c.disable}}}, Allocation: pool.Allocation{CPUs: []int{0}, MemoryMiB: 128}}
+		if _, err := h.Launch(context.Background(), l); err != nil {
+			t.Fatal(err)
+		}
+		runs := calls(t, log, "podman")
+		argv := runs[len(runs)-1]
+		init := slices.Index(argv, "--init-path")
+		if !c.disable {
+			if init >= 0 || slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, "seccomp=") }) {
+				t.Fatalf("ASLR left on, but argv %q", argv)
+			}
+			continue
+		}
+		if init < 1 || argv[init-1] != "--init" {
+			t.Fatalf("argv %q lacks --init", argv)
+		}
+		if info, err := os.Stat(argv[init+1]); err != nil || info.Mode().Perm() != 0o755 {
+			t.Fatalf("init %s: %v", argv[init+1], err)
+		}
+		profile := argv[slices.Index(argv, "--security-opt")+1]
+		data, err := os.ReadFile(strings.TrimPrefix(profile, "seccomp="))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p struct{ Syscalls []json.RawMessage }
+		if err := json.Unmarshal(data, &p); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.Syscalls) != c.rules || string(p.Syscalls[len(p.Syscalls)-1]) != `{"action":"SCMP_ACT_ALLOW","args":[{"index":0,"op":"SCMP_CMP_EQ","value":262144}],"names":["personality"]}` {
+			t.Fatalf("profile %s has %d rules ending %s", profile, len(p.Syscalls), p.Syscalls[len(p.Syscalls)-1])
+		}
+	}
+}
+
+func TestInitDisablesASLRForTheTask(t *testing.T) {
+	if os.Getenv("ORDO_TEST_INIT") == "1" {
+		t.Fatal(Init([]string{"--", "cat", "/proc/self/personality"}))
+	}
+	if err := Init([]string{"--"}); err == nil {
+		t.Fatal("ran an empty command")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestInitDisablesASLRForTheTask$")
+	cmd.Env = append(os.Environ(), "ORDO_TEST_INIT=1")
+	out, err := cmd.Output()
+	if got := strings.TrimSpace(string(out)); err != nil || got != "00040000" {
+		t.Fatalf("task personality %q: %v", got, err)
 	}
 }
 

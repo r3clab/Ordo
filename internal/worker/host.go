@@ -48,6 +48,7 @@ type Host struct {
 	mu sync.Mutex
 	// External deletion is possible, so a failed launch invalidates these presence probes.
 	present map[string]bool
+	aslr    sync.Mutex
 }
 
 func New(c Config, run Runner, server string) *Host {
@@ -207,7 +208,7 @@ type Launch struct {
 
 // Podman copies each secret into the container it creates, so the secret files and Podman secrets
 // exist only while podman run does.
-func launchScript(c Config, l Launch, server string) (string, io.Reader) {
+func launchScript(c Config, l Launch, server string, aslr aslrFiles) (string, io.Reader) {
 	run := c.runDir(l.Attempt)
 	r := podman.Run{Attempt: l.Attempt, Server: server, Image: l.Spec.Image, Command: l.Spec.Command, Allocation: l.Allocation, Sandbox: l.Spec.Sandbox, Outputs: path.Join(run, OutputsDir), CDISpecDir: c.cdiDir()}
 	if l.Spec.TimeoutSeconds > 0 {
@@ -244,12 +245,22 @@ func launchScript(c Config, l Launch, server string) (string, io.Reader) {
 		_ = w.Close()
 		stdin = &archive
 	}
+	if l.Spec.DisableASLR {
+		r.Init, r.Seccomp = aslr.init, aslr.seccomp
+	}
 	return script + "pm " + quoteAll(r.Argv()), stdin
 }
 
 // A repeated launch of one attempt fails on the container name.
 func (h *Host) Launch(ctx context.Context, l Launch) (string, error) {
-	script, stdin := launchScript(h.Config, l, h.server)
+	var aslr aslrFiles
+	if l.Spec.DisableASLR {
+		var err error
+		if aslr, err = h.aslrFiles(ctx); err != nil {
+			return "", err
+		}
+	}
+	script, stdin := launchScript(h.Config, l, h.server, aslr)
 	data, err := h.output(ctx, script, stdin)
 	if err != nil {
 		h.forget()

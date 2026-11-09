@@ -38,6 +38,9 @@ type Sandbox struct {
 	Env     map[string]string `json:"env,omitempty"`
 	Network string            `json:"network,omitempty"`
 	CapAdd  []string          `json:"cap_add,omitempty"`
+	// DisableASLR suits sanitizer runtimes that fail under the host's randomization; Podman's default
+	// seccomp profile keeps a task from turning it off itself, so Ordo's init does it.
+	DisableASLR bool `json:"disable_aslr,omitempty"`
 }
 
 func (s Sandbox) Validate() error {
