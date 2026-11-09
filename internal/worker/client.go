@@ -290,3 +290,7 @@ func (c *Client) Collect(ctx context.Context, attempt, dir string) error {
 	}
 	return c.stream(ctx, http.MethodGet, "runs/"+attempt+"/"+OutputsDir, nil, func(r io.Reader) error { return content.Extract(r, outputs) })
 }
+
+func (c *Client) Follow(ctx context.Context, attempt, file string, w io.Writer) error {
+	return c.stream(ctx, http.MethodGet, "follow/"+attempt+"/"+file, nil, func(r io.Reader) error { _, err := io.Copy(w, r); return err })
+}

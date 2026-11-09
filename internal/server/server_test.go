@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http/httptest"
 	"os"
@@ -65,10 +66,30 @@ type fakeHost struct {
 	broken       error
 	// upload fails the next EnsureImage.
 	upload error
+	live   map[string]string
+	hold   chan struct{}
+	cut    error
 }
 
 func newFakeHost(server string) *fakeHost {
-	return &fakeHost{server: server, boot: "boot-1", machine: "machine-1", containers: map[string]*fakeContainer{}, runs: map[string]bool{}}
+	return &fakeHost{server: server, boot: "boot-1", machine: "machine-1", containers: map[string]*fakeContainer{}, runs: map[string]bool{}, live: map[string]string{}}
+}
+
+func (f *fakeHost) Follow(ctx context.Context, attempt, file string, w io.Writer) error {
+	f.mu.Lock()
+	data, hold, cut := f.live[attempt+"/"+file], f.hold, f.cut
+	f.mu.Unlock()
+	if _, err := io.WriteString(w, data); err != nil {
+		return err
+	}
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return cut
 }
 
 func (f *fakeHost) now() time.Time { return time.Now().Add(f.skew) }

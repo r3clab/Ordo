@@ -14,12 +14,12 @@
     const path = `jobs/${encodeURIComponent(jobId)}/logs/${stream}?attempt=${attempt}`;
     loading = true;
     error = "";
-    request(path)
+    request(path, "GET", { Range: `bytes=-${1 << 20}` })
       .then(async (response) => {
         const body = await response.text();
         if (stale) return;
         text = body;
-        truncated = response.headers.get("X-Ordo-Truncated") === "true";
+        truncated = response.status === 206 && !response.headers.get("Content-Range")?.startsWith("bytes 0-");
       })
       .catch((e) => {
         if (stale) return;

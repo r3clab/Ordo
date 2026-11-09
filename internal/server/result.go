@@ -178,13 +178,6 @@ func failure(at Attempt) Failure {
 	return ""
 }
 
-func (j Job) resultDir(index int) string {
-	if index < 0 || index >= len(j.Attempts) {
-		return ""
-	}
-	return j.Attempts[index].ResultDir
-}
-
 // deliver publishes the last attempt's outputs, with the job's record and each step's logs in MetaDir,
 // into Out by one rename. A rename that a crash interrupted before the job was saved left a job.json
 // naming this job, which counts as delivered.

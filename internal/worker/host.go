@@ -289,8 +289,16 @@ func (h *Host) Inspect(ctx context.Context, attempt string) (podman.Inspection, 
 	return podman.ParseInspect(data)
 }
 
-func (h *Host) logs(ctx context.Context, attempt string, stdout, stderr io.Writer) error {
-	return h.run.Run(ctx, prelude()+"pm logs -- "+ssh.Quote(podman.Name(attempt)), nil, stdout, stderr)
+func (h *Host) logs(ctx context.Context, attempt, file string, follow bool, w io.Writer) error {
+	stdout, stderr := w, io.Writer(nil)
+	if file == StderrFile {
+		stdout, stderr = nil, w
+	}
+	flag := ""
+	if follow {
+		flag = "--follow "
+	}
+	return h.run.Run(ctx, prelude()+"pm logs "+flag+"-- "+ssh.Quote(podman.Name(attempt)), nil, stdout, stderr)
 }
 
 func (h *Host) outputs(ctx context.Context, attempt string, out io.Writer) error {

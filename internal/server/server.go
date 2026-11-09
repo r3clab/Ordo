@@ -211,6 +211,8 @@ type Server struct {
 	settings atomic.Pointer[settings]
 	// sessions cancels each worker's current session; a worker has a goroutine while it has an entry.
 	sessions map[string]context.CancelCauseFunc
+	// links holds each worker's connection while a session has it, for requests outside the passes.
+	links    map[string]link
 	reloaded chan struct{}
 	// jobs holds only unfinished jobs, and outs maps their Out to their ID; a finished job is read back
 	// from the store.
@@ -272,7 +274,7 @@ func Open(c Config) (_ *Server, err error) {
 			_ = db.Close()
 		}
 	}()
-	s := &Server{root: root, store: db, secretsDir: c.SecretsDir, home: c.Home, sessions: map[string]context.CancelCauseFunc{}, reloaded: make(chan struct{}, 1), jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}, pending: map[string]map[string]string{}}
+	s := &Server{root: root, store: db, secretsDir: c.SecretsDir, home: c.Home, sessions: map[string]context.CancelCauseFunc{}, links: map[string]link{}, reloaded: make(chan struct{}, 1), jobs: map[string]Job{}, outs: map[string]string{}, records: map[string]record{}, attempts: map[string]string{}, busy: map[string]bool{}, nodes: map[string]WorkerStatus{}, pending: map[string]map[string]string{}}
 	s.settings.Store(&settings{})
 	// Containers carry this ID, so a worker account shared with another server is detected.
 	err = db.Get("meta", "server", &s.id)

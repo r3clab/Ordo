@@ -243,6 +243,68 @@ func TestTransfersDoNotBlockControlAndQueuedCancellation(t *testing.T) {
 	}
 }
 
+func TestFollowsStreamLiveWithoutTakingTransferSlots(t *testing.T) {
+	fakes(t)
+	h := apiHost(t)
+	release := make(chan struct{})
+	h.run = runFunc(func(ctx context.Context, script string, in io.Reader, out, stderr io.Writer) error {
+		if !strings.Contains(script, "pm logs --follow") {
+			return (process{}).Run(ctx, script, in, out, stderr)
+		}
+		if strings.Contains(script, "ordo-gone") {
+			return &ssh.ExitError{Code: 125, Stderr: "no such container"}
+		}
+		if out == nil {
+			out = stderr
+		}
+		if _, err := io.WriteString(out, "first "); err != nil {
+			return err
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		_, err := io.WriteString(out, "last")
+		return err
+	})
+	c := apiClient(t, newAPI(h))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	type follow struct {
+		r    *io.PipeReader
+		done chan error
+	}
+	var follows []follow
+	for _, file := range []string{StdoutFile, StderrFile, StdoutFile} {
+		r, w := io.Pipe()
+		f := follow{r, make(chan error, 1)}
+		go func() { f.done <- c.Follow(ctx, "a1", file, w); _ = w.Close() }()
+		first := make([]byte, len("first "))
+		if _, err := io.ReadFull(r, first); err != nil || string(first) != "first " {
+			t.Fatalf("%s did not arrive while the container ran: %q %v", file, first, err)
+		}
+		follows = append(follows, f)
+	}
+	image := "sha256:" + strings.Repeat("a", 64)
+	t.Setenv("ORDO_FAKE_IMAGE", image)
+	if err := c.stream(ctx, http.MethodPut, "images/"+image, strings.NewReader("archive"), nil); err != nil {
+		t.Fatal("follows held up a transfer:", err)
+	}
+	close(release)
+	for _, f := range follows {
+		if rest, err := io.ReadAll(f.r); err != nil || string(rest) != "last" {
+			t.Fatalf("rest %q, %v", rest, err)
+		}
+		if err := <-f.done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.Follow(ctx, "gone", StdoutFile, io.Discard); err == nil || !strings.Contains(err.Error(), "no such container") {
+		t.Fatalf("a missing container must fail the follow: %v", err)
+	}
+}
+
 func TestStreamRequiresCompletionAndKeepsRemoteErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name, trailer string

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -61,14 +63,101 @@ func TestWebCancellationAndLogs(t *testing.T) {
 	}
 	seed(t, s, Job{ID: "logs", State: "succeeded", Attempts: []Attempt{{ResultDir: dir}}})
 	w = request("GET", "/v1/jobs/logs/logs/stdout", "", "", nil)
-	if w.Code != 200 || w.Body.Len() != 1<<20 || !strings.HasSuffix(w.Body.String(), "tail") || w.Header().Get("X-Ordo-Truncated") != "true" {
-		t.Fatal("bounded log read failed")
+	if w.Code != 200 || w.Body.Len() != 1<<20+4 {
+		t.Fatal("whole log read failed", w.Code)
+	}
+	tail := httptest.NewRequest("GET", "http://127.0.0.1:7331/v1/jobs/logs/logs/stdout", nil)
+	tail.Header.Set("Range", "bytes=-4")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, tail)
+	if w.Code != 206 || w.Body.String() != "tail" || w.Header().Get("Content-Range") != "bytes 1048576-1048579/1048580" {
+		t.Fatal("ranged log read failed", w.Code, w.Header())
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stderr.log"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tail = httptest.NewRequest("GET", "http://127.0.0.1:7331/v1/jobs/logs/logs/stderr", nil)
+	tail.Header.Set("Range", "bytes=-4")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, tail)
+	if w.Code != 200 || w.Body.Len() != 0 || w.Header().Get("Content-Range") != "" {
+		t.Fatal("ranged read of an empty log failed", w.Code, w.Header())
 	}
 	w = request("GET", "/v1/jobs/logs/logs/server.db", "", "", nil)
 	if w.Code != 400 {
 		t.Fatal("arbitrary file access accepted")
 	}
+	if w = request("GET", "/v1/jobs/logs/logs/stdout?attempt=1", "", "", nil); w.Code != 404 {
+		t.Fatal("a missing attempt must be not found", w.Code)
+	}
 }
+
+func TestFollowStreamsFromTheWorkerThenTheCollectedLog(t *testing.T) {
+	f := newFixture(t)
+	h := f.s.Handler()
+	id := f.submit(t, jobRequest(""))
+	follow := func(query string) (w *httptest.ResponseRecorder, aborted bool) {
+		defer func() {
+			if p := recover(); p != nil {
+				if p != http.ErrAbortHandler {
+					panic(p)
+				}
+				aborted = true
+			}
+		}()
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "http://ordo/v1/jobs/"+id+"/logs/stdout?follow=1"+query, nil))
+		return w, false
+	}
+	get := func(query string) *httptest.ResponseRecorder {
+		t.Helper()
+		w, aborted := follow(query)
+		if aborted {
+			t.Fatalf("follow%s aborted", query)
+		}
+		return w
+	}
+	f.h.refuse = errors.New("not yet")
+	f.tick(t)
+	if w := get(""); w.Code != 409 {
+		t.Fatalf("an attempt without a container must not be followed: %d", w.Code)
+	}
+	ready(t, f.s, id)
+	f.tick(t)
+	at := last(f.job(t, id))
+	if w := get(""); w.Code != 503 {
+		t.Fatalf("a follow needs the worker's connection: %d %s", w.Code, w.Body)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	unlink := f.s.link(ctx, "worker", f.h)
+	f.h.live[at.ID+"/"+worker.StdoutFile] = "live output"
+	if w := get("&offset=5"); w.Code != 200 || w.Body.String() != "output" {
+		t.Fatalf("a resumed follow must skip what it has: %d %q", w.Code, w.Body)
+	}
+	f.h.hold = make(chan struct{})
+	ended := make(chan bool, 1)
+	go func() { _, aborted := follow(""); ended <- aborted }()
+	cancel()
+	if !<-ended {
+		t.Fatal("the session's end must cut its follows off")
+	}
+	unlink()
+	f.h.hold, f.h.cut = nil, errors.New("connection lost")
+	f.s.link(context.Background(), "worker", f.h)
+	if _, aborted := follow(""); !aborted {
+		t.Fatal("a follow cut off after it began must abort the response")
+	}
+	f.h.live = map[string]string{}
+	if w := get(""); w.Code != 502 {
+		t.Fatalf("a follow that fails before any output must say so: %d", w.Code)
+	}
+	f.h.exit(at.ID, 0)
+	f.tick(t)
+	if w := get("&offset=1"); w.Code != 200 || w.Body.String() != "ut" {
+		t.Fatalf("a collected attempt must be followed from its log: %d %q", w.Code, w.Body)
+	}
+}
+
 func TestJobListConditionalRequests(t *testing.T) {
 	f := newFixture(t)
 	h := f.s.WebHandler()

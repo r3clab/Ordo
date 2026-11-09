@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"io"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,24 @@ type host interface {
 	Collect(ctx context.Context, attempt, dir string) error
 	Remove(ctx context.Context, attempt string) error
 	Release(ctx context.Context, attempt string) error
+	Follow(ctx context.Context, attempt, file string, w io.Writer) error
+}
+
+// link is a worker's connection, valid until ctx ends with the session that made it.
+type link struct {
+	host host
+	ctx  context.Context
+}
+
+func (s *Server) link(ctx context.Context, name string, h host) (unlink func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.links[name] = link{h, ctx}
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.links, name)
+	}
 }
 
 // neverStarted bounds how long a created container may wait for the start that its launch performs.
@@ -157,6 +176,7 @@ func (s *Server) session(ctx context.Context, c *settings, cfg worker.Config) er
 		cancel(nil)
 		bg.wg.Wait()
 	}()
+	defer s.link(ctx, cfg.Host, h)()
 	probe, err := h.Probe(ctx)
 	if err != nil {
 		return err

@@ -206,6 +206,14 @@ func newAPI(h *Host) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(value)
 	})
+	respond := func(w http.ResponseWriter, run func() error) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Trailer", resultTrailer)
+		w.WriteHeader(http.StatusOK)
+		err := run()
+		data, _ := json.Marshal(outcome(err))
+		w.Header().Set(resultTrailer, base64.StdEncoding.EncodeToString(data))
+	}
 	stream := func(w http.ResponseWriter, r *http.Request, run func() error) {
 		select {
 		case transfers <- struct{}{}:
@@ -213,12 +221,7 @@ func newAPI(h *Host) http.Handler {
 		case <-r.Context().Done():
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Trailer", resultTrailer)
-		w.WriteHeader(http.StatusOK)
-		err := run()
-		data, _ := json.Marshal(outcome(err))
-		w.Header().Set(resultTrailer, base64.StdEncoding.EncodeToString(data))
+		respond(w, run)
 	}
 	mux.HandleFunc("PUT /{kind}/{id}", func(w http.ResponseWriter, r *http.Request) {
 		kind, id := r.PathValue("kind"), r.PathValue("id")
@@ -245,15 +248,20 @@ func newAPI(h *Host) http.Handler {
 			return
 		}
 		stream(w, r, func() error {
-			switch file {
-			case StdoutFile:
-				return h.logs(r.Context(), attempt, w, nil)
-			case StderrFile:
-				return h.logs(r.Context(), attempt, nil, w)
-			default:
+			if file == OutputsDir {
 				return h.outputs(r.Context(), attempt, w)
 			}
+			return h.logs(r.Context(), attempt, file, false, w)
 		})
+	})
+	// A follow lasts as long as its container and moves little, so it takes no transfer slot.
+	mux.HandleFunc("GET /follow/{attempt}/{file}", func(w http.ResponseWriter, r *http.Request) {
+		attempt, file := r.PathValue("attempt"), r.PathValue("file")
+		if !spec.ValidName(attempt) || !slices.Contains([]string{StdoutFile, StderrFile}, file) {
+			writeError(w, http.StatusBadRequest, errors.New("invalid follow target"))
+			return
+		}
+		respond(w, func() error { return h.logs(r.Context(), attempt, file, true, Flushing(w)) })
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != "ordo-worker" || r.Header.Get("Origin") != "" {
@@ -262,6 +270,21 @@ func newAPI(h *Host) http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func Flushing(w http.ResponseWriter) io.Writer { return flusher{w, http.NewResponseController(w)} }
+
+type flusher struct {
+	io.Writer
+	rc *http.ResponseController
+}
+
+func (f flusher) Write(p []byte) (int, error) {
+	n, err := f.Writer.Write(p)
+	if err == nil {
+		err = f.rc.Flush()
+	}
+	return n, err
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {

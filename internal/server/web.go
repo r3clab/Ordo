@@ -1,6 +1,8 @@
 package server
 
 import (
+	"cmp"
+	"context"
 	"embed"
 	"io"
 	"net"
@@ -128,40 +130,129 @@ func (s *Server) serveLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	query := r.URL.Query()
 	index := len(job.Attempts) - 1
-	if query := r.URL.Query().Get("attempt"); query != "" {
+	if attempt := query.Get("attempt"); attempt != "" {
 		var err error
-		index, err = strconv.Atoi(query)
-		if err != nil {
+		if index, err = strconv.Atoi(attempt); err != nil {
 			http.Error(w, "invalid attempt", 400)
 			return
 		}
 	}
-	dir := job.resultDir(index)
-	if dir == "" {
-		http.Error(w, "logs are available after collection", http.StatusConflict)
+	if index < 0 || index >= len(job.Attempts) {
+		http.Error(w, "no such attempt", http.StatusNotFound)
 		return
 	}
-	file := filepath.Join(dir, name)
+	at := job.Attempts[index]
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if query.Get("follow") == "" {
+		if at.ResultDir == "" {
+			http.Error(w, "logs are available after collection, or to follow", http.StatusConflict)
+			return
+		}
+		f, ok := openLog(w, filepath.Join(at.ResultDir, name))
+		if !ok {
+			return
+		}
+		defer func() { _ = f.Close() }()
+		// ServeContent answers a suffix range of an empty file with the invalid Content-Range "bytes 0--1/0".
+		if info, err := f.Stat(); err == nil && info.Size() == 0 {
+			r.Header.Del("Range")
+		}
+		http.ServeContent(w, r, "", time.Time{}, f)
+		return
+	}
+	offset, err := strconv.ParseInt(cmp.Or(query.Get("offset"), "0"), 10, 64)
+	if err != nil || offset < 0 {
+		http.Error(w, "invalid offset", 400)
+		return
+	}
+	s.follow(w, r, job, index, name, offset)
+}
+
+func (s *Server) follow(w http.ResponseWriter, r *http.Request, job Job, index int, name string, offset int64) {
+	dir := job.Attempts[index].ResultDir
+	if dir == "" {
+		if dir = s.followLive(w, r, job, index, name, offset); dir == "" {
+			return
+		}
+	}
+	f, ok := openLog(w, filepath.Join(dir, name))
+	if !ok {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		http.Error(w, "log seek failed", 500)
+		return
+	}
+	_, _ = io.Copy(w, f)
+}
+
+// followLive answers with the log from the attempt's worker, unless it finds the attempt collected and
+// returns where. Only an attempt that never started leaves a job, so index stays its own.
+func (s *Server) followLive(w http.ResponseWriter, r *http.Request, job Job, index int, name string, offset int64) string {
+	at := job.Attempts[index]
+	if at.ContainerID == "" {
+		http.Error(w, "attempt has not started", http.StatusConflict)
+		return ""
+	}
+	s.mu.Lock()
+	l, linked := s.links[at.Worker]
+	s.mu.Unlock()
+	if !linked {
+		http.Error(w, "worker is not connected", http.StatusServiceUnavailable)
+		return ""
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer context.AfterFunc(l.ctx, cancel)()
+	live := &skipper{w: worker.Flushing(w), skip: offset}
+	err := l.host.Follow(ctx, at.ID, name, live)
+	switch {
+	case err == nil:
+		return ""
+	case live.sent:
+		// A client must never take a cut-off log for a whole one.
+		panic(http.ErrAbortHandler)
+	}
+	// The attempt may have been collected, and its container removed, before the follow began.
+	if j, ok, _ := s.job(job.ID); ok && j.Attempts[index].ResultDir != "" {
+		return j.Attempts[index].ResultDir
+	}
+	http.Error(w, "follow: "+err.Error(), http.StatusBadGateway)
+	return ""
+}
+
+func openLog(w http.ResponseWriter, file string) (*os.File, bool) {
 	info, err := os.Lstat(file)
 	if err != nil || !info.Mode().IsRegular() {
 		http.Error(w, "log is unavailable", 500)
-		return
+		return nil, false
 	}
 	f, err := os.Open(file)
 	if err != nil {
 		http.Error(w, "log is unavailable", 500)
-		return
+		return nil, false
 	}
-	defer func() { _ = f.Close() }()
-	const limit int64 = 1 << 20
-	if info.Size() > limit {
-		if _, err := f.Seek(-limit, io.SeekEnd); err != nil {
-			http.Error(w, "log seek failed", 500)
-			return
-		}
-		w.Header().Set("X-Ordo-Truncated", "true")
+	return f, true
+}
+
+type skipper struct {
+	w    io.Writer
+	skip int64
+	sent bool
+}
+
+func (s *skipper) Write(p []byte) (int, error) {
+	n := len(p)
+	if s.skip >= int64(n) {
+		s.skip -= int64(n)
+		return n, nil
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = io.Copy(w, io.LimitReader(f, limit))
+	p, s.skip, s.sent = p[s.skip:], 0, true
+	if _, err := s.w.Write(p); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
