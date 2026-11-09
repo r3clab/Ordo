@@ -16,7 +16,7 @@ func TestRunArgv(t *testing.T) {
 		"run", "--detach", "--pull=never", "--name", "ordo-a1",
 		"--label", "io.r3clab.ordo.attempt=a1", "--label", "io.r3clab.ordo.server=s1",
 		"--cpuset-cpus", "0,64", "--memory", "134217728", "--memory-swap", "134217728",
-		"--network=none", "--image-volume=ignore", "--log-driver=k8s-file",
+		"--network=none", "--image-volume=ignore", "--log-driver=k8s-file", "--ulimit=core=0",
 		"--volume", "/w/runs/a1/outputs:/outputs:rw",
 		"--", r.Image, "argument with spaces", "$(not-a-shell)",
 	}

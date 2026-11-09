@@ -73,8 +73,10 @@ func (r Run) Argv() []string {
 		args = append(args, "--workdir", r.Workdir)
 	}
 	// Image VOLUMEs would add writable storage outside /outputs that outlives the container, and
-	// k8s-file logs stay readable by podman logs whatever the host's journald keeps.
-	args = append(args, "--image-volume=ignore", "--log-driver=k8s-file")
+	// k8s-file logs stay readable by podman logs whatever the host's journald keeps. core_pattern is
+	// host-wide, so a dump would go to the host's crash handler, never to /outputs, and only delay the
+	// task; the limit would otherwise be inherited from the worker's SSH session.
+	args = append(args, "--image-volume=ignore", "--log-driver=k8s-file", "--ulimit=core=0")
 	if r.Init != "" {
 		args = append(args, "--init", "--init-path", r.Init)
 	}
