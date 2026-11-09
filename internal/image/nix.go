@@ -3,6 +3,7 @@ package image
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -39,6 +40,16 @@ func (t Tools) Copy(ctx context.Context, src, dest string) error {
 	}
 	_, err := t.run(ctx, cmp.Or(t.Skopeo, "skopeo"), "--insecure-policy", "copy", src, "oci-archive:"+dest)
 	return err
+}
+
+// For a multi-platform image this is the index's digest, from which a pinned pull selects this host's
+// platform.
+func (t Tools) Digest(ctx context.Context, ref string) (string, error) {
+	manifest, err := t.run(ctx, cmp.Or(t.Skopeo, "skopeo"), "inspect", "--raw", ref)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(manifest)), nil
 }
 
 func (t Tools) run(ctx context.Context, name string, args ...string) ([]byte, error) {

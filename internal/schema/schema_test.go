@@ -35,6 +35,7 @@ func TestRequestSchemaMatchesValidation(t *testing.T) {
 		`{` + base + `,"image":"/nix/store/x.drv^*","args":["--max-time","1h"],"env":{"MODE":"eval"},"network":"egress","cap_add":["NET_ADMIN"],"timeout_seconds":3600,"retry":{"task":2,"infrastructure":0},"tags":["l40s"]}`,
 		`{` + base + `,"image":"/src#images.grep","secrets":["TOKEN"],"inputs":{"corpus":"/data"}}`,
 		`{` + base + `,"image":"/src#x","entrypoint":["netlock",""],"workdir":"/outputs"}`,
+		`{` + base + `,"image":"docker://registry:5000/org/eval:v1","disable_aslr":true}`,
 	} {
 		if err := validate(valid); err != nil {
 			t.Errorf("rejected %s: %v", valid, err)

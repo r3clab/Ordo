@@ -2,6 +2,7 @@ package image
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -62,8 +63,13 @@ func TestSourceValidate(t *testing.T) {
 		{Source("a\nb"), false},
 		{Source(strings.Repeat("x", MaxInstallableBytes+1)), false},
 		{Source("docker://ghcr.io/org/eval@sha256:" + strings.Repeat("0", 64)), true},
-		{Source("docker://ghcr.io/org/eval:latest"), false},
+		{Source("docker://ghcr.io/org/eval:latest"), true},
+		{Source("docker://registry:5000/eval"), true},
+		{Source("docker://ghcr.io/org/eval:v1@sha256:" + strings.Repeat("0", 64)), true},
 		{Source("docker://ghcr.io/org/eval@sha256:" + strings.Repeat("0", 63)), false},
+		{Source("docker://ghcr.io/org/eval@latest"), false},
+		{Source("docker://:latest"), false},
+		{Source("docker://"), false},
 	} {
 		if err := test.src.Validate(); (err == nil) != test.ok {
 			t.Fatalf("%+v: %v", test.src, err)
@@ -138,12 +144,12 @@ func TestResolverPullsRegistryImagesOnceByReference(t *testing.T) {
 	src := Source("docker://ghcr.io/org/eval@sha256:" + strings.Repeat("0", 64))
 	for range 2 {
 		resolved, err := r.Resolve(context.Background(), src)
-		if err != nil || resolved.ID != config || resolved.Origin == nil || resolved.Origin.Reference != string(src) {
+		if err != nil || resolved.ID != config || resolved.Origin == nil || *resolved.Origin != (Origin{Reference: string(src), Digest: "sha256:" + strings.Repeat("0", 64)}) {
 			t.Fatalf("resolved %+v: %v", resolved, err)
 		}
 	}
-	if pull := fake.Argv("skopeo"); fake.Pulls.Load() != 1 || fake.Builds.Load() != 0 || !slices.Equal(pull[:3], []string{"--insecure-policy", "copy", string(src)}) {
-		t.Fatalf("pulls=%d builds=%d argv %q", fake.Pulls.Load(), fake.Builds.Load(), pull)
+	if pull := fake.Argv("skopeo"); fake.Pulls.Load() != 1 || fake.Builds.Load() != 0 || fake.Lookups.Load() != 0 || !slices.Equal(pull[:3], []string{"--insecure-policy", "copy", string(src)}) {
+		t.Fatalf("pulls=%d builds=%d lookups=%d argv %q", fake.Pulls.Load(), fake.Builds.Load(), fake.Lookups.Load(), pull)
 	}
 	entry, ok, err := r.Cache.Load(string(src))
 	if err != nil || !ok {
@@ -154,6 +160,46 @@ func TestResolverPullsRegistryImagesOnceByReference(t *testing.T) {
 	}
 	if _, err := r.Resolve(context.Background(), src); err != nil || fake.Pulls.Load() != 2 {
 		t.Fatalf("a lost registry blob must be pulled again: %v, pulls=%d", err, fake.Pulls.Load())
+	}
+}
+
+func TestResolverPinsTagsToTheDigestTheyNameNow(t *testing.T) {
+	fake := fakeNix()
+	r := newResolver(t, fake)
+	ctx := context.Background()
+	src := Source("docker://registry:5000/org/eval:v1")
+	digestOf := func(manifest string) string { return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(manifest))) }
+	resolve := func(manifest string) Resolved {
+		t.Helper()
+		fake.Tagged = manifest
+		resolved, err := r.Resolve(ctx, src)
+		if err != nil || resolved.Origin == nil || *resolved.Origin != (Origin{Reference: string(src), Digest: digestOf(manifest)}) {
+			t.Fatalf("resolved %+v: %v", resolved, err)
+		}
+		return resolved
+	}
+	resolve(`{"manifests":["first"]}`)
+	if pull := fake.Argv("skopeo"); !slices.Equal(pull[:3], []string{"--insecure-policy", "copy", "docker://registry:5000/org/eval@" + digestOf(`{"manifests":["first"]}`)}) {
+		t.Fatalf("a tag must be pulled by the digest it names: %q", pull)
+	}
+	resolve(`{"manifests":["first"]}`)
+	if fake.Lookups.Load() != 2 || fake.Pulls.Load() != 1 {
+		t.Fatalf("an unmoved tag must be looked up again but not pulled: lookups=%d pulls=%d", fake.Lookups.Load(), fake.Pulls.Load())
+	}
+	if lookup := fake.Argv("skopeo"); !slices.Equal(lookup, []string{"inspect", "--raw", string(src)}) {
+		t.Fatalf("lookup argv %q", lookup)
+	}
+	resolve(`{"manifests":["moved"]}`)
+	if fake.Lookups.Load() != 3 || fake.Pulls.Load() != 2 {
+		t.Fatalf("a moved tag must be pulled anew: lookups=%d pulls=%d", fake.Lookups.Load(), fake.Pulls.Load())
+	}
+
+	both := Source("docker://registry:5000/org/eval:v1@sha256:" + strings.Repeat("1", 64))
+	if _, err := r.Resolve(ctx, both); err != nil || fake.Lookups.Load() != 3 {
+		t.Fatalf("a given digest needs no lookup: %v lookups=%d", err, fake.Lookups.Load())
+	}
+	if pull := fake.Argv("skopeo"); pull[2] != "docker://registry:5000/org/eval@sha256:"+strings.Repeat("1", 64) {
+		t.Fatalf("skopeo refuses a tag beside a digest: %q", pull)
 	}
 }
 

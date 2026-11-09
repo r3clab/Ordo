@@ -79,7 +79,8 @@ It assumes `data/input.txt` exists and `/srv/eval#images.tools` provides a shell
 - `out` names the result directory on the server host and identifies the job.
 - `inputs` maps server-host directories to read-only mounts under `/inputs`.
 - `steps` runs containers in order, sharing `/outputs` between steps.
-- `image` accepts a [nix2container](https://github.com/nlewo/nix2container) installable or a registry image pinned as `docker://NAME@sha256:DIGEST`.
+- `image` accepts a [nix2container](https://github.com/nlewo/nix2container) installable or a registry image as `docker://NAME[:TAG][@sha256:DIGEST]`.
+  A tag is pinned to the digest it names when the job is submitted, so retries run the same image; each step's `image_origin` records both.
 - `resources` requests cores (CPUs from the worker's `cpus`), memory in MiB, and an optional GPU count.
 - `args` supplies arguments to the image's entrypoint, which an optional `entrypoint` replaces; `workdir` replaces its working directory with one that already exists, such as `/outputs`.
 

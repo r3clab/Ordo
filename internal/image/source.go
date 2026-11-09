@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-// Source is a nix installable, or a registry image as docker://NAME@sha256:DIGEST.
+// A Source resolves once, when its job is submitted: an installable to the store path it builds, a
+// registry image to the manifest digest its tag names unless it gives one.
 type Source string
 
 const (
@@ -18,12 +19,24 @@ const (
 
 var (
 	installable = regexp.MustCompile(InstallablePattern)
-	// The digest pins the image, so a pull yields what the job was submitted with.
-	reference = regexp.MustCompile(`^docker://[^\s@]+@sha256:[0-9a-f]{64}$`)
+	reference   = regexp.MustCompile(`^docker://([^\s@]+)(?:@(sha256:[0-9a-f]{64}))?$`)
 )
 
 // Registry reports whether s names a registry image rather than a nix installable.
 func (s Source) Registry() bool { return strings.HasPrefix(string(s), registryPrefix) }
+
+// A tag beside a digest only labels it, as skopeo refuses a reference that carries both.
+func (s Source) pin() (repository, digest string, ok bool) {
+	m := reference.FindStringSubmatch(string(s))
+	if m == nil {
+		return "", "", false
+	}
+	repository = m[1]
+	if i := strings.LastIndexByte(repository, ':'); i > strings.LastIndexByte(repository, '/') {
+		repository = repository[:i]
+	}
+	return repository, m[2], repository != ""
+}
 
 func (s Source) Validate() error {
 	switch {
@@ -31,8 +44,10 @@ func (s Source) Validate() error {
 		return errors.New("image must be a nix installable or a docker:// reference")
 	case len(s) > MaxInstallableBytes:
 		return errors.New("image source is too long")
-	case s.Registry() && !reference.MatchString(string(s)):
-		return errors.New("a docker:// image must be pinned as NAME@sha256:DIGEST")
+	case s.Registry():
+		if _, _, ok := s.pin(); !ok {
+			return errors.New("a docker:// image must be NAME[:TAG][@sha256:DIGEST]")
+		}
 	case !installable.MatchString(string(s)):
 		return errors.New("invalid nix installable")
 	}

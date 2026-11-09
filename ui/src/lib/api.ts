@@ -41,6 +41,7 @@ export interface Spec {
   secrets?: string[];
   services?: string[];
   timeout_seconds?: number;
+  disable_aslr?: boolean;
   tags?: string[];
 }
 
@@ -48,7 +49,7 @@ export interface Stage {
   name?: string;
   spec: Spec;
   archive: string;
-  image_origin?: { installable?: string; output?: string; reference?: string };
+  image_origin?: { installable?: string; output?: string; reference?: string; digest?: string };
 }
 
 export interface Result {

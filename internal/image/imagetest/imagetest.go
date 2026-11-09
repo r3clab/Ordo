@@ -48,8 +48,9 @@ type Nix struct {
 	Output  string
 	Config  string
 	Release chan struct{}
+	Tagged  string
 
-	Builds, Exports, Pulls atomic.Int32
+	Builds, Exports, Pulls, Lookups atomic.Int32
 
 	mu   sync.Mutex
 	argv map[string][]string
@@ -80,6 +81,10 @@ func (n *Nix) Exec(ctx context.Context, name string, args ...string) ([]byte, er
 		}
 		return []byte(n.Output + "\n"), nil
 	case "skopeo":
+		if args[0] == "inspect" {
+			n.Lookups.Add(1)
+			return []byte(n.Tagged), nil
+		}
 		if strings.HasPrefix(args[len(args)-2], "docker://") {
 			n.Pulls.Add(1)
 		} else {
