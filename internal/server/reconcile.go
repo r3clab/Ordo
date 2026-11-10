@@ -219,6 +219,11 @@ func sleep(ctx context.Context, d time.Duration) bool {
 // pass reconciles every unfinished job against one poll of the worker. Only transport failures end
 // it early; a job's own failure is recorded on the job.
 func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *worker.Probe, bg *steps) error {
+	// A step that ends after the poll leaves its job ahead of the snapshot, where a launched container
+	// looks lost, so each job busy at the poll waits for the next one.
+	s.mu.Lock()
+	stale := maps.Clone(s.busy)
+	s.mu.Unlock()
 	snap, err := h.Poll(ctx)
 	if err != nil {
 		return err
@@ -253,7 +258,7 @@ func (s *Server) pass(ctx context.Context, cfg worker.Config, h host, probe *wor
 	for _, id := range s.unfinished() {
 		s.mu.Lock()
 		j, unfinished := s.jobs[id]
-		available := unfinished && !s.busy[id] && s.fault == nil
+		available := unfinished && !s.busy[id] && !stale[id] && s.fault == nil
 		// Queued, blocked and delivering jobs can still make progress on any worker.
 		switch j.State {
 		case Dispatching, Running, Collecting:

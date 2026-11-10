@@ -83,6 +83,63 @@ func BenchmarkPassOtherWorkersJobs(b *testing.B) {
 	}
 }
 
+// gatedHost holds launches until a test opens release, and runs afterPoll between taking a snapshot and
+// returning it.
+type gatedHost struct {
+	*fakeHost
+	release   chan struct{}
+	afterPoll func()
+}
+
+func (h *gatedHost) Launch(ctx context.Context, l worker.Launch) (string, error) {
+	<-h.release
+	return h.fakeHost.Launch(ctx, l)
+}
+
+func (h *gatedHost) Poll(ctx context.Context) (worker.Snapshot, error) {
+	snap, err := h.fakeHost.Poll(ctx)
+	if h.afterPoll != nil {
+		h.afterPoll()
+	}
+	return snap, err
+}
+
+func TestLaunchEndingAfterThePollDoesNotLoseItsContainer(t *testing.T) {
+	f := newFixture(t)
+	id := f.submit(t, jobRequest(f.out("job")))
+	h := &gatedHost{fakeHost: f.h, release: make(chan struct{})}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	probe, err := h.Probe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bg := &steps{cancel: cancel}
+	if err := f.s.pass(ctx, f.cfg, h, &probe, bg); err != nil {
+		t.Fatal(err)
+	}
+	h.afterPoll = func() {
+		close(h.release)
+		bg.wg.Wait()
+	}
+	if err := f.s.pass(ctx, f.cfg, h, &probe, bg); err != nil {
+		t.Fatal(err)
+	}
+	bg.wg.Wait()
+	if err := context.Cause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if j := f.job(t, id); j.State != Running {
+		t.Fatalf("a snapshot taken before the launch ended must not judge it: %+v", j)
+	}
+	h.afterPoll = nil
+	mustTick(t, f.s, f.cfg, h)
+	j := f.job(t, id)
+	if c := f.h.containers[j.current().ID]; j.State != Running || c == nil || j.current().ContainerID != c.ID || len(f.h.launches) != 1 {
+		t.Fatalf("the next pass must find the launched container: %+v", j)
+	}
+}
+
 type gpuHost struct {
 	*fakeHost
 	gpus    []pool.GPU
