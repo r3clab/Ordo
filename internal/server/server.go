@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -997,8 +998,8 @@ func (s *Server) nested(out string, pending map[string]record) string {
 	return ""
 }
 
-func (s *Server) Run(ctx context.Context, port uint16) error {
-	web, err := listenWeb(port)
+func (s *Server) Run(ctx context.Context, host string, port uint16) error {
+	web, err := listenWeb(host, port)
 	if err != nil {
 		return err
 	}
@@ -1015,7 +1016,7 @@ func (s *Server) Run(ctx context.Context, port uint16) error {
 	s.spawn(child, &wg)
 	wg.Go(func() { s.tidy(child) })
 	api := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	public := &http.Server{Handler: s.WebHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+	public := &http.Server{Handler: s.WebHandler(!web.Addr().(*net.TCPAddr).IP.IsLoopback()), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 2)
 	go func() { done <- api.Serve(listener) }()
 	go func() { done <- public.Serve(web) }()

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,7 +20,7 @@ import (
 func TestWebCancellationAndLogs(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil)
 	defer func() { _ = s.Close() }()
-	h := s.WebHandler()
+	h := s.WebHandler(false)
 	request := func(method, path, host, origin string, body []byte) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, "http://127.0.0.1:7331"+path, bytes.NewReader(body))
 		if host != "" {
@@ -160,7 +159,7 @@ func TestFollowStreamsFromTheWorkerThenTheCollectedLog(t *testing.T) {
 
 func TestJobListConditionalRequests(t *testing.T) {
 	f := newFixture(t)
-	h := f.s.WebHandler()
+	h := f.s.WebHandler(false)
 	get := func(method, path, etag string) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "http://127.0.0.1:7331"+path, nil)
@@ -244,20 +243,41 @@ func TestJobListETagIsStableWithEqualCreationTimes(t *testing.T) {
 	}
 }
 
-func TestWebListenerIsLoopbackOnly(t *testing.T) {
-	l, err := listenWeb(0)
+func TestWebHostsBeyondLoopback(t *testing.T) {
+	s := open(t, filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil)
+	defer func() { _ = s.Close() }()
+	hostname, err := os.Hostname()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = l.Close() }()
-	if addr := l.Addr().(*net.TCPAddr); !addr.IP.IsLoopback() {
-		t.Fatal("unsafe bind", addr)
+	for _, c := range []struct {
+		exposed bool
+		host    string
+		code    int
+	}{
+		{false, "localhost:7331", 200},
+		{false, "192.0.2.1:7331", 403},
+		{false, "evil.example:7331", 403},
+		{true, "127.0.0.1:7331", 200},
+		{true, strings.ToUpper(hostname) + ":7331", 200},
+		{true, "192.0.2.1:7331", 200},
+		{true, "[2001:db8::1]:7331", 200},
+		{true, "evil.example:7331", 403},
+		{true, hostname + ".evil.example:7331", 403},
+	} {
+		r := httptest.NewRequest("GET", "http://127.0.0.1:7331/v1/workers", nil)
+		r.Host = c.host
+		w := httptest.NewRecorder()
+		s.WebHandler(c.exposed).ServeHTTP(w, r)
+		if w.Code != c.code {
+			t.Errorf("exposed %v, host %s: %d, want %d", c.exposed, c.host, w.Code, c.code)
+		}
 	}
 }
 func TestWebHTTPRoundTrip(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "server"), []worker.Config{testWorker("worker")}, nil)
 	defer func() { _ = s.Close() }()
-	srv := httptest.NewServer(s.WebHandler())
+	srv := httptest.NewServer(s.WebHandler(false))
 	defer srv.Close()
 	response, err := srv.Client().Get(srv.URL + "/v1/workers")
 	if err != nil {

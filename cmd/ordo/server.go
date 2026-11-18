@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -30,6 +32,7 @@ func decodeFile(file string, value any) error {
 var defaultSkopeo = "skopeo"
 
 type serverConfig struct {
+	Host      string            `json:"host"`
 	Port      uint16            `json:"port"`
 	Workers   []worker.Config   `json:"workers"`
 	Services  map[string]string `json:"services,omitempty"`
@@ -72,7 +75,7 @@ func stateFlag(f *flag.FlagSet, root *string) {
 }
 
 func loadServerConfig(file string) (serverConfig, error) {
-	c := serverConfig{Port: 7331}
+	c := serverConfig{Host: "127.0.0.1", Port: 7331}
 	if err := decodeFile(file, &c); err != nil {
 		return c, fmt.Errorf("server config: %w", err)
 	}
@@ -82,7 +85,7 @@ func loadServerConfig(file string) (serverConfig, error) {
 	return c, nil
 }
 
-const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), port, services, ssh_config. Secrets are files in the secrets directory beside it. SIGHUP reloads the config; a new port takes effect on restart."
+const serverUsage = "Usage: ordo server [--config FILE] [--state DIR]\n\nThe config (default $ORDO_CONFIG, else $XDG_CONFIG_HOME/ordo/server.json) is a JSON object: workers (required), host, port, services, ssh_config. Secrets are files in the secrets directory beside it. SIGHUP reloads the config; a new host or port takes effect on restart."
 
 func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("server")
@@ -111,14 +114,14 @@ func serverCommand(ctx context.Context, args []string, out io.Writer) error {
 	defer signal.Stop(hangups)
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
-	wg.Go(func() { reloadOnHangup(ctx, hangups, s, *file, c.Port) })
-	err = s.Run(ctx, c.Port)
+	wg.Go(func() { reloadOnHangup(ctx, hangups, s, *file, c.Host, c.Port) })
+	err = s.Run(ctx, c.Host, c.Port)
 	cancel()
 	wg.Wait()
 	return errors.Join(err, s.Close())
 }
 
-func reloadOnHangup(ctx context.Context, hangups <-chan os.Signal, s *server.Server, file string, port uint16) {
+func reloadOnHangup(ctx context.Context, hangups <-chan os.Signal, s *server.Server, file, host string, port uint16) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -132,8 +135,8 @@ func reloadOnHangup(ctx context.Context, hangups <-chan os.Signal, s *server.Ser
 		switch {
 		case err != nil:
 			fmt.Fprintf(os.Stderr, "reload: %v\n", err)
-		case c.Port != port:
-			fmt.Fprintf(os.Stderr, "reloaded; port %d takes effect on restart\n", c.Port)
+		case c.Host != host || c.Port != port:
+			fmt.Fprintf(os.Stderr, "reloaded; web UI address %s takes effect on restart\n", net.JoinHostPort(c.Host, strconv.Itoa(int(c.Port))))
 		default:
 			fmt.Fprintln(os.Stderr, "reloaded")
 		}

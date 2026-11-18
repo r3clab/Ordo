@@ -139,7 +139,8 @@ An interrupt cancels the job and exits 130.
 ## Monitor and control
 
 Open the [web UI](http://127.0.0.1:7331) to view workers, jobs, and collected logs.
-For remote access, use [SSH forwarding](https://github.com/r3clab/Ordo/wiki/Command-map#web-ui).
+For remote access, use [SSH forwarding](https://github.com/r3clab/Ordo/wiki/Command-map#web-ui), or set `"host": "0.0.0.0"` in `server.json` to serve it on every interface at the server's hostname or IP address.
+The web UI has no login, so anyone who reaches that port can read logs and stop or cancel jobs.
 
 ```sh
 ordo queue list

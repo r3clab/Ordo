@@ -46,7 +46,7 @@ func TestServerConfigDefaultsAndResolvesPaths(t *testing.T) {
 	}
 	write(`{"workers":[{"host":"vegeta","cpus":"0-3","memory_mib":512}],"ssh_config":"ssh_config"}`)
 	c, err := loadServerConfig(file)
-	if err != nil || c.Port != 7331 || len(c.Workers) != 1 || c.Workers[0].StateDir != "" {
+	if err != nil || c.Host != "127.0.0.1" || c.Port != 7331 || len(c.Workers) != 1 || c.Workers[0].StateDir != "" {
 		t.Fatalf("%+v %v", c, err)
 	}
 	if c.SSHConfig != filepath.Join(dir, "ssh_config") {

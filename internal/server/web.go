@@ -72,8 +72,8 @@ func (s *Server) Workers() []WorkerStatus {
 	}
 	return result
 }
-func listenWeb(port uint16) (net.Listener, error) {
-	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+func listenWeb(host string, port uint16) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
 }
 
 func loopback(host string) bool {
@@ -83,8 +83,17 @@ func loopback(host string) bool {
 
 // WebHandler has no authentication: the host is meant for one user, whose processes could read any
 // credential the server kept, and the Host and Origin checks turn away other sites in that user's browser.
-func (s *Server) WebHandler() http.Handler {
+// Served beyond loopback, it also accepts IP literals and the machine's own hostname as Host, which a
+// DNS rebinding site cannot make the browser send; anyone who reaches the port can then use it.
+func (s *Server) WebHandler(exposed bool) http.Handler {
 	api := s.routes()
+	hostname, _ := os.Hostname()
+	allowed := func(host string) bool {
+		if host == "localhost" || loopback(host) {
+			return true
+		}
+		return exposed && (net.ParseIP(host) != nil || hostname != "" && strings.EqualFold(host, hostname))
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -95,8 +104,8 @@ func (s *Server) WebHandler() http.Handler {
 			http.Error(w, "invalid host", 400)
 			return
 		}
-		if host != "localhost" && !loopback(host) {
-			http.Error(w, "loopback host required", http.StatusForbidden)
+		if !allowed(host) {
+			http.Error(w, "host not served", http.StatusForbidden)
 			return
 		}
 		if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
