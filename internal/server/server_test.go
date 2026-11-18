@@ -890,6 +890,24 @@ func TestReloadRejectsStrandingUnfinishedJobs(t *testing.T) {
 	}
 }
 
+func TestReloadRemovesWorkerOfCancelledJobs(t *testing.T) {
+	root := t.TempDir()
+	a, b := testWorker("a"), testWorker("b")
+	s := open(t, filepath.Join(root, "state"), []worker.Config{a, b}, nil)
+	defer func() { _ = s.Close() }()
+	id := submit(t, s, jobRequest(filepath.Join(root, "running")))
+	mustTick(t, s, a, newFakeHost(s.id))
+	if err := s.Cancel(id, "worker a is gone"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(Config{Workers: []worker.Config{b}}); err != nil {
+		t.Fatal(err)
+	}
+	if j := mustJob(t, s, id); j.State != Cancelled || j.current().Worker != "a" || j.current().Failure != CancelFailure {
+		t.Fatalf("job %+v", j)
+	}
+}
+
 func TestReloadChecksOnlyStepsAhead(t *testing.T) {
 	root := t.TempDir()
 	s := open(t, filepath.Join(root, "state"), []worker.Config{testWorker("a", "fast")}, nil)

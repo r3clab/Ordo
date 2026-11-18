@@ -151,6 +151,7 @@ ordo queue cancel --out results/word-count
 
 `stop` ends the running step and keeps its outputs.
 `cancel` abandons the job without delivering outputs.
+A cancel finishes once the job's worker answers; to give up on a worker that will not come back, cancel its jobs, remove it from `server.json`, and reload, which ends them as cancelled and leaves their containers on it.
 See the [command reference](https://github.com/r3clab/Ordo/wiki/Command-map) for selectors and recovery behavior.
 
 ## Acknowledgements

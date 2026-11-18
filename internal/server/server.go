@@ -361,12 +361,23 @@ func (s *Server) configure(next *settings) error {
 	s.write.Lock()
 	defer s.write.Unlock()
 	prev := s.settings.Load()
+	var dropped []Job
 	for _, j := range s.jobs {
 		if j.running() {
 			host := j.current().Worker
 			w, ok := next.worker(host)
+			// A cancelled job delivers nothing, so it need not wait for a worker that may never return.
+			// Its container stays there until the worker is configured again and swept.
+			if !ok && j.CancelRequested {
+				j = j.clone()
+				j.current().Failure = CancelFailure
+				j.State = Cancelled
+				j.Error = "worker " + host + " removed from the configuration"
+				dropped = append(dropped, j)
+				continue
+			}
 			if !ok {
-				return fmt.Errorf("configuration removes worker %s, which has unfinished attempts", host)
+				return fmt.Errorf("configuration removes worker %s, which has unfinished attempts that are not cancelled", host)
 			}
 			if old, ok := prev.worker(host); ok && old.StateDir != w.StateDir {
 				return fmt.Errorf("configuration moves the state_dir of worker %s, which has unfinished attempts", host)
@@ -375,6 +386,9 @@ func (s *Server) configure(next *settings) error {
 		if err := s.checkJob(next, j); err != nil {
 			return fmt.Errorf("unfinished job %s: %w", cmp.Or(j.Out, j.ID), err)
 		}
+	}
+	if err := s.commit(dropped...); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
