@@ -12,7 +12,7 @@ pkgs.buildGoModule (finalAttrs: {
       (pkgs.lib.fileset.fileFilter (file: file.hasExt "go") ../.)
     ];
   };
-  vendorHash = "sha256-1/y0N4O17LikYdDZfQPAJYygguGvbQPMFA+K6ayJYiY=";
+  vendorHash = "sha256-zQKpQF4PDEWHgJOQSTCUKnXVGJ4LelPbCakpiT/lp4w=";
   env.CGO_ENABLED = "0";
   subPackages = [ "cmd/ordo" ];
   ldflags = [ "-X main.defaultSkopeo=${perSystem.nix2container.skopeo-nix2container}/bin/skopeo" ];
