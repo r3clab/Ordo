@@ -130,11 +130,13 @@ func TestSubmitTagAddsToEachStepsTags(t *testing.T) {
 		`{"out":"one",` + step + `,"tags":["fast"]}`,
 		`{"out":"two","steps":[{` + step + `},{` + step + `,"tags":["eval"]}]}`,
 		`{"out":"bad",` + step + `,"tags":"fast"}`,
+		`null`,
+		`{"out":"null-step","steps":[null]}`,
 	}, "\n")
 	t.Chdir(dir)
 	out, err := runWith(t, jobs, "submit", "--state", root, "--tag", "eval", "--tag", "eval")
 	results := decodeLines[server.BatchResult](t, out)
-	if err == nil || len(results) != 3 || results[0].Error != "" || results[1].Error != "" || results[2].Error == "" {
+	if err == nil || len(results) != 5 || results[0].Error != "" || results[1].Error != "" || results[2].Error == "" || results[3].Error == "" || results[4].Error == "" {
 		t.Fatalf("submit: %+v %v", results, err)
 	}
 	for out, want := range map[string][][]string{"one": {{"eval", "fast"}}, "two": {{"eval"}, {"eval"}}} {

@@ -235,7 +235,7 @@ func addTags(fields map[string]json.RawMessage, tags []string) {
 
 func merge(fields map[string]json.RawMessage, tags []string) {
 	var own []string
-	if raw, ok := fields["tags"]; ok && json.Unmarshal(raw, &own) != nil {
+	if raw, ok := fields["tags"]; fields == nil || ok && json.Unmarshal(raw, &own) != nil {
 		return
 	}
 	fields["tags"], _ = json.Marshal(slices.Compact(slices.Sorted(slices.Values(append(own, tags...)))))
