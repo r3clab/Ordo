@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/r3clab/Ordo/internal/server"
@@ -19,14 +21,16 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const submitUsage = "Usage: ordo submit [--state DIR] [--file JOBS.jsonl] [--wait]\n\nReads one job per line (stdin by default) and prints one result per line. Relative out and input\npaths are taken from the current directory. A line whose out already holds results is done and\nqueues nothing; resubmitting a line whose job is unfinished returns that job. A line without out\ndelivers nothing and is never matched to another. --wait then prints each job's line again with its\nfinal state as it finishes.\n\nExits 1 if a job did not succeed, 2 if a line was refused, and 3 if the server did not answer."
+const submitUsage = "Usage: ordo submit [--state DIR] [--file JOBS.jsonl] [--tag TAG]... [--wait]\n\nReads one job per line (stdin by default) and prints one result per line. Relative out and input\npaths are taken from the current directory. --tag adds its tags to each step's own, so the jobs run\nonly on workers with them. A line whose out already holds results is done and queues nothing;\nresubmitting a line whose job is unfinished returns that job. A line without out delivers nothing\nand is never matched to another. --wait then prints each job's line again with its final state as it\nfinishes.\n\nExits 1 if a job did not succeed, 2 if a line was refused, and 3 if the server did not answer."
 
 func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := newFlags("submit")
 	var root, file string
+	var tags tagList
 	var wait bool
 	stateFlag(f, &root)
 	f.StringVar(&file, "file", "-", "JSONL jobs, or - for stdin")
+	f.Var(&tags, "tag", "run every job only on workers with this tag")
 	f.BoolVar(&wait, "wait", false, "wait for the submitted jobs to finish")
 	if err := parse(f, args, out, submitUsage); err != nil {
 		return err
@@ -43,7 +47,7 @@ func submitCommand(ctx context.Context, args []string, out io.Writer) error {
 		defer func() { _ = jobs.Close() }()
 		input = jobs
 	}
-	body, err := absolutize(input)
+	body, err := rewrite(input, tags)
 	if err != nil {
 		return err
 	}
@@ -155,10 +159,19 @@ func await(ctx context.Context, client *http.Client, encoder *json.Encoder, queu
 	return nil
 }
 
-// absolutize resolves each line's relative out and input paths here, as the server knows nothing of
-// this directory. It keeps every line, so the server's line numbers still match; one it cannot parse
-// goes through unchanged for the server to report.
-func absolutize(r io.Reader) ([]byte, error) {
+type tagList []string
+
+func (t *tagList) String() string { return strings.Join(*t, ",") }
+
+func (t *tagList) Set(tag string) error {
+	*t = append(*t, tag)
+	return nil
+}
+
+// rewrite resolves each line's relative out and input paths here, as the server knows nothing of
+// this directory, and adds tags to each of its steps. It keeps every line, so the server's line
+// numbers still match; one it cannot parse goes through unchanged for the server to report.
+func rewrite(r io.Reader, tags []string) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(nil, server.MaxBatchLine)
 	var body bytes.Buffer
@@ -166,6 +179,7 @@ func absolutize(r io.Reader) ([]byte, error) {
 		line := scanner.Bytes()
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(line, &fields) == nil {
+			addTags(fields, tags)
 			resolved, err := resolvePaths(fields)
 			if err != nil {
 				return nil, err
@@ -199,4 +213,30 @@ func resolvePaths(fields map[string]json.RawMessage) ([]byte, error) {
 		fields["inputs"], _ = json.Marshal(inputs)
 	}
 	return json.Marshal(fields)
+}
+
+func addTags(fields map[string]json.RawMessage, tags []string) {
+	if len(tags) == 0 {
+		return
+	}
+	var steps []map[string]json.RawMessage
+	if raw, ok := fields["steps"]; ok && json.Unmarshal(raw, &steps) != nil {
+		return
+	}
+	if len(steps) == 0 {
+		merge(fields, tags)
+		return
+	}
+	for _, step := range steps {
+		merge(step, tags)
+	}
+	fields["steps"], _ = json.Marshal(steps)
+}
+
+func merge(fields map[string]json.RawMessage, tags []string) {
+	var own []string
+	if raw, ok := fields["tags"]; ok && json.Unmarshal(raw, &own) != nil {
+		return
+	}
+	fields["tags"], _ = json.Marshal(slices.Compact(slices.Sorted(slices.Values(append(own, tags...)))))
 }

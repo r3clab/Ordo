@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -43,11 +44,11 @@ func decodeLines[T any](t *testing.T, data []byte) []T {
 	return out
 }
 
-func testServer(t *testing.T) (string, *imagetest.Nix) {
+func testServer(t *testing.T, tags ...string) (string, *imagetest.Nix) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "server")
 	fake := imagetest.New("sha256:" + strings.Repeat("a", 64))
-	s, err := server.Open(server.Config{Root: root, Workers: []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024}}, Tools: image.Tools{Exec: fake.Exec}})
+	s, err := server.Open(server.Config{Root: root, Workers: []worker.Config{{Host: "worker", StateDir: "/srv/ordo", CPUs: "0-3", MemoryMiB: 1024, Tags: tags}}, Tools: image.Tools{Exec: fake.Exec}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +119,37 @@ func TestSubmitResolvesPathsAndSkipsDeliveredJobs(t *testing.T) {
 	listed, err := runWith(t, "", "queue", "list", "--state", root, "--under", filepath.Join(dir, "results", "b"))
 	if jobs := decodeLines[[]server.Summary](t, listed); err != nil || len(jobs) != 1 || len(jobs[0]) != 1 || jobs[0][0].State != server.Cancelled {
 		t.Fatalf("list under: %s %v", listed, err)
+	}
+}
+
+func TestSubmitTagAddsToEachStepsTags(t *testing.T) {
+	root, _ := testServer(t, "eval", "fast")
+	dir := t.TempDir()
+	step := `"image":"/src#image","resources":{"cores":1,"memory_mib":128}`
+	jobs := strings.Join([]string{
+		`{"out":"one",` + step + `,"tags":["fast"]}`,
+		`{"out":"two","steps":[{` + step + `},{` + step + `,"tags":["eval"]}]}`,
+		`{"out":"bad",` + step + `,"tags":"fast"}`,
+	}, "\n")
+	t.Chdir(dir)
+	out, err := runWith(t, jobs, "submit", "--state", root, "--tag", "eval", "--tag", "eval")
+	results := decodeLines[server.BatchResult](t, out)
+	if err == nil || len(results) != 3 || results[0].Error != "" || results[1].Error != "" || results[2].Error == "" {
+		t.Fatalf("submit: %+v %v", results, err)
+	}
+	for out, want := range map[string][][]string{"one": {{"eval", "fast"}}, "two": {{"eval"}, {"eval"}}} {
+		got, err := runWith(t, "", "queue", "get", "--state", root, "--out", out)
+		var job server.Job
+		if err != nil || json.Unmarshal(got, &job) != nil {
+			t.Fatalf("get %s: %s %v", out, got, err)
+		}
+		var tags [][]string
+		for _, stage := range job.Steps {
+			tags = append(tags, stage.Spec.Tags)
+		}
+		if !slices.EqualFunc(tags, want, slices.Equal) {
+			t.Fatalf("%s: steps tagged %v, want %v", out, tags, want)
+		}
 	}
 }
 

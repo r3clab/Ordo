@@ -95,6 +95,7 @@ ordo submit --file jobs.jsonl --wait
 ```
 
 Each line is a job.
+`--tag TAG`, which repeats, adds to each step's own `tags`, so whoever submits the jobs picks the workers they may run on.
 `--wait` reports final results, still following the accepted jobs when other lines are refused.
 Its exit status tells callers which outcome they got, and when several apply the highest wins:
 
